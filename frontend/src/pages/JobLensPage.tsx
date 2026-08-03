@@ -13,6 +13,10 @@ import VendorManagementTab from "../components/candidatetrack/VendorManagementTa
 import CandidateTrackingTab from "../components/candidatetrack/CandidateTrackingTab";
 import ClientManagementTab from "../components/candidatetrack/ClientManagementTab";
 import DataTable from "../components/DataTable";
+import {
+  SliderRow, ScoringWeights, DEFAULT_SCORING_WEIGHTS,
+  ScoringDisqualifiers, DEFAULT_DISQUALIFIERS, ScoreBreakdownGrid, JDLinkFetcher,
+} from "./CVIntelPage";
 
 // Fetches a protected file (video/resume) via the authenticated axios
 // client — a plain <a href> wouldn't carry the Bearer token, since that's
@@ -29,6 +33,130 @@ async function openBlobInNewTab(url: string, fallbackType?: string) {
   }
 }
 import HistoryDropdown from "../components/HistoryDropdown";
+
+// ── Scoring Weights & Logistics Constraints panel (CandidateLens) ─────────
+// Same dynamic weighting engine as CVIntel (reuses SliderRow/ScoringWeights
+// from CVIntelPage), plus the JD-side logistics constraints CandidateLens
+// needs up front for a whole batch: salary budget, max notice, remote OK.
+function CandidateLensWeightsPanel({
+  weights, setWeights, disqualifiers, setDisqualifiers,
+  salaryMin, setSalaryMin, salaryMax, setSalaryMax,
+  maxNotice, setMaxNotice, remoteAllowed, setRemoteAllowed,
+}: {
+  weights: ScoringWeights; setWeights: (w: ScoringWeights) => void;
+  disqualifiers: ScoringDisqualifiers; setDisqualifiers: (d: ScoringDisqualifiers) => void;
+  salaryMin: number; setSalaryMin: (v: number) => void;
+  salaryMax: number; setSalaryMax: (v: number) => void;
+  maxNotice: number; setMaxNotice: (v: number) => void;
+  remoteAllowed: boolean; setRemoteAllowed: (v: boolean) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const pct = (v: number) => Math.round(v * 100);
+  const frac = (v: number) => v / 100;
+  const inputStyle = {
+    width: "100%", padding: "6px 10px", fontSize: 12.5, border: "1px solid var(--border)",
+    borderRadius: 8, background: "var(--bg-tertiary)", color: "var(--text-primary)",
+  } as const;
+
+  return (
+    <div style={{ border: "1.5px solid var(--border)", borderRadius: 10, overflow: "hidden", marginTop: 16, marginBottom: 16 }}>
+      <button type="button" onClick={() => setOpen(o => !o)} style={{
+        width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between",
+        padding: "10px 14px", background: open ? "var(--bg-secondary)" : "transparent",
+        border: "none", cursor: "pointer", fontSize: 13, fontWeight: 600,
+        color: open ? "var(--text-primary)" : "var(--text-secondary)",
+      }}>
+        <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <BarChart2 size={13} color="var(--text-muted)" />
+          Scoring Weights &amp; Logistics Constraints
+          <span style={{ fontSize: 10, padding: "2px 8px", borderRadius: 10, background: "var(--bg-tertiary)", color: "var(--text-muted)", fontWeight: 600 }}>
+            {pct(weights.technical_overall)}% tech / {pct(weights.non_technical_overall)}% logistics
+          </span>
+        </span>
+        {open ? <ChevronUp size={14} color="var(--text-muted)" /> : <ChevronDown size={14} color="var(--text-muted)" />}
+      </button>
+      {open && (
+        <div style={{ padding: 14 }}>
+          <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginBottom: 14, lineHeight: 1.5 }}>
+            Set the role's budget/notice constraints once for this batch — every candidate's
+            expected salary, notice period, and location (auto-extracted from their resume) is
+            scored against these. Weights control how much logistics fit affects ranking vs.
+            technical skill match, and can be re-applied to already-scored candidates instantly.
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 16 }}>
+            <div>
+              <label style={{ fontSize: 11, color: "var(--text-muted)", fontWeight: 600 }}>Salary budget min ($)</label>
+              <input type="number" min={0} value={salaryMin || ""} placeholder="e.g. 90000"
+                onChange={e => setSalaryMin(Number(e.target.value) || 0)} style={inputStyle} />
+            </div>
+            <div>
+              <label style={{ fontSize: 11, color: "var(--text-muted)", fontWeight: 600 }}>Salary budget max ($)</label>
+              <input type="number" min={0} value={salaryMax || ""} placeholder="e.g. 120000"
+                onChange={e => setSalaryMax(Number(e.target.value) || 0)} style={inputStyle} />
+            </div>
+            <div>
+              <label style={{ fontSize: 11, color: "var(--text-muted)", fontWeight: 600 }}>Max notice period (days)</label>
+              <input type="number" min={0} value={maxNotice || ""} placeholder="e.g. 30"
+                onChange={e => setMaxNotice(Number(e.target.value) || 0)} style={inputStyle} />
+            </div>
+          </div>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, marginBottom: 16, cursor: "pointer" }}>
+            <input type="checkbox" checked={remoteAllowed} onChange={e => setRemoteAllowed(e.target.checked)} />
+            Remote / work-from-home allowed for this role
+          </label>
+
+          <SliderRow label="Technical weight (vs. Non-Technical)" value={pct(weights.technical_overall)}
+            onChange={v => setWeights({ ...weights, technical_overall: frac(v), non_technical_overall: frac(100 - v) })} />
+
+          <div style={{ marginTop: 14, marginBottom: 8, fontSize: 11.5, fontWeight: 700, color: "var(--text-secondary)", textTransform: "uppercase", letterSpacing: 0.3 }}>
+            Technical track
+          </div>
+          <SliderRow label="Core skills coverage" value={pct(weights.tech_core_skills)}
+            onChange={v => setWeights({ ...weights, tech_core_skills: frac(v) })} />
+          <SliderRow label="Experience fit" value={pct(weights.tech_experience)}
+            onChange={v => setWeights({ ...weights, tech_experience: frac(v) })} />
+          <SliderRow label="Education fit" value={pct(weights.tech_education)}
+            onChange={v => setWeights({ ...weights, tech_education: frac(v) })} />
+          <SliderRow label="Good-to-have bonus" value={pct(weights.tech_good_to_have)}
+            onChange={v => setWeights({ ...weights, tech_good_to_have: frac(v) })} />
+
+          <div style={{ marginTop: 14, marginBottom: 8, fontSize: 11.5, fontWeight: 700, color: "var(--text-secondary)", textTransform: "uppercase", letterSpacing: 0.3 }}>
+            Non-technical track
+          </div>
+          <SliderRow label="Salary vs. budget" value={pct(weights.nontech_salary)}
+            onChange={v => setWeights({ ...weights, nontech_salary: frac(v) })} />
+          <SliderRow label="Notice period fit" value={pct(weights.nontech_notice)}
+            onChange={v => setWeights({ ...weights, nontech_notice: frac(v) })} />
+          <SliderRow label="Location / remote fit" value={pct(weights.nontech_location)}
+            onChange={v => setWeights({ ...weights, nontech_location: frac(v) })} />
+
+          <div style={{ marginTop: 14, marginBottom: 8, fontSize: 11.5, fontWeight: 700, color: "var(--text-secondary)", textTransform: "uppercase", letterSpacing: 0.3 }}>
+            Hard disqualifiers
+          </div>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, marginBottom: 8, cursor: "pointer" }}>
+            <input type="checkbox" checked={disqualifiers.enabled}
+              onChange={e => setDisqualifiers({ ...disqualifiers, enabled: e.target.checked })} />
+            Enable hard disqualifiers (auto-mark "Not Qualified" regardless of score)
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, marginBottom: 8, cursor: "pointer", opacity: disqualifiers.enabled ? 1 : 0.5 }}>
+            <input type="checkbox" checked={disqualifiers.notice_hard_limit} disabled={!disqualifiers.enabled}
+              onChange={e => setDisqualifiers({ ...disqualifiers, notice_hard_limit: e.target.checked })} />
+            Reject if notice period exceeds the max above
+          </label>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, opacity: disqualifiers.enabled ? 1 : 0.5 }}>
+            <span>Reject if expected salary exceeds budget by more than</span>
+            <input type="number" min={0} max={200} value={disqualifiers.salary_overrun_pct} disabled={!disqualifiers.enabled}
+              onChange={e => setDisqualifiers({ ...disqualifiers, salary_overrun_pct: Number(e.target.value) })}
+              style={{ width: 56, padding: "3px 6px", fontSize: 12, border: "1px solid var(--border)", borderRadius: 6, background: "var(--bg-tertiary)", color: "var(--text-primary)" }} />
+            <span>%</span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 
 // ─── API ───────────────────────────────────────────────────────────────────
 const jobLensApi = {
@@ -690,6 +818,12 @@ function CandidateRow({
           <div><ScoreCell score={c.ats_score} low={lowT} high={highT} /></div>
           <ProgressBar value={c.ats_score}
             color={c.ats_score >= highT ? "#10b981" : c.ats_score >= lowT ? "#f59e0b" : "#ef4444"} />
+          {c.technical_score != null && (
+            <div style={{ fontSize: 9.5, color: "var(--text-muted)", marginTop: 3, lineHeight: 1.5 }}>
+              Tech {Math.round(c.technical_score)}%
+              {c.non_technical_score != null && <> · Logistics {Math.round(c.non_technical_score)}%</>}
+            </div>
+          )}
         </td>
 
         {/* Key Strength — categorized by JD tier (Essential/Preferred) and skill type (Technical/Business) */}
@@ -728,7 +862,14 @@ function CandidateRow({
           )}
         </td>
 
-        <td><StatusBadge status={c.status} /></td>
+        <td>
+          <StatusBadge status={c.status} />
+          {c.status === "Not Qualified" && c.hard_disqualified && c.disqualify_reason && (
+            <div style={{ fontSize: 10, color: "#ef4444", marginTop: 4, maxWidth: 160, lineHeight: 1.4 }}>
+              ({c.disqualify_reason})
+            </div>
+          )}
+        </td>
 
         <td>
           <button className="tiq-btn tiq-btn-outline tiq-btn-sm"
@@ -745,6 +886,12 @@ function CandidateRow({
               <div style={{ marginBottom: 16, paddingBottom: 14, borderBottom: "1px solid var(--border)" }}>
                 <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", color: "var(--text-muted)", marginBottom: 6 }}>Profile Summary</div>
                 <div style={{ fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.6 }}>{c.summary}</div>
+              </div>
+            )}
+
+            {c.strengths_breakdown?.scoreBreakdown && (
+              <div style={{ marginBottom: 16, paddingBottom: 14, borderBottom: "1px solid var(--border)" }}>
+                <ScoreBreakdownGrid breakdown={c.strengths_breakdown.scoreBreakdown} />
               </div>
             )}
 
@@ -1057,6 +1204,27 @@ export default function JobLensPage() {
   });
   const [lowT, setLowT] = useState(40);
   const [highT, setHighT] = useState(70);
+  // ── Dual-track scoring: dynamic weights + logistics constraints ──────
+  const [clWeights, setClWeights] = useState<ScoringWeights>(DEFAULT_SCORING_WEIGHTS);
+  const [clDisqualifiers, setClDisqualifiers] = useState<ScoringDisqualifiers>(DEFAULT_DISQUALIFIERS);
+  const [salaryMin, setSalaryMin] = useState(0);
+  const [salaryMax, setSalaryMax] = useState(0);
+  const [maxNotice, setMaxNotice] = useState(0);
+  const [remoteAllowed, setRemoteAllowed] = useState(false);
+  const [showReweightPanel, setShowReweightPanel] = useState(false);
+  const reweightMut = useMutation({
+    mutationFn: (sessionId: number) => api.post(`/api/joblens/sessions/${sessionId}/reweight`, {
+      weights: clWeights,
+      disqualifiers: clDisqualifiers,
+      salary_budget_min: salaryMin,
+      salary_budget_max: salaryMax,
+      max_notice_days: maxNotice,
+      remote_allowed: remoteAllowed,
+    }).then(r => r.data),
+    onSuccess: () => {
+      if (activeSessionId) qc.invalidateQueries({ queryKey: ["joblens-session", activeSessionId] });
+    },
+  });
   const [activeSessionId, setActiveSessionId] = useState<number | null>(null);
   const [tab, setTab] = useState<"new"|"history"|"management">("new");
   const [managementView, setManagementView] = useState<"tracking"|"clients"|"jds"|"vendors">("tracking");
@@ -1093,6 +1261,26 @@ export default function JobLensPage() {
     },
   });
 
+  // Whenever a session finishes loading, pre-fill the weight sliders and
+  // logistics inputs with what was actually used for it — so reopening a
+  // past session to tweak it starts from "what it already had", not the
+  // global defaults, and the Reweight panel always reflects reality.
+  const lastSyncedSessionId = useRef<number | null>(null);
+  useEffect(() => {
+    if (!activeSession || activeSession.id === lastSyncedSessionId.current) return;
+    lastSyncedSessionId.current = activeSession.id;
+    if (activeSession.weights && Object.keys(activeSession.weights).length) {
+      setClWeights({ ...DEFAULT_SCORING_WEIGHTS, ...activeSession.weights });
+    }
+    if (activeSession.disqualifiers && Object.keys(activeSession.disqualifiers).length) {
+      setClDisqualifiers({ ...DEFAULT_DISQUALIFIERS, ...activeSession.disqualifiers });
+    }
+    setSalaryMin(activeSession.salary_budget_min || 0);
+    setSalaryMax(activeSession.salary_budget_max || 0);
+    setMaxNotice(activeSession.max_notice_days || 0);
+    setRemoteAllowed(!!activeSession.jd_remote_allowed);
+  }, [activeSession]);
+
   const runMut = useMutation({
     mutationKey: ["joblens-run"],
     mutationFn: () => {
@@ -1104,6 +1292,12 @@ export default function JobLensPage() {
       if (jdSource === "jdManagement" && selectedJdRecordId) form.append("jd_record_id", String(selectedJdRecordId));
       if (cvSource === "upload" && cvFiles) for (let i = 0; i < cvFiles.length; i++) form.append("cv_files", cvFiles[i]);
       if (cvSource === "vendor" && selectedVendorCandidateIds.length) form.append("source_candidate_ids", selectedVendorCandidateIds.join(","));
+      form.append("weights", JSON.stringify(clWeights));
+      form.append("disqualifiers", JSON.stringify(clDisqualifiers));
+      form.append("salary_budget_min", String(salaryMin));
+      form.append("salary_budget_max", String(salaryMax));
+      form.append("max_notice_days", String(maxNotice));
+      form.append("remote_allowed", String(remoteAllowed));
       return jobLensApi.run(form);
     },
     onSuccess: (data) => {
@@ -1260,6 +1454,12 @@ export default function JobLensPage() {
                   <input ref={jdFileRef} type="file" accept=".txt,.pdf,.doc,.docx" style={{ display: "none" }}
                     onChange={e => setJdFile(e.target.files?.[0] || null)} />
 
+                  <div style={{ marginTop: 10 }}>
+                    <JDLinkFetcher endpoint="/api/joblens/fetch-jd-url" onFetched={(text) => {
+                      setJdText(text); setJdFile(null); setPasteTextOpen(true);
+                    }} />
+                  </div>
+
                   <button type="button" onClick={() => setPasteTextOpen(o => !o)}
                     style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontSize: 12, color: "var(--teal-500)", textDecoration: "underline", marginTop: 4 }}>
                     {pasteTextOpen ? "Hide paste-text box ▲" : (jdText ? "Edit pasted text ▾" : "Or paste text instead ▾")}
@@ -1380,6 +1580,15 @@ export default function JobLensPage() {
               </div>
             </div>
           </div>
+
+          <CandidateLensWeightsPanel
+            weights={clWeights} setWeights={setClWeights}
+            disqualifiers={clDisqualifiers} setDisqualifiers={setClDisqualifiers}
+            salaryMin={salaryMin} setSalaryMin={setSalaryMin}
+            salaryMax={salaryMax} setSalaryMax={setSalaryMax}
+            maxNotice={maxNotice} setMaxNotice={setMaxNotice}
+            remoteAllowed={remoteAllowed} setRemoteAllowed={setRemoteAllowed}
+          />
 
           <div style={{ textAlign: "center" }}>
             <button className="tiq-btn tiq-btn-primary"
@@ -1520,12 +1729,39 @@ export default function JobLensPage() {
                     <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" onClick={() => refetchSession()}>
                       <RefreshCw size={12} />
                     </button>
+                    <button className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={() => setShowReweightPanel(o => !o)}>
+                      <BarChart2 size={12} /> {showReweightPanel ? "Hide Weights" : "Adjust Weights"}
+                    </button>
                     <button className="tiq-btn tiq-btn-outline tiq-btn-sm"
                       onClick={() => exportMut.mutate(activeSessionId!)} disabled={exportMut.isPending}>
                       <Download size={12} /> Export Excel
                     </button>
                   </div>
                 </div>
+                {showReweightPanel && (
+                  <div style={{ padding: "0 16px" }}>
+                    <CandidateLensWeightsPanel
+                      weights={clWeights} setWeights={setClWeights}
+                      disqualifiers={clDisqualifiers} setDisqualifiers={setClDisqualifiers}
+                      salaryMin={salaryMin} setSalaryMin={setSalaryMin}
+                      salaryMax={salaryMax} setSalaryMax={setSalaryMax}
+                      maxNotice={maxNotice} setMaxNotice={setMaxNotice}
+                      remoteAllowed={remoteAllowed} setRemoteAllowed={setRemoteAllowed}
+                    />
+                    <div style={{ textAlign: "right", paddingBottom: 12 }}>
+                      <button className="tiq-btn tiq-btn-primary tiq-btn-sm"
+                        onClick={() => reweightMut.mutate(activeSessionId!)}
+                        disabled={reweightMut.isPending || !activeSessionId}>
+                        {reweightMut.isPending
+                          ? <><span className="tiq-spinner" style={{ width: 12, height: 12, borderWidth: 2 }} /> Re-ranking…</>
+                          : <><Sparkles size={12} /> Re-apply Weights &amp; Re-rank</>}
+                      </button>
+                      <div style={{ fontSize: 10.5, color: "var(--text-muted)", marginTop: 4 }}>
+                        Instant — no AI re-analysis, just recomputes the composite score from what's already extracted.
+                      </div>
+                    </div>
+                  </div>
+                )}
                 <div style={{ overflowX: "auto" }}>
                   <table className="tiq-table" style={{ minWidth: 1100, width: "100%" }}>
                     <thead ref={theadRef}>

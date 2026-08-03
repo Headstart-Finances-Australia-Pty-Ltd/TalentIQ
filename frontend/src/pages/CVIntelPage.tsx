@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   BrainCircuit, FileText, Target, CheckCircle, AlertTriangle,
   TrendingUp, Upload, X, Sparkles, ChevronDown, ChevronUp,
-  User, MapPin, Briefcase, List,
+  User, MapPin, Briefcase, List, Link2,
 } from "lucide-react";
 import { api, cvintelApi } from "../lib/api";
 import { useAuth } from "../hooks/useAuth";
@@ -18,6 +18,7 @@ interface AnalysisResult {
   summaryAssessment: string;
   formatWarnings: string[];
   detailedScores: Record<string, number>;
+  scoreBreakdown?: ScoreBreakdown;
   matchedSkills: string[];
   missingSkills: string[];
   aiPowered?: boolean;
@@ -47,7 +48,63 @@ interface AnalysisResult {
     yearsExperience: number;
     education: string;
   };
+  // ── Dual-track scoring (technical vs. non-technical/logistics) ────────
+  technicalScore?: number;
+  nonTechnicalScore?: number | null;
+  logisticsBreakdown?: {
+    applicable: boolean;
+    salaryScore: number | null;
+    noticeScore: number | null;
+    locationScore: number | null;
+    candidateExpectedSalary: number | null;
+    candidateNoticeDays: number | null;
+    candidateLocation: string | null;
+    jdSalaryBudgetMin: number | null;
+    jdSalaryBudgetMax: number | null;
+    jdMaxNoticeDays: number | null;
+    jdRemoteAllowed: boolean;
+  };
+  hardDisqualified?: boolean;
+  disqualifyReason?: string | null;
+  weightsUsed?: ScoringWeights;
 }
+
+// ── Dynamic weighting engine — mirrors utils/scoring.py's DEFAULT_WEIGHTS ──
+export interface ScoringWeights {
+  technical_overall: number;
+  non_technical_overall: number;
+  tech_core_skills: number;
+  tech_experience: number;
+  tech_education: number;
+  tech_good_to_have: number;
+  nontech_salary: number;
+  nontech_notice: number;
+  nontech_location: number;
+}
+
+export const DEFAULT_SCORING_WEIGHTS: ScoringWeights = {
+  technical_overall: 0.70,
+  non_technical_overall: 0.30,
+  tech_core_skills: 0.60,
+  tech_experience: 0.25,
+  tech_education: 0.10,
+  tech_good_to_have: 0.05,
+  nontech_salary: 0.40,
+  nontech_notice: 0.35,
+  nontech_location: 0.25,
+};
+
+export interface ScoringDisqualifiers {
+  enabled: boolean;
+  notice_hard_limit: boolean;
+  salary_overrun_pct: number;
+}
+
+export const DEFAULT_DISQUALIFIERS: ScoringDisqualifiers = {
+  enabled: true,
+  notice_hard_limit: true,
+  salary_overrun_pct: 25,
+};
 
 interface AnalyseData extends AnalysisResult {
   candidateInfo: any;
@@ -87,6 +144,277 @@ function TextPanel({ label, value, onChange, placeholder }: {
     </div>
   );
 }
+
+// ── JD link fetcher — paste a Seek/LinkedIn/Indeed/etc. job posting URL
+// instead of copy-pasting or uploading the JD. Calls the backend's
+// fetch-jd-url endpoint (see utils/jd_url_fetch.py) and hands the
+// extracted text back via onFetched — the rest of the analysis flow is
+// completely unchanged, since this only changes HOW the JD text field
+// gets populated. Shared between CVIntelPage and JobLensPage; each
+// passes its own endpoint (the two routers expose an identically-shaped
+// endpoint so behavior is the same either way).
+export function JDLinkFetcher({ endpoint, onFetched }: {
+  endpoint: string;
+  onFetched: (jdText: string, meta: { role: string; company: string; location: string; extractionMethod: string }) => void;
+}) {
+  const [url, setUrl] = useState("");
+  const [status, setStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
+  const [message, setMessage] = useState("");
+
+  const handleFetch = async () => {
+    if (!url.trim()) return;
+    setStatus("loading");
+    setMessage("");
+    try {
+      const res = await api.post(endpoint, { url: url.trim() });
+      const { jd_text, role, company, location, extraction_method } = res.data;
+      onFetched(jd_text, { role: role || "", company: company || "", location: location || "", extractionMethod: extraction_method });
+      setStatus("success");
+      setMessage(
+        `Fetched${role ? ` "${role}"` : ""}${company ? ` at ${company}` : ""}` +
+        (extraction_method === "heuristic" ? " — review the text below, some pages extract less cleanly than others." : ".")
+      );
+    } catch (e: any) {
+      setStatus("error");
+      setMessage(e?.response?.data?.detail || "Couldn't fetch that URL. Try pasting the JD text directly instead.");
+    }
+  };
+
+  return (
+    <div style={{ marginBottom: 10 }}>
+      <div style={{ fontSize: 12, color: "var(--text-secondary)", fontWeight: 600, marginBottom: 6 }}>
+        Or paste a job posting link (Seek, LinkedIn, Indeed, etc.)
+      </div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <input
+          type="url"
+          value={url}
+          onChange={e => setUrl(e.target.value)}
+          onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); handleFetch(); } }}
+          placeholder="https://www.seek.com.au/job/..."
+          style={{
+            flex: 1, padding: "8px 12px", fontSize: 13, borderRadius: 8,
+            border: "1px solid var(--border)", background: "var(--bg-tertiary)", color: "var(--text-primary)",
+          }}
+        />
+        <button type="button" className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={handleFetch} disabled={status === "loading" || !url.trim()}>
+          {status === "loading" ? <span className="tiq-spinner" style={{ width: 12, height: 12, borderWidth: 2 }} /> : <Link2 size={13} />}
+          {status === "loading" ? "Fetching…" : "Fetch"}
+        </button>
+      </div>
+      {message && (
+        <div style={{ fontSize: 11.5, marginTop: 5, color: status === "error" ? "#ef4444" : "var(--teal-500)" }}>
+          {status === "error" ? "⚠ " : "✓ "}{message}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+// Mirrors RevaMatrix-AI's "recruiter-adjustable weights + hard
+// disqualifiers" design. Sliders are 0-100 for readability; converted to
+// 0-1 fractions before being sent to the backend (utils/scoring.py
+// normalizes sub-weights against each other regardless of exact sum, so
+// they don't need to add to 100 on the nose).
+export function SliderRow({ label, value, onChange, hint }: {
+  label: string; value: number; onChange: (v: number) => void; hint?: string;
+}) {
+  return (
+    <div style={{ marginBottom: 10 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 3 }}>
+        <span style={{ color: "var(--text-secondary)", fontWeight: 600 }}>{label}</span>
+        <span style={{ color: "var(--text-primary)", fontWeight: 700 }}>{value}%</span>
+      </div>
+      <input type="range" min={0} max={100} value={value}
+        onChange={e => onChange(Number(e.target.value))}
+        style={{ width: "100%", accentColor: "var(--teal-500)" }} />
+      {hint && <div style={{ fontSize: 10.5, color: "var(--text-muted)", marginTop: 2 }}>{hint}</div>}
+    </div>
+  );
+}
+
+function WeightsPanel({ weights, setWeights, disqualifiers, setDisqualifiers }: {
+  weights: ScoringWeights; setWeights: (w: ScoringWeights) => void;
+  disqualifiers: ScoringDisqualifiers; setDisqualifiers: (d: ScoringDisqualifiers) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const pct = (v: number) => Math.round(v * 100);
+  const frac = (v: number) => v / 100;
+
+  return (
+    <div style={{ border: "1.5px solid var(--border)", borderRadius: 10, overflow: "hidden", marginTop: 12 }}>
+      <button type="button" onClick={() => setOpen(o => !o)} style={{
+        width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between",
+        padding: "10px 14px", background: open ? "var(--bg-secondary)" : "transparent",
+        border: "none", cursor: "pointer", fontSize: 13, fontWeight: 600,
+        color: open ? "var(--text-primary)" : "var(--text-secondary)",
+      }}>
+        <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <Target size={13} color="var(--text-muted)" />
+          Scoring Weights &amp; Disqualifiers
+          <span style={{ fontSize: 10, padding: "2px 8px", borderRadius: 10, background: "var(--bg-tertiary)", color: "var(--text-muted)", fontWeight: 600 }}>
+            {pct(weights.technical_overall)}% tech / {pct(weights.non_technical_overall)}% logistics
+          </span>
+        </span>
+        {open ? <ChevronUp size={14} color="var(--text-muted)" /> : <ChevronDown size={14} color="var(--text-muted)" />}
+      </button>
+      {open && (
+        <div style={{ padding: "14px" }}>
+          <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginBottom: 14, lineHeight: 1.5 }}>
+            Adjust how much the overall score leans on technical skill fit vs. non-technical
+            logistics (salary, notice period, location) — mirrors a recruiter's own priorities
+            instead of a fixed formula. Recompute happens instantly, no re-analysis needed.
+          </div>
+
+          <SliderRow
+            label="Technical weight (vs. Non-Technical)"
+            value={pct(weights.technical_overall)}
+            onChange={v => setWeights({ ...weights, technical_overall: frac(v), non_technical_overall: frac(100 - v) })}
+            hint="How much the composite score leans on skills/experience/education vs. logistics fit"
+          />
+
+          <div style={{ marginTop: 16, marginBottom: 8, fontSize: 11.5, fontWeight: 700, color: "var(--text-secondary)", textTransform: "uppercase", letterSpacing: 0.3 }}>
+            Technical track
+          </div>
+          <SliderRow label="Core skills coverage" value={pct(weights.tech_core_skills)}
+            onChange={v => setWeights({ ...weights, tech_core_skills: frac(v) })} />
+          <SliderRow label="Experience fit" value={pct(weights.tech_experience)}
+            onChange={v => setWeights({ ...weights, tech_experience: frac(v) })} />
+          <SliderRow label="Education fit" value={pct(weights.tech_education)}
+            onChange={v => setWeights({ ...weights, tech_education: frac(v) })} />
+          <SliderRow label="Good-to-have bonus" value={pct(weights.tech_good_to_have)}
+            onChange={v => setWeights({ ...weights, tech_good_to_have: frac(v) })} />
+
+          <div style={{ marginTop: 16, marginBottom: 8, fontSize: 11.5, fontWeight: 700, color: "var(--text-secondary)", textTransform: "uppercase", letterSpacing: 0.3 }}>
+            Non-technical track
+          </div>
+          <SliderRow label="Salary vs. budget" value={pct(weights.nontech_salary)}
+            onChange={v => setWeights({ ...weights, nontech_salary: frac(v) })} />
+          <SliderRow label="Notice period fit" value={pct(weights.nontech_notice)}
+            onChange={v => setWeights({ ...weights, nontech_notice: frac(v) })} />
+          <SliderRow label="Location / remote fit" value={pct(weights.nontech_location)}
+            onChange={v => setWeights({ ...weights, nontech_location: frac(v) })} />
+          <div style={{ fontSize: 10.5, color: "var(--text-muted)", marginTop: 2, marginBottom: 4 }}>
+            Only used when the JD/resume actually states salary, notice period, or location —
+            otherwise the score falls back to the technical track alone.
+          </div>
+
+          <div style={{ marginTop: 16, marginBottom: 8, fontSize: 11.5, fontWeight: 700, color: "var(--text-secondary)", textTransform: "uppercase", letterSpacing: 0.3 }}>
+            Hard disqualifiers
+          </div>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, marginBottom: 8, cursor: "pointer" }}>
+            <input type="checkbox" checked={disqualifiers.enabled}
+              onChange={e => setDisqualifiers({ ...disqualifiers, enabled: e.target.checked })} />
+            Enable hard disqualifiers
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, marginBottom: 8, cursor: "pointer", opacity: disqualifiers.enabled ? 1 : 0.5 }}>
+            <input type="checkbox" checked={disqualifiers.notice_hard_limit} disabled={!disqualifiers.enabled}
+              onChange={e => setDisqualifiers({ ...disqualifiers, notice_hard_limit: e.target.checked })} />
+            Reject if notice period exceeds the JD's stated maximum
+          </label>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, opacity: disqualifiers.enabled ? 1 : 0.5 }}>
+            <span>Reject if expected salary exceeds budget by more than</span>
+            <input type="number" min={0} max={200} value={disqualifiers.salary_overrun_pct} disabled={!disqualifiers.enabled}
+              onChange={e => setDisqualifiers({ ...disqualifiers, salary_overrun_pct: Number(e.target.value) })}
+              style={{ width: 56, padding: "3px 6px", fontSize: 12, border: "1px solid var(--border)", borderRadius: 6, background: "var(--bg-tertiary)", color: "var(--text-primary)" }} />
+            <span>%</span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+// ── Full ATS score breakdown: Essential/Good-to-Have/Qualification/
+// Technical/Tools/Domain/Soft Skills + final combined ATS. Backed by
+// utils/technical_scoring.py's compute_technical_score — same shape
+// returned by both CVIntel and CandidateLens, so this type and the
+// display component below are shared between both pages.
+export interface CategoryStat { matched?: number; total?: number; pct: number | null; label: string; }
+export interface ScoreBreakdown {
+  essential: CategoryStat;
+  goodToHave: CategoryStat;
+  qualification: CategoryStat;
+  technical: CategoryStat;
+  tools: CategoryStat;
+  domain: CategoryStat;
+  softSkills: CategoryStat;
+  finalATS: number;
+}
+
+function pctColor(pct: number | null): string {
+  if (pct === null) return "var(--text-muted)";
+  if (pct >= 75) return "#10b981";
+  if (pct >= 50) return "#f59e0b";
+  return "#ef4444";
+}
+
+export function ScoreBreakdownGrid({ breakdown }: { breakdown: ScoreBreakdown }) {
+  const rows: [keyof ScoreBreakdown, CategoryStat][] = [
+    ["essential", breakdown.essential],
+    ["goodToHave", breakdown.goodToHave],
+    ["qualification", breakdown.qualification],
+    ["technical", breakdown.technical],
+    ["tools", breakdown.tools],
+    ["domain", breakdown.domain],
+    ["softSkills", breakdown.softSkills],
+  ];
+  return (
+    <div className="tiq-card tiq-mb-4">
+      <div className="tiq-card-title" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <Target size={15} /> Full Score Breakdown
+      </div>
+
+      {/* Final ATS score — on top, most prominent element in the card */}
+      <div style={{
+        textAlign: "center", padding: "18px 16px", borderRadius: 12,
+        background: "var(--teal-500)15", border: "1.5px solid var(--teal-500)",
+        marginBottom: 16,
+      }}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)", marginBottom: 4, textTransform: "uppercase", letterSpacing: 0.4 }}>
+          Final Combined ATS Score
+        </div>
+        <div style={{ fontSize: 40, fontWeight: 800, color: "var(--teal-500)", lineHeight: 1.1 }}>
+          {breakdown.finalATS}%
+        </div>
+      </div>
+
+      {/* Breakdown — smaller font than the final score above, bulleted */}
+      <div style={{ fontSize: 12.5, color: "var(--text-secondary)", fontWeight: 600, marginBottom: 8 }}>
+        Breakdown
+      </div>
+      <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+        {rows.map(([key, stat]) => (
+          <li key={key} style={{
+            display: "flex", alignItems: "center", justifyContent: "space-between",
+            padding: "6px 4px", fontSize: 12.5, borderBottom: "1px solid var(--border)",
+          }}>
+            <span style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--text-secondary)" }}>
+              <span style={{ color: pctColor(stat.pct), fontSize: 16, lineHeight: 1 }}>•</span>
+              {stat.label}
+              {stat.total !== undefined && (
+                <span style={{ fontSize: 10.5, color: "var(--text-muted)" }}>({stat.matched}/{stat.total} matched)</span>
+              )}
+            </span>
+            <span style={{ fontWeight: 700, color: pctColor(stat.pct) }}>
+              {stat.pct === null ? "N/A" : `${stat.pct}%`}
+            </span>
+          </li>
+        ))}
+      </ul>
+
+      <div style={{ fontSize: 10.5, color: "var(--text-muted)", marginTop: 10, lineHeight: 1.5 }}>
+        Essential/Good-to-Have/Qualification are TIER-based (how the JD prioritized each
+        requirement); Technical/Tools/Domain/Soft Skills are TYPE-based (what kind of
+        requirement it is) — the same requirements viewed two ways. "N/A" means the JD had
+        no requirements of that type, not a 0% match.
+      </div>
+    </div>
+  );
+}
+
 
 // ── Upload zone ──────────────────────────────────────────────────────────────
 function UploadZone({ label, file, accept, onFile, onClear }: {
@@ -212,6 +540,14 @@ export default function CVAnalysisPage() {
   const [formError, setFormError] = useState("");
   const qc = useQueryClient();
 
+  // ── Dynamic weighting engine state ──────────────────────────────────
+  const [weights, setWeights] = useState<ScoringWeights>(DEFAULT_SCORING_WEIGHTS);
+  const [disqualifiers, setDisqualifiers] = useState<ScoringDisqualifiers>(DEFAULT_DISQUALIFIERS);
+  // Live re-weight result — recomputed instantly (no LLM call) whenever
+  // weights/disqualifiers change after an analysis exists, via
+  // POST /api/cvintel/reweight. null until the first slider move.
+  const [reweighted, setReweighted] = useState<Partial<AnalyseData> | null>(null);
+
   // History now lives server-side (survives browsers/devices/refresh),
   // matching every other module. Normalize the backend shape into the
   // same {id, name, score, result, ts} shape the render logic below uses.
@@ -247,6 +583,8 @@ export default function CVAnalysisPage() {
       form.append("resume_text", resumeText);
       if (resumeFile) form.append("file", resumeFile);
       if (jdFile)     form.append("jd_file", jdFile);
+      form.append("weights", JSON.stringify(weights));
+      form.append("disqualifiers", JSON.stringify(disqualifiers));
       const res = await api.post("/api/cvintel/analyze", form, {
         headers: { "Content-Type": "multipart/form-data" },
         // Two sequential extraction calls happen server-side (JD then
@@ -275,9 +613,59 @@ export default function CVAnalysisPage() {
   // this just lets any mount of this page find the result again).
   const genState = useLatestMutation<AnalyseData>(["cvintel-analyze"]);
   const liveResult = genState.status === "success" ? genState.data ?? null : null;
-  const displayResult: AnalyseData | null = viewingHistId
+  const baseDisplayResult: AnalyseData | null = viewingHistId
     ? history.find(h => h.id === viewingHistId)?.result ?? null
     : (liveResultDismissed ? null : liveResult);
+  // Live re-weight (see effect below) overlays onto the base result
+  // without needing a full re-analysis — only overallScore/technicalScore/
+  // nonTechnicalScore/logisticsBreakdown/hardDisqualified/disqualifyReason
+  // actually change when weights change; everything else about the
+  // analysis (matched skills, gaps, summary) stays exactly as extracted.
+  const displayResult: AnalyseData | null = baseDisplayResult
+    ? { ...baseDisplayResult, ...(reweighted || {}) }
+    : null;
+
+  // Reset the live-reweight overlay whenever the underlying result changes
+  // (new analysis, or switching to a different history entry) so stale
+  // reweighted numbers from a PREVIOUS resume never linger on screen.
+  useEffect(() => { setReweighted(null); }, [viewingHistId, liveResult]);
+
+  // Debounced live re-weight: whenever weights/disqualifiers change AND a
+  // result is already on screen, call POST /api/cvintel/reweight (pure
+  // Python, no LLM) instead of re-running the full analysis. This is what
+  // makes dragging a slider feel instant.
+  useEffect(() => {
+    if (!baseDisplayResult || !baseDisplayResult.logisticsBreakdown) return;
+    const timer = setTimeout(() => {
+      const lb = baseDisplayResult.logisticsBreakdown!;
+      api.post("/api/cvintel/reweight", {
+        technicalScore: baseDisplayResult.technicalScore ?? baseDisplayResult.overallScore,
+        logistics: {
+          expected_salary: lb.candidateExpectedSalary || 0,
+          notice_period_days: lb.candidateNoticeDays ?? -1,
+          current_location: lb.candidateLocation || "",
+          salary_budget_min: lb.jdSalaryBudgetMin || 0,
+          salary_budget_max: lb.jdSalaryBudgetMax || 0,
+          max_notice_days: lb.jdMaxNoticeDays || 0,
+          jd_location: "",
+          remote_allowed: lb.jdRemoteAllowed,
+        },
+        weights,
+        disqualifiers,
+      }).then(res => {
+        setReweighted({
+          overallScore: res.data.overallScore,
+          technicalScore: res.data.technicalScore,
+          nonTechnicalScore: res.data.nonTechnicalScore,
+          hardDisqualified: res.data.hardDisqualified,
+          disqualifyReason: res.data.disqualifyReason,
+          weightsUsed: res.data.weightsUsed,
+        });
+      }).catch(() => { /* non-fatal — sliders keep working, just won't live-preview */ });
+    }, 300);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [weights, disqualifiers]);
 
   // Save each newly-completed analysis to the backend. Driven off the
   // shared cache (not the mutation's own onSuccess) so it reliably fires
@@ -358,10 +746,14 @@ export default function CVAnalysisPage() {
           </div>
           <UploadZone label="Upload JD (PDF, DOCX, TXT)" file={jdFile} accept=".pdf,.doc,.docx,.txt"
             onFile={f => setJdFile(f)} onClear={() => setJdFile(null)} />
+          <JDLinkFetcher endpoint="/api/cvintel/fetch-jd-url" onFetched={(text) => { setJdText(text); setJdFile(null); }} />
           <TextPanel label="Or paste job description text" value={jdText} onChange={setJdText}
             placeholder="Paste the complete job description here..." />
         </div>
       </div>
+
+      <WeightsPanel weights={weights} setWeights={setWeights}
+        disqualifiers={disqualifiers} setDisqualifiers={setDisqualifiers} />
 
       {/* ── Analyse button ── */}
       <div style={{ textAlign: "center", marginBottom: 32 }}>
@@ -553,6 +945,65 @@ export default function CVAnalysisPage() {
               ))}
             </div>
           </div>
+
+          {/* ── Dual-track breakdown: technical vs. non-technical/logistics ── */}
+          {result.technicalScore !== undefined && (
+            <div className="tiq-card tiq-mb-4" style={{ borderLeft: result.hardDisqualified ? "4px solid #ef4444" : "4px solid var(--teal-500)" }}>
+              <div className="tiq-card-title" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <Target size={15} /> Dual-Track Score
+                <span style={{ fontSize: 10, padding: "2px 8px", borderRadius: 10, background: "var(--bg-tertiary)", color: "var(--text-muted)", fontWeight: 600 }}>
+                  {Math.round((result.weightsUsed?.technical_overall ?? 0.7) * 100)}% tech / {Math.round((result.weightsUsed?.non_technical_overall ?? 0.3) * 100)}% logistics
+                </span>
+              </div>
+
+              {result.hardDisqualified && (
+                <div style={{
+                  display: "flex", alignItems: "center", gap: 8, padding: "10px 14px", marginBottom: 14,
+                  background: "#ef444420", border: "1px solid #ef4444", borderRadius: 8, color: "#ef4444", fontSize: 13, fontWeight: 600,
+                }}>
+                  <AlertTriangle size={16} /> Hard disqualifier: {result.disqualifyReason}
+                </div>
+              )}
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24 }}>
+                <div>
+                  <ScoreBar label="Technical fit" value={result.technicalScore} />
+                  {result.nonTechnicalScore !== null && result.nonTechnicalScore !== undefined ? (
+                    <ScoreBar label="Non-technical / logistics fit" value={result.nonTechnicalScore} />
+                  ) : (
+                    <div style={{ fontSize: 12, color: "var(--text-muted)", fontStyle: "italic" }}>
+                      No logistics data (salary/notice/location) found in the JD or resume —
+                      overall score uses the technical track only.
+                    </div>
+                  )}
+                </div>
+                {result.logisticsBreakdown?.applicable && (
+                  <div style={{ fontSize: 12.5, color: "var(--text-secondary)", lineHeight: 1.9 }}>
+                    {result.logisticsBreakdown.candidateExpectedSalary != null && (
+                      <div>💰 Expected ${result.logisticsBreakdown.candidateExpectedSalary.toLocaleString()}
+                        {result.logisticsBreakdown.jdSalaryBudgetMax ? ` vs. budget up to $${result.logisticsBreakdown.jdSalaryBudgetMax.toLocaleString()}` : ""}
+                        {result.logisticsBreakdown.salaryScore != null && <strong> — {result.logisticsBreakdown.salaryScore}%</strong>}
+                      </div>
+                    )}
+                    {result.logisticsBreakdown.candidateNoticeDays != null && (
+                      <div>📅 {result.logisticsBreakdown.candidateNoticeDays}d notice
+                        {result.logisticsBreakdown.jdMaxNoticeDays ? ` vs. max ${result.logisticsBreakdown.jdMaxNoticeDays}d` : ""}
+                        {result.logisticsBreakdown.noticeScore != null && <strong> — {result.logisticsBreakdown.noticeScore}%</strong>}
+                      </div>
+                    )}
+                    {result.logisticsBreakdown.candidateLocation && (
+                      <div>📍 {result.logisticsBreakdown.candidateLocation}
+                        {result.logisticsBreakdown.jdRemoteAllowed ? " (remote OK)" : ""}
+                        {result.logisticsBreakdown.locationScore != null && <strong> — {result.logisticsBreakdown.locationScore}%</strong>}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {result.scoreBreakdown && <ScoreBreakdownGrid breakdown={result.scoreBreakdown} />}
 
           {/* JD Requirements — categorized, mirrors CandidateLens's JD Summary */}
           {result.jdRequirements && (result.jdRequirements.essential?.length > 0 || result.jdRequirements.goodToHave?.length > 0) && (
