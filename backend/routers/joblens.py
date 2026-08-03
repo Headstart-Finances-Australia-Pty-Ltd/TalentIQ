@@ -106,6 +106,16 @@ def extract_text(content: bytes, filename: str) -> str:
             except: continue
         return ""
     if fname.endswith(".pdf"):
+        # Layout-aware pass first (multi-column + table detection) — see
+        # utils/layout_parse.py. Shared with CVIntel so both modules
+        # benefit from the same fix for scrambled multi-column resumes.
+        try:
+            from utils.layout_parse import extract_pdf_layout_aware
+            layout_text = extract_pdf_layout_aware(content)
+            if layout_text.strip():
+                return layout_text
+        except Exception:
+            pass
         try:
             import pdfplumber
             with pdfplumber.open(io.BytesIO(content)) as pdf:
@@ -816,12 +826,47 @@ def _fmt(c: JobLensCandidate) -> dict:
         "source_vendor_id": c.source_vendor_id,
         "source_vendor_name": c.source_vendor_name or "",
         "strengths_breakdown": c.strengths_breakdown or None,
+        # ── Dual-track scoring (RevaMatrix-AI parity) ──────────────────
+        "technical_score": round(c.technical_score, 1) if c.technical_score is not None else None,
+        "non_technical_score": round(c.non_technical_score, 1) if c.non_technical_score is not None else None,
+        "logistics": c.logistics or None,
+        "hard_disqualified": bool(c.hard_disqualified),
+        "disqualify_reason": c.disqualify_reason,
     }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ENDPOINTS
 # ══════════════════════════════════════════════════════════════════════════════
+
+@router.post("/fetch-jd-url")
+async def fetch_jd_url(
+    payload: dict,
+    current_user: User = Depends(get_current_user),
+):
+    """Identical to CVIntel's /api/cvintel/fetch-jd-url (same shared
+    utils/jd_url_fetch.py) — kept as a same-shaped endpoint under this
+    router too so the CandidateLens frontend doesn't need to cross-call
+    CVIntel's API. Converts a job-posting URL into JD text for the
+    frontend to drop into the same "paste JD text" field used everywhere
+    else — the bulk analysis that follows is unaffected by how the text
+    arrived.
+
+    Body: {"url": "https://..."}
+    """
+    from utils.jd_url_fetch import fetch_jd_from_url, JDFetchError
+
+    url = (payload.get("url") or "").strip()
+    if not url:
+        raise HTTPException(400, "A URL is required.")
+
+    try:
+        result = await fetch_jd_from_url(url)
+    except JDFetchError as e:
+        raise HTTPException(422, str(e))
+
+    return result
+
 
 @router.post("/run")
 async def run_joblens(
@@ -832,9 +877,33 @@ async def run_joblens(
     cv_files: List[UploadFile] = File(default=[]),
     jd_record_id: Optional[int] = Form(None),          # NEW: pull JD from JD Management instead of text/file
     source_candidate_ids: str = Form(""),               # NEW: comma-separated TrackedCandidate ids from Vendor Management
+    # ── Dual-track scoring: logistics constraints + dynamic weights ─────
+    # If jd_record_id is set AND that JD Management record already has
+    # logistics constraints saved, those take precedence (single source of
+    # truth); otherwise these form fields are used directly — lets a
+    # recruiter run CandidateLens straight off pasted/uploaded JD text
+    # without first creating a JD Management record.
+    salary_budget_min: int = Form(0),
+    salary_budget_max: int = Form(0),
+    max_notice_days: int = Form(0),
+    remote_allowed: bool = Form(False),
+    weights: Optional[str] = Form(None),         # JSON — see utils/scoring.DEFAULT_WEIGHTS
+    disqualifiers: Optional[str] = Form(None),   # JSON — see utils/scoring.DEFAULT_DISQUALIFIERS
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    from utils.scoring import merge_weights, merge_disqualifiers
+    import json as _json
+    try:
+        weight_overrides = _json.loads(weights) if weights else None
+    except (_json.JSONDecodeError, TypeError):
+        raise HTTPException(400, "weights must be a valid JSON object")
+    try:
+        disqualifier_overrides = _json.loads(disqualifiers) if disqualifiers else None
+    except (_json.JSONDecodeError, TypeError):
+        raise HTTPException(400, "disqualifiers must be a valid JSON object")
+    session_weights = merge_weights(weight_overrides)
+    session_disqualifiers = merge_disqualifiers(disqualifier_overrides)
     # ── Extract JD — either from JD Management (new) or text/file upload (existing) ──
     final_jd = jd_text.strip()
     jd_client_name = ""
@@ -875,6 +944,17 @@ async def run_joblens(
     if not cv_files and not source_candidates:
         raise HTTPException(400, "At least one CV is required (upload files, or select candidates from Vendor Management).")
 
+    # ── Resolve logistics constraints: linked JD Management record wins
+    # (single source of truth) if it has them set; otherwise use whatever
+    # was passed directly on this request.
+    session_salary_min, session_salary_max = salary_budget_min, salary_budget_max
+    session_max_notice, session_remote = max_notice_days, remote_allowed
+    if jd_record_id and jd_record and (jd_record.salary_budget_max or jd_record.max_notice_days):
+        session_salary_min = jd_record.salary_budget_min or session_salary_min
+        session_salary_max = jd_record.salary_budget_max or session_salary_max
+        session_max_notice = jd_record.max_notice_days or session_max_notice
+        session_remote = jd_record.remote_allowed or session_remote
+
     # ── Get Groq key (own key first, else the healthiest key in the shared
     # pool — see utils/groq_pool.py) ──
     from utils.groq_pool import resolve_groq_key
@@ -884,31 +964,58 @@ async def run_joblens(
     ollama_creds = await get_all_credentials(db, current_user.id, "ollama") if ollama_enabled() else {}
     ollama_base_url = ollama_creds.get("base_url")
     ollama_model = ollama_creds.get("model")
-    from utils.llm_extraction import get_taxonomy_hint, enrich_skill_taxonomy
-    known_terms = await get_taxonomy_hint(db)
+    from utils.llm_extraction import (
+        get_taxonomy_hint, get_semantic_taxonomy_hint, enrich_skill_taxonomy,
+        extract_jd_requirements_categorized,
+    )
+    known_terms = await get_semantic_taxonomy_hint(db, final_jd)
 
-    # ── Extract JD details: role, location, company, categorized skills (LLM or heuristic) ──
-    # If this session was started from an existing JD Management record that
-    # already has persisted categorized requirements, reuse them directly —
-    # re-extracting the same JD's requirements via LLM on every single
-    # analysis run would be wasteful and could drift from what's shown in
-    # JD Management itself.
+    # ── Extract JD details: role, location, company, categorized skills ──
+    # Uses the SAME extract_jd_requirements_categorized function CVIntel
+    # uses (see utils/llm_extraction.py) instead of a separate CandidateLens-
+    # only prompt — CVIntel and CandidateLens used to run two DIFFERENT LLM
+    # prompts to categorize the same JD's essential/good-to-have
+    # requirements, which alone could produce different essential-skill
+    # lists (and therefore different match percentages) for the identical
+    # JD text between the two modules, before either one scored anything.
+    # This also gives CandidateLens the same min_years_experience/
+    # education_requirement/logistics fields CVIntel already had.
+    #
+    # If this session was started from an existing JD Management record
+    # that already has persisted categorized requirements, reuse those
+    # directly — re-extracting the same JD's requirements via LLM on every
+    # single analysis run would be wasteful and could drift from what's
+    # shown in JD Management itself.
     if jd_record_id and jd_record and (jd_record.essential_skills or jd_record.good_to_have_skills):
-        jd_details = {
+        jd_req = {
             "role": jd_record.title,
             "location": "",
             "company": jd_client_name,
             "essential": jd_record.essential_skills or [],
             "good_to_have": jd_record.good_to_have_skills or [],
             "optional": jd_record.optional_skills or [],
-            "skills": list(dict.fromkeys(
-                (jd_record.essential_skills or []) + (jd_record.good_to_have_skills or []) + (jd_record.optional_skills or [])
-            )),
+            "min_years_experience": jd_record.min_years_experience or 0,
+            "education_requirement": jd_record.education_requirement or "",
+            "salary_budget_min": jd_record.salary_budget_min or 0,
+            "salary_budget_max": jd_record.salary_budget_max or 0,
+            "max_notice_days": jd_record.max_notice_days or 0,
+            "remote_allowed": bool(jd_record.remote_allowed),
         }
-    elif groq_key:
-        jd_details = await extract_jd_details(final_jd, groq_key, groq_model)
     else:
-        jd_details = _heuristic_jd_details(final_jd)
+        jd_req = await extract_jd_requirements_categorized(
+            final_jd, groq_key, groq_model, ollama_base_url, ollama_model, known_terms,
+            db=db, user_id=current_user.id,
+        )
+    # jd_details kept as an alias — the rest of this function (JD summary
+    # panel, interview-question context, etc.) reads from jd_details, and
+    # "skills" (a flat, deduped list) is only this module's own convenience
+    # field, not part of the shared jd_req shape.
+    jd_details = {
+        **jd_req,
+        "skills": list(dict.fromkeys(
+            (jd_req.get("essential") or []) + (jd_req.get("good_to_have") or []) + (jd_req.get("optional") or [])
+        )),
+    }
     jd_skills = jd_details["skills"]
 
     # ── Create session ─────────────────────────────────────────────────
@@ -932,6 +1039,12 @@ async def run_joblens(
             status="completed",
             cv_count=len(cv_files) + len(source_candidates),
             created_at=datetime.utcnow(),
+            salary_budget_min=session_salary_min,
+            salary_budget_max=session_salary_max,
+            max_notice_days=session_max_notice,
+            jd_remote_allowed=session_remote,
+            weights=session_weights,
+            disqualifiers=session_disqualifiers,
         )
         db.add(session)
         await db.commit()
@@ -1001,6 +1114,18 @@ async def run_joblens(
             {"essential": jd_details.get("essential", []), "good_to_have": jd_details.get("good_to_have", [])},
             _groq_key, _groq_model,
             ollama_base_url=ollama_base_url, ollama_model=ollama_model, known_terms_hint=known_terms,
+            # db (not user_id) enables the extraction cache — see
+            # models.ExtractionCache's docstring. This directly fixes the
+            # "same resume+JD scores differently on repeat runs" bug: a
+            # genuine repeat now returns the cached result instead of
+            # re-racing LLM providers. user_id stays None deliberately —
+            # multiple candidates are scored concurrently here, and passing
+            # user_id too would also re-enable this function's internal
+            # API-key-pool resolution, which DOES use the shared `db`
+            # session directly and isn't safe under that concurrency (the
+            # cache itself uses its own isolated session, so it has no such
+            # restriction).
+            db=db,
         ))
         questions_task = (
             _with_groq_limit(generate_questions(final_jd, info["name"], jd_focus_skills, _groq_key, _groq_model))
@@ -1012,17 +1137,47 @@ async def run_joblens(
             strengths_task, questions_task, summary_task,
         )
 
-        result = _score_from_verdicts(
-            strengths_breakdown, cv_text,
-            len(jd_details.get("essential", [])), len(jd_details.get("good_to_have", [])),
-        )
+        # Same shared technical-scoring engine CVIntel uses (see
+        # utils/technical_scoring.py's docstring for why this replaced the
+        # old _score_from_verdicts, which awarded a flat +15 regex bonus
+        # for merely mentioning "degree"/"N years experience" ANYWHERE in
+        # the resume, independent of whether that matched THIS JD's actual
+        # requirements — the main reason CandidateLens scores ran higher
+        # than CVIntel's for identical resume/JD pairs).
+        from utils.technical_scoring import compute_technical_score
+        result = compute_technical_score(jd_req, strengths_breakdown, cv_text, session_weights)
 
-        score  = result["score"]
+        # ── Dual-track composite: technical (above) + non-technical/
+        # logistics (salary/notice/location), combined via this session's
+        # weights, with hard disqualifiers checked independently of score.
+        from utils.scoring import compute_non_technical_score, check_hard_disqualifiers, compute_composite_score
+        technical_score = result["overall"]
+        candidate_logistics = {
+            "expected_salary": strengths_breakdown.get("expected_salary") or 0,
+            "notice_period_days": strengths_breakdown.get("notice_period_days", -1),
+            "current_location": strengths_breakdown.get("current_location") or "",
+            "salary_budget_min": session_salary_min,
+            "salary_budget_max": session_salary_max,
+            "max_notice_days": session_max_notice,
+            "jd_location": jd_details.get("location") or "",
+            "remote_allowed": session_remote,
+        }
+        non_technical = compute_non_technical_score(candidate_logistics, session_weights)
+        is_disqualified, disqualify_reason = check_hard_disqualifiers(candidate_logistics, session_disqualifiers)
+        score = compute_composite_score(technical_score, non_technical, session_weights)
+
         status = "Not Qualified"
         if score >= high_threshold:
             status = "Qualified"
         elif score >= low_threshold:
             status = "Review"
+        if is_disqualified:
+            # Hard disqualifiers override the score-based tier entirely —
+            # a technically strong candidate who fails a hard business
+            # constraint (notice period, salary overrun) should never
+            # show as "Qualified"/"Review", mirroring how a recruiter
+            # would actually triage.
+            status = "Not Qualified"
 
         questions = questions_result if groq_key else _default_questions(info["name"], result["matched"])
 
@@ -1045,12 +1200,25 @@ async def run_joblens(
             ats_score=score,
             status=status,
             matched_skills=result["matched"],
-            missing_skills=result["gap"],
-            bonus=result["bonus"],
-            bonus_reasons=result["reasons"],
+            missing_skills=result["missing"],
+            bonus=result["matched_good_to_have"] and min(15, len(result["matched_good_to_have"]) * 5) or 0,
+            bonus_reasons=(
+                f"Skills {result['skills_pct']}% · Experience {result['experience_pct']}% · Education {result['education_pct']}%"
+            ),
             experience_years=info.get("experience_years", ""),
             summary=info.get("summary", ""),
             resume_summary=resume_summary,
+            technical_score=technical_score,
+            non_technical_score=non_technical["score"],
+            logistics={
+                **candidate_logistics,
+                "salary_score": non_technical["salary_score"],
+                "notice_score": non_technical["notice_score"],
+                "location_score": non_technical["location_score"],
+                "applicable": non_technical["applicable"],
+            },
+            hard_disqualified=is_disqualified,
+            disqualify_reason=disqualify_reason,
             interview_questions=questions,
             video_status="Pending",
             shortlisted=False,
@@ -1069,6 +1237,21 @@ async def run_joblens(
                 "yearsExperience": strengths_breakdown.get("years_experience", 0),
                 "education": strengths_breakdown.get("education", ""),
                 "aiPowered": strengths_breakdown.get("ai_powered", False),
+                # ── Full tier + type score breakdown (Essential/Good-to-
+                # Have/Qualification/Technical/Tools/Domain/Soft Skills +
+                # final ATS) — same shape CVIntel exposes as
+                # "scoreBreakdown", so both modules' frontends can share
+                # one display component.
+                "scoreBreakdown": {
+                    "essential": {"pct": result["essential_pct"], "label": "Essential Requirements"},
+                    "goodToHave": {"pct": result["good_to_have_pct"], "label": "Good to Have"},
+                    "qualification": {"pct": result["qualification_pct"], "label": "Qualification / Education"},
+                    "technical": {**result["category_breakdown"]["technical"], "label": "Technical Skills"},
+                    "tools": {**result["category_breakdown"]["tool"], "label": "Tools & Platforms"},
+                    "domain": {**result["category_breakdown"]["domain"], "label": "Domain Knowledge"},
+                    "softSkills": {**result["category_breakdown"]["soft_skill"], "label": "Soft Skills"},
+                    "finalATS": score,
+                },
             },
         )
 
@@ -1263,6 +1446,119 @@ async def get_session(
         "status": session.status,
         "cv_count": session.cv_count,
         "created_at": session.created_at.isoformat() if session.created_at else None,
+        "candidates": [_fmt(c) for c in candidates],
+        # ── Dual-track scoring config used for this session — lets the UI
+        # pre-fill weight sliders / logistics fields to "what was actually
+        # used" when reopening a session ──────────────────────────────────
+        "salary_budget_min": session.salary_budget_min or 0,
+        "salary_budget_max": session.salary_budget_max or 0,
+        "max_notice_days": session.max_notice_days or 0,
+        "jd_remote_allowed": bool(session.jd_remote_allowed),
+        "weights": session.weights or {},
+        "disqualifiers": session.disqualifiers or {},
+    }
+
+
+@router.post("/sessions/{session_id}/reweight")
+async def reweight_session(
+    session_id: int,
+    payload: dict,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Re-composite and re-rank an ENTIRE session's candidates with new
+    weights/disqualifiers/logistics constraints — purely in Python, no LLM
+    calls, no re-parsing resumes. Each candidate's technical_score and raw
+    logistics facts (expected_salary, notice_period_days, current_location)
+    are already stored from the original /run — only the JD-side
+    constraints and the weighting formula can change here, which is
+    exactly what a recruiter dragging a weight slider needs.
+
+    Body (all optional — omitted fields keep the session's current value):
+    {
+      "weights": {...overrides...},
+      "disqualifiers": {...overrides...},
+      "salary_budget_min": int, "salary_budget_max": int,
+      "max_notice_days": int, "remote_allowed": bool
+    }
+    """
+    from utils.scoring import merge_weights, merge_disqualifiers, compute_non_technical_score, check_hard_disqualifiers, compute_composite_score
+
+    sr = await db.execute(
+        select(JobLensSession).where(
+            JobLensSession.id == session_id,
+            JobLensSession.user_id == current_user.id,
+        )
+    )
+    session = sr.scalar_one_or_none()
+    if not session:
+        raise HTTPException(404, "Session not found")
+
+    weights = merge_weights({**(session.weights or {}), **(payload.get("weights") or {})})
+    disqualifiers = merge_disqualifiers({**(session.disqualifiers or {}), **(payload.get("disqualifiers") or {})})
+    salary_min = payload.get("salary_budget_min", session.salary_budget_min or 0)
+    salary_max = payload.get("salary_budget_max", session.salary_budget_max or 0)
+    max_notice = payload.get("max_notice_days", session.max_notice_days or 0)
+    remote = payload.get("remote_allowed", session.jd_remote_allowed or False)
+
+    cr = await db.execute(select(JobLensCandidate).where(JobLensCandidate.session_id == session_id))
+    candidates = cr.scalars().all()
+
+    for c in candidates:
+        stored_logistics = c.logistics or {}
+        logistics = {
+            "expected_salary": stored_logistics.get("expected_salary") or 0,
+            "notice_period_days": stored_logistics.get("notice_period_days", -1),
+            "current_location": stored_logistics.get("current_location") or "",
+            "salary_budget_min": salary_min,
+            "salary_budget_max": salary_max,
+            "max_notice_days": max_notice,
+            "jd_location": stored_logistics.get("jd_location") or session.jd_location or "",
+            "remote_allowed": remote,
+        }
+        non_technical = compute_non_technical_score(logistics, weights)
+        is_disqualified, disqualify_reason = check_hard_disqualifiers(logistics, disqualifiers)
+        composite = compute_composite_score(c.technical_score or 0, non_technical, weights)
+
+        status = "Not Qualified"
+        if composite >= session.high_threshold:
+            status = "Qualified"
+        elif composite >= session.low_threshold:
+            status = "Review"
+        if is_disqualified:
+            status = "Not Qualified"
+
+        c.ats_score = composite
+        c.non_technical_score = non_technical["score"]
+        c.status = status
+        c.hard_disqualified = is_disqualified
+        c.disqualify_reason = disqualify_reason
+        c.logistics = {
+            **logistics,
+            "salary_score": non_technical["salary_score"],
+            "notice_score": non_technical["notice_score"],
+            "location_score": non_technical["location_score"],
+            "applicable": non_technical["applicable"],
+        }
+        db.add(c)
+
+    session.weights = weights
+    session.disqualifiers = disqualifiers
+    session.salary_budget_min = salary_min
+    session.salary_budget_max = salary_max
+    session.max_notice_days = max_notice
+    session.jd_remote_allowed = remote
+    db.add(session)
+
+    await db.commit()
+    for c in candidates:
+        await db.refresh(c)
+
+    candidates = sorted(candidates, key=lambda c: c.ats_score, reverse=True)
+    return {
+        "session_id": session.id,
+        "weights": weights,
+        "disqualifiers": disqualifiers,
         "candidates": [_fmt(c) for c in candidates],
     }
 

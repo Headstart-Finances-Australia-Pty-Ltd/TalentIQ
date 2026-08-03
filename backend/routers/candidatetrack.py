@@ -286,7 +286,7 @@ async def _extract_and_apply_requirements(jd: JDRecord, description: str, curren
     from utils.llm_extraction import extract_jd_requirements_categorized
     groq_key = await get_credential(db, current_user.id, "groq", "api_key")
     groq_model = await get_groq_model(db, current_user.id)
-    req = await extract_jd_requirements_categorized(description, groq_key, groq_model)
+    req = await extract_jd_requirements_categorized(description, groq_key, groq_model, db=db, user_id=current_user.id)
     jd.essential_skills = req.get("essential", [])
     jd.good_to_have_skills = req.get("good_to_have", [])
     jd.optional_skills = req.get("optional", [])

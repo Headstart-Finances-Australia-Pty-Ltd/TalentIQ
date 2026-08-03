@@ -37,6 +37,19 @@ docx2txt==0.8
 python-docx==1.1.2
 beautifulsoup4==4.12.3
 
+# ── Lightweight semantic matching (TF-IDF cosine similarity) ──
+# See utils/semantic_match.py — an honest, in-process alternative to a
+# full embeddings/vector-DB stack, not a replacement for one.
+scikit-learn==1.5.2
+
+# ── Zero-cost local embeddings + vector search ─────────────────
+# CPU-only sentence-transformer (no GPU/hosted API) + pgvector, which
+# runs as an extension on the SAME Postgres database already in use
+# (Supabase/Neon both support it) rather than a separate Qdrant/Pinecone
+# service. See utils/embeddings.py.
+sentence-transformers==3.3.1
+pgvector==0.3.6
+
 # ── Browser automation ─────────────────────────────────────
 playwright==1.49.1
 

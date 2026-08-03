@@ -340,6 +340,46 @@ async def get_taxonomy_hint(db, category: Optional[str] = None, limit: int = 30)
         return []
 
 
+async def get_semantic_taxonomy_hint(db, query_text: str, limit: int = 30) -> List[str]:
+    """Smarter alternative to get_taxonomy_hint: returns known taxonomy
+    terms whose EMBEDDING is closest (pgvector cosine distance, `<=>`) to
+    the current JD/resume text, instead of just the globally most-frequent
+    terms regardless of relevance. A platform with thousands of
+    accumulated terms across many industries benefits from "terms
+    relevant to THIS document" over "terms seen most often overall" —
+    e.g. a genuinely rare-but-relevant term for a niche JD would never
+    surface from frequency ranking alone.
+
+    Falls back to get_taxonomy_hint (frequency-based) if local embeddings
+    aren't available (see utils/embeddings.py) or the query can't be
+    embedded — never raises, never blocks extraction on this being
+    unavailable.
+    """
+    from utils.embeddings import embed_text
+    query_vec = embed_text(query_text)
+    if query_vec is None:
+        return await get_taxonomy_hint(db, limit=limit)
+
+    try:
+        from sqlalchemy import text
+        # pgvector's `<=>` operator is cosine DISTANCE (0 = identical,
+        # 2 = opposite) — order ascending for nearest-first. Cast the
+        # Python list to pgvector's literal text format directly in SQL
+        # since asyncpg doesn't have a native vector bind type.
+        vec_literal = "[" + ",".join(str(x) for x in query_vec) + "]"
+        rows = (await db.execute(text(
+            "SELECT skill_name FROM tiq_skill_taxonomy "
+            "WHERE embedding IS NOT NULL "
+            "ORDER BY embedding <=> :qvec LIMIT :lim"
+        ), {"qvec": vec_literal, "lim": limit})).scalars().all()
+        if rows:
+            return list(rows)
+    except Exception as e:
+        print(f"  WARNING: get_semantic_taxonomy_hint failed, falling back to frequency-based — {type(e).__name__}: {str(e)[:200]}")
+
+    return await get_taxonomy_hint(db, limit=limit)
+
+
 async def enrich_skill_taxonomy(db, skills_by_category: dict) -> None:
     """Accumulates newly-seen skill/requirement terms from a successful
     extraction (either provider) into the persistent taxonomy — the more
@@ -379,10 +419,18 @@ async def enrich_skill_taxonomy(db, skills_by_category: dict) -> None:
                 if existing:
                     existing.frequency += 1
                     existing.last_seen_at = now
+                    # Backfill an embedding for terms added before this
+                    # column existed, or added while the local model was
+                    # unavailable — best-effort, never blocks enrichment.
+                    if existing.embedding is None:
+                        from utils.embeddings import embed_text
+                        existing.embedding = embed_text(normalized)
                 else:
+                    from utils.embeddings import embed_text
                     db.add(SkillTaxonomy(
                         skill_name=normalized, category=category,
                         frequency=1, first_seen_at=now, last_seen_at=now,
+                        embedding=embed_text(normalized),
                     ))
         await db.commit()
     except Exception as e:
@@ -433,7 +481,78 @@ def _parse_json_response(raw: str) -> Optional[dict]:
 # JD REQUIREMENTS — categorized into Essential / Good to Have / Optional
 # ══════════════════════════════════════════════════════════════════════════
 
-async def extract_jd_requirements_categorized(
+import hashlib
+
+
+def _extraction_cache_key(extraction_type: str, *parts) -> str:
+    """sha256 over the extraction type + every meaningful input part,
+    stringified in a stable way. Same inputs -> same key, always."""
+    raw = extraction_type + "||" + "||".join(
+        json.dumps(p, sort_keys=True) if not isinstance(p, str) else p
+        for p in parts
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+async def _get_cached_extraction(db, cache_key: str) -> Optional[dict]:
+    """Returns the cached result dict, or None on a cache miss OR if
+    caching isn't available — never raises, since a cache-layer failure
+    should degrade to "just do the extraction again", not break the
+    caller.
+
+    Deliberately opens its OWN short-lived DB session rather than reusing
+    the caller's `db` (still accepted as a param, used only as an
+    on/off switch — pass None to skip caching entirely). Several call
+    sites run more than one extraction CONCURRENTLY via asyncio.gather
+    sharing one AsyncSession (e.g. CVIntel's JD + resume-facts calls) or
+    run many candidates' extractions concurrently (CandidateLens) —
+    SQLAlchemy's AsyncSession isn't safe for genuinely concurrent use
+    from multiple coroutines, so a shared session here would risk
+    corrupting whatever the CALLER is doing with that same session. An
+    independent, short-lived session sidesteps that entirely: every cache
+    read/write is fully isolated, so this is safe to call from ANY
+    concurrency pattern the callers use, present or future."""
+    if db is None:
+        return None
+    try:
+        from sqlalchemy import select
+        from models.models import ExtractionCache
+        from db.database import AsyncSessionLocal
+        async with AsyncSessionLocal() as cache_db:
+            row = (await cache_db.execute(
+                select(ExtractionCache).where(ExtractionCache.cache_key == cache_key)
+            )).scalar_one_or_none()
+            return row.result if row else None
+    except Exception:
+        return None
+
+
+async def _store_cached_extraction(db, cache_key: str, extraction_type: str, result: Optional[dict]) -> None:
+    """Best-effort — a failure to WRITE the cache should never break the
+    extraction that already succeeded and is about to be returned to the
+    caller. Silently no-ops on a duplicate key (a concurrent identical
+    request beat this one to the write) rather than erroring. See
+    _get_cached_extraction's docstring for why this uses its own session
+    rather than the caller's."""
+    if db is None or not result:
+        return
+    try:
+        from sqlalchemy import select
+        from models.models import ExtractionCache
+        from db.database import AsyncSessionLocal
+        async with AsyncSessionLocal() as cache_db:
+            existing = (await cache_db.execute(
+                select(ExtractionCache).where(ExtractionCache.cache_key == cache_key)
+            )).scalar_one_or_none()
+            if existing:
+                return
+            cache_db.add(ExtractionCache(cache_key=cache_key, extraction_type=extraction_type, result=result))
+            await cache_db.commit()
+    except Exception:
+        pass
+
+
+async def _extract_jd_requirements_categorized_impl(
     jd_text: str, groq_key: Optional[str], groq_model: str,
     ollama_base_url: Optional[str] = None, ollama_model: Optional[str] = None,
     known_terms_hint: Optional[List[str]] = None,
@@ -479,10 +598,35 @@ the JD phrases it:
 - "essential": stated as required / must-have / mandatory
 - "good_to_have": stated as preferred / desirable / advantageous, not mandatory
 - "optional": mentioned only in passing, or a minor/bonus item
+
+ALSO tag every essential/good_to_have item with exactly one TYPE, describing
+WHAT KIND of requirement it is (independent of the tier above):
+- "technical": a hard skill, methodology, or technique (e.g. "financial
+  modeling", "variance analysis", "data pipeline design", "budgeting")
+- "tool": a NAMED software/platform/system (e.g. "SAP BPC", "Power BI",
+  "Excel", "Salesforce", "AWS")
+- "domain": industry- or business-domain knowledge, not a skill or tool
+  (e.g. "FMCG experience", "banking sector knowledge", "IBP process")
+- "qualification": a degree, professional certification, or license (e.g.
+  "Bachelor's degree", "CPA", "CFA", "PMP certification")
+- "soft_skill": an interpersonal/leadership/communication trait (e.g.
+  "stakeholder management", "executive presentation", "team leadership")
+If a requirement doesn't clearly fit one type, use your best judgment —
+every item must get exactly one type, never more than one, never none.
 {hint_block}
 
 Job Description:
 \"\"\"{_truncate_for_llm(jd_text, "JD text", jd_limit)}\"\"\"
+
+Also extract NON-TECHNICAL / LOGISTICS constraints if the JD states them —
+these are hard business constraints (budget, notice, location) separate
+from skills, and should NOT be guessed if the JD doesn't mention them:
+- A salary/rate budget range (annual, in the JD's stated currency's numeric
+  value only — e.g. "$120,000 - $140,000" -> 120000 / 140000)
+- A maximum acceptable notice period, in days (e.g. "immediate starters
+  preferred, max 4 weeks notice" -> 28; "no more than 30 days notice" -> 30)
+- Whether remote work is explicitly allowed ("remote", "hybrid", "work from
+  home" mentioned positively)
 
 Return ONLY valid JSON, no markdown, no commentary:
 {{
@@ -492,12 +636,22 @@ Return ONLY valid JSON, no markdown, no commentary:
   "essential": ["<requirement>", ...],
   "good_to_have": ["<requirement>", ...],
   "optional": ["<requirement>", ...],
+  "requirement_types": {{"<requirement, exact text as used above>": "<technical|tool|domain|qualification|soft_skill>", ...}},
   "min_years_experience": <integer, 0 if not stated>,
-  "education_requirement": "<short phrase, or empty string>"
+  "education_requirement": "<short phrase, or empty string>",
+  "salary_budget_min": <integer annual budget floor, 0 if not stated>,
+  "salary_budget_max": <integer annual budget ceiling, 0 if not stated>,
+  "max_notice_days": <integer, 0 if not stated>,
+  "remote_allowed": <true/false, false if not stated>
 }}"""
 
     def _build_result(data: dict) -> Optional[dict]:
         if data and (data.get("essential") or data.get("good_to_have")):
+            raw_types = data.get("requirement_types") or {}
+            requirement_types = {
+                str(k).strip().lower(): v for k, v in raw_types.items()
+                if v in ("technical", "tool", "domain", "qualification", "soft_skill")
+            }
             return {
                 "role": _clean_field(data.get("role")),
                 "location": _clean_field(data.get("location")),
@@ -505,8 +659,14 @@ Return ONLY valid JSON, no markdown, no commentary:
                 "essential": [s for s in data.get("essential", []) if s][:20],
                 "good_to_have": [s for s in data.get("good_to_have", []) if s][:12],
                 "optional": [s for s in data.get("optional", []) if s][:8],
+                "requirement_types": requirement_types,
                 "min_years_experience": int(data.get("min_years_experience") or 0),
                 "education_requirement": _clean_field(data.get("education_requirement")),
+                # ── Non-technical / logistics constraints (dual-track scoring) ──
+                "salary_budget_min": int(data.get("salary_budget_min") or 0),
+                "salary_budget_max": int(data.get("salary_budget_max") or 0),
+                "max_notice_days": int(data.get("max_notice_days") or 0),
+                "remote_allowed": bool(data.get("remote_allowed") or False),
                 "ai_powered": True,
                 "_groqKeyPreview": _mask_key_for_log(groq_key),
             }
@@ -629,6 +789,31 @@ def _fallback_jd_requirements(jd_text: str, domain_skills: Optional[List[str]] =
     years_m = re.search(r"(\d{1,2})\+?\s*(?:years?|yrs?)\s*(?:of\s+)?experience", jd_lower)
     edu_m = re.search(r"(bachelor'?s?|master'?s?|phd|degree|diploma)[^.\n]{0,80}", jd_lower)
 
+    # ── Logistics fallback (regex-only, no LLM available) ──────────────────
+    salary_min = salary_max = 0
+    sal_m = re.search(
+        r"\$?\s*(\d{2,3}(?:,\d{3})?k?)\s*(?:-|to|–)\s*\$?\s*(\d{2,3}(?:,\d{3})?k?)",
+        jd_lower,
+    )
+    def _to_num(tok: str) -> int:
+        tok = tok.replace(",", "").strip()
+        if tok.endswith("k"):
+            return int(float(tok[:-1]) * 1000)
+        return int(tok)
+    if sal_m:
+        try:
+            salary_min, salary_max = _to_num(sal_m.group(1)), _to_num(sal_m.group(2))
+        except ValueError:
+            salary_min = salary_max = 0
+
+    max_notice_days = 0
+    notice_m = re.search(r"(?:notice\s*period|notice)\s*(?:of\s*)?(?:up\s*to\s*|no\s*more\s*than\s*|max(?:imum)?\s*)?(\d{1,3})\s*(day|week|month)", jd_lower)
+    if notice_m:
+        n, unit = int(notice_m.group(1)), notice_m.group(2)
+        max_notice_days = n * (7 if unit == "week" else 30 if unit == "month" else 1)
+
+    remote_allowed = bool(re.search(r"\b(remote|work\s*from\s*home|wfh|hybrid)\b", jd_lower))
+
     return {
         "role": _clean_field(role_m.group(1).split("\n")[0] if role_m else None),
         "location": _clean_field(loc_m.group(1).split("\n")[0] if loc_m else None),
@@ -638,8 +823,34 @@ def _fallback_jd_requirements(jd_text: str, domain_skills: Optional[List[str]] =
         "optional": [],
         "min_years_experience": int(years_m.group(1)) if years_m else 0,
         "education_requirement": edu_m.group().strip().capitalize() if edu_m else "",
+        "salary_budget_min": salary_min,
+        "salary_budget_max": salary_max,
+        "max_notice_days": max_notice_days,
+        "remote_allowed": remote_allowed,
         "ai_powered": False,
     }
+
+
+async def extract_jd_requirements_categorized(
+    jd_text: str, groq_key: Optional[str], groq_model: str,
+    ollama_base_url: Optional[str] = None, ollama_model: Optional[str] = None,
+    known_terms_hint: Optional[List[str]] = None,
+    db=None, user_id: Optional[int] = None,
+) -> dict:
+    """Caching wrapper around _extract_jd_requirements_categorized_impl —
+    see models.ExtractionCache's docstring for why this exists: the same
+    JD text produces the same requirements every time it's re-analyzed,
+    rather than depending on which LLM provider happens to win the race
+    (or plain inference-level non-determinism) on that particular call."""
+    cache_key = _extraction_cache_key("jd_requirements", jd_text.strip())
+    cached = await _get_cached_extraction(db, cache_key)
+    if cached is not None:
+        return cached
+    result = await _extract_jd_requirements_categorized_impl(
+        jd_text, groq_key, groq_model, ollama_base_url, ollama_model, known_terms_hint, db, user_id,
+    )
+    await _store_cached_extraction(db, cache_key, "jd_requirements", result)
+    return result
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -648,7 +859,7 @@ def _fallback_jd_requirements(jd_text: str, domain_skills: Optional[List[str]] =
 # as its own function)
 # ══════════════════════════════════════════════════════════════════════════
 
-async def extract_resume_facts(
+async def _extract_resume_facts_impl(
     resume_text: str, groq_key: Optional[str], groq_model: str,
     ollama_base_url: Optional[str] = None, ollama_model: Optional[str] = None,
     db=None, user_id: Optional[int] = None,
@@ -750,7 +961,10 @@ Return ONLY valid JSON, no markdown, no commentary:
   "certifications_degrees": ["<certifications and degrees found in the resume>"],
   "summary": "<2-3 sentence evidence-based overall assessment of the candidate>",
   "years_experience": <integer, best estimate>,
-  "education": "<highest qualification found, or empty string>"
+  "education": "<highest qualification found, or empty string>",
+  "expected_salary": <integer annual figure if the resume/cover text states one, else 0 — do NOT guess a market rate>,
+  "notice_period_days": <integer if explicitly stated (e.g. "immediately available" -> 0, "4 weeks notice" -> 28), else -1 if not mentioned at all>,
+  "current_location": "<candidate's current city/region if stated, else empty string>"
 }}"""
 
 
@@ -766,15 +980,40 @@ def _build_resume_facts_result(data: dict) -> Optional[dict]:
         "summary": (data.get("summary") or "").strip(),
         "years_experience": int(data.get("years_experience") or 0),
         "education": _clean_field(data.get("education")),
+        # ── Non-technical / logistics facts (dual-track scoring) ───────────
+        # notice_period_days: -1 means "not mentioned" (distinct from 0 =
+        # "immediately available"), so downstream scoring can tell "unknown"
+        # apart from "no notice required" rather than treating them the same.
+        "expected_salary": int(data.get("expected_salary") or 0),
+        "notice_period_days": int(data.get("notice_period_days") if data.get("notice_period_days") not in (None, "") else -1),
+        "current_location": _clean_field(data.get("current_location")),
         "ai_powered": True,
     }
+
+
+async def extract_resume_facts(
+    resume_text: str, groq_key: Optional[str], groq_model: str,
+    ollama_base_url: Optional[str] = None, ollama_model: Optional[str] = None,
+    db=None, user_id: Optional[int] = None,
+) -> Optional[dict]:
+    """Caching wrapper around _extract_resume_facts_impl — see
+    models.ExtractionCache's docstring for why this exists."""
+    cache_key = _extraction_cache_key("resume_facts", resume_text.strip())
+    cached = await _get_cached_extraction(db, cache_key)
+    if cached is not None:
+        return cached
+    result = await _extract_resume_facts_impl(
+        resume_text, groq_key, groq_model, ollama_base_url, ollama_model, db, user_id,
+    )
+    await _store_cached_extraction(db, cache_key, "resume_facts", result)
+    return result
 
 
 # ══════════════════════════════════════════════════════════════════════════
 # CANDIDATE STRENGTHS — categorized breakdown, evidence-based against the JD
 # ══════════════════════════════════════════════════════════════════════════
 
-async def extract_candidate_strengths(
+async def _extract_candidate_strengths_impl(
     resume_text: str, jd_requirements: dict, groq_key: Optional[str], groq_model: str,
     ollama_base_url: Optional[str] = None, ollama_model: Optional[str] = None,
     known_terms_hint: Optional[List[str]] = None,
@@ -1148,9 +1387,40 @@ Return ONLY valid JSON, no markdown, no commentary:
         "summary": (facts_source.get("summary") or "").strip(),
         "years_experience": int(facts_source.get("years_experience") or 0),
         "education": _clean_field(facts_source.get("education")),
+        # ── Non-technical / logistics facts, passed through unchanged ──────
+        "expected_salary": int(facts_source.get("expected_salary") or 0),
+        "notice_period_days": int(facts_source.get("notice_period_days") if facts_source.get("notice_period_days") not in (None, "") else -1),
+        "current_location": _clean_field(facts_source.get("current_location")),
         "ai_powered": True,
         "_groqKeyPreviews": distinct_key_previews,
     }
+
+
+async def extract_candidate_strengths(
+    resume_text: str, jd_requirements: dict, groq_key: Optional[str], groq_model: str,
+    ollama_base_url: Optional[str] = None, ollama_model: Optional[str] = None,
+    known_terms_hint: Optional[List[str]] = None,
+    db=None, user_id: Optional[int] = None,
+    pre_extracted_facts: Optional[dict] = None,
+) -> dict:
+    """Caching wrapper around _extract_candidate_strengths_impl — see
+    models.ExtractionCache's docstring for why this exists. Keyed on both
+    the resume text AND the JD's essential/good-to-have requirements
+    (not just the resume) since the same resume can be evaluated against
+    different JDs and must get independently-cached results for each."""
+    cache_key = _extraction_cache_key(
+        "candidate_strengths", resume_text.strip(),
+        jd_requirements.get("essential", []), jd_requirements.get("good_to_have", []),
+    )
+    cached = await _get_cached_extraction(db, cache_key)
+    if cached is not None:
+        return cached
+    result = await _extract_candidate_strengths_impl(
+        resume_text, jd_requirements, groq_key, groq_model,
+        ollama_base_url, ollama_model, known_terms_hint, db, user_id, pre_extracted_facts,
+    )
+    await _store_cached_extraction(db, cache_key, "candidate_strengths", result)
+    return result
 
 
 async def extract_candidate_strengths_general(
@@ -1242,5 +1512,12 @@ def _fallback_candidate_strengths(resume_text: str, jd_requirements: dict) -> di
         "summary": f"Matches {len(essential_matched)} of {len(essential)} essential requirements based on keyword analysis.",
         "years_experience": years,
         "education": certifications_degrees[0] if certifications_degrees else "",
+        # No LLM available in this path, so logistics facts can't be read
+        # from free text reliably — default to "unknown" (-1 for notice,
+        # not 0, since 0 means "immediately available", a real claim we
+        # haven't verified) rather than fabricating a number.
+        "expected_salary": 0,
+        "notice_period_days": -1,
+        "current_location": "",
         "ai_powered": False,
     }

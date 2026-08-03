@@ -53,6 +53,9 @@ async def lifespan(app: FastAPI):
 
         from db.seed_admin import seed
         await seed()
+
+        from db.seed_skill_taxonomy import seed as seed_taxonomy
+        await seed_taxonomy()
     except Exception as e:
         print(f"  [!] DB error: {e}\n")
     yield

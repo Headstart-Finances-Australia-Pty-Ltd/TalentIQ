@@ -37,6 +37,19 @@ def _extract_text(content: bytes, filename: str) -> str:
 
     # ── PDF ──────────────────────────────────────────────────────────────
     if fname.endswith(".pdf"):
+        # Layout-aware pass first: detects multi-column resumes (a common
+        # cause of scrambled text — see utils/layout_parse.py) and extracts
+        # tables explicitly rather than letting them fall into plain
+        # top-to-bottom text flow, which is where columns/tables normally
+        # get their content interleaved and unreadable.
+        try:
+            from utils.layout_parse import extract_pdf_layout_aware
+            layout_text = extract_pdf_layout_aware(content)
+            if layout_text.strip():
+                return layout_text
+        except Exception:
+            pass
+
         # Try pdfplumber first
         try:
             import pdfplumber
@@ -177,226 +190,37 @@ STOPWORDS = {"a","an","the","and","or","of","in","on","for","with","to","be","is
 #      the LLM's job is understanding text, not doing arithmetic.
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _normalize_skill(s: str) -> str:
-    s = re.sub(r"\s+", " ", s.strip().lower())
-    # UK/US spelling normalization — general-purpose, not a per-skill fix.
-    # Without this, "dimensional modelling" and "data modeling" don't even
-    # get a chance to match on their shared root word.
-    for pattern, repl in _UK_TO_US_SPELLING:
-        s = re.sub(pattern, repl, s)
-    return s
-
-
-_UK_TO_US_SPELLING = [
-    (r"\bmodelling\b", "modeling"), (r"\blabelling\b", "labeling"),
-    (r"\bcancelled\b", "canceled"), (r"\btravelling\b", "traveling"),
-    (r"\borganisation", "organization"), (r"\bcolour", "color"),
-    (r"\blicence", "license"), (r"\bcentre\b", "center"),
-    (r"\bprogramme\b", "program"), (r"\banalyse", "analyze"),
-    (r"\boptimise", "optimize"), (r"\bcategorise", "categorize"),
-    (r"\bcustomise", "customize"), (r"\bfavour", "favor"),
-    (r"\bbehaviour", "behavior"), (r"\bvisualise", "visualize"),
-    (r"\bsummarise", "summarize"), (r"\bspecialise", "specialize"),
-]
-
-# Two kinds of entries, both one-directional (key = the general/JD-style
-# term; values = things that, if found in a resume, PROVE the general term
-# is satisfied):
-#   - true synonyms/abbreviations (AI <-> Artificial Intelligence)
-#   - specific technique -> general skill it's a form of (Dimensional
-#     Modelling is A KIND OF Data Modeling, so it should count)
-# The second category is deliberately curated rather than inferred by
-# fuzzy string similarity — inferring "X modeling matches Y modeling" from
-# string shape alone is exactly what causes false positives (e.g.
-# "financial modeling" and "data modeling" share a word but are unrelated
-# skills). Encoding actual verified domain relationships avoids that.
-_SKILL_SYNONYMS = {
-    "ai": ["artificial intelligence"], "artificial intelligence": ["ai"],
-    "ml": ["machine learning"], "machine learning": ["ml",
-        "regression", "classification", "neural network", "deep learning",
-        "supervised learning", "unsupervised learning", "random forest",
-        "gradient boosting", "xgboost", "scikit-learn", "tensorflow", "pytorch"],
-    "bi": ["business intelligence"], "business intelligence": ["bi"],
-    "power bi": ["powerbi", "power-bi"],
-    "aws": ["amazon web services", "ec2", "s3", "redshift", "lambda",
-        "aws glue", "amazon redshift", "cloudformation"],
-    "amazon web services": ["aws"],
-    "azure": ["microsoft azure", "azure data factory", "azure synapse",
-        "azure synapse analytics", "adls", "adls gen2", "azure devops"],
-    "gcp": ["google cloud platform", "google cloud", "bigquery", "gcp bigquery"],
-    "google cloud platform": ["gcp"],
-    "api": ["apis", "application programming interface", "rest api", "restful api", "graphql"],
-    "apis": ["api"],
-    "etl": ["extract transform load", "extract, transform, load", "elt",
-        "data pipeline", "airflow", "dbt", "informatica", "talend", "ssis"],
-    "elt": ["etl"],
-    "data pipeline": ["etl", "elt", "airflow", "dbt", "data pipelines"],
-    "sql": ["structured query language", "t-sql", "pl/sql", "mysql", "postgresql", "postgres"],
-    "ci/cd": ["ci cd", "continuous integration", "continuous deployment", "jenkins", "github actions"],
-    "devops": ["dev ops"],
-    "nlp": ["natural language processing"], "natural language processing": ["nlp"],
-    "llm": ["large language model", "large language models", "gpt", "generative ai"],
-    "data governance": ["governance framework", "data governance framework",
-        "data stewardship", "data catalog", "data cataloguing", "data lineage",
-        "data quality framework", "collibra", "alation"],
-    "edw": ["enterprise data warehouse"], "enterprise data warehouse": ["edw"],
-    "mdm": ["master data management"], "master data management": ["mdm"],
-    "data mesh": ["domain-oriented data", "data domain", "data products"],
-    "kpi": ["key performance indicator"],
-    "ux": ["user experience"], "ui": ["user interface"],
-    "qa": ["quality assurance"],
-    "pm": ["project management", "project manager"],
-    "hr": ["human resources"],
-    "crm": ["customer relationship management", "salesforce"],
-    "erp": ["enterprise resource planning", "sap", "oracle erp", "netsuite"],
-    # ── Data modeling / architecture: specific technique -> general skill ──
-    "data modeling": [
-        "dimensional modeling", "dimensional model", "data vault",
-        "data vault 2.0", "star schema", "snowflake schema",
-        "entity relationship modeling", "er modeling", "erd",
-        "third normal form", "3nf modeling", "kimball", "inmon",
-        "fsldm", "logical data modeling", "physical data modeling",
-        "conceptual data modeling", "normalization", "denormalization",
-    ],
-    "data modelling": ["data modeling"],  # falls through to the US-spelling key above via normalization
-    "data architecture": [
-        "data mesh", "data fabric", "lakehouse", "data lakehouse",
-        "enterprise data warehouse", "edw", "data lake", "data warehouse",
-        "solution architecture", "enterprise architecture",
-    ],
-    "cloud architecture": ["aws", "azure", "gcp", "multi-cloud", "hybrid cloud"],
-}
-
-
-def _skill_present(skill: str, candidate_skills: set, resume_lower: str) -> bool:
-    """A skill counts as present if any of the following hold — designed to
-    catch real-world phrasing variance rather than only an exact match:
-      1. it's in the LLM-extracted candidate skill list (allowing either
-         side to be a substring of the other, e.g. "python" vs "python 3")
-      2. the exact phrase appears literally in the resume text (after
-         UK/US spelling normalization on both sides)
-      3. a known synonym, abbreviation, or specific-technique-that-implies-
-         the-general-skill appears in the resume text (curated list, not
-         blind fuzzy matching — see _SKILL_SYNONYMS above for why)
-      4. for multi-word skills, all of its significant words appear
-         somewhere in the resume (not necessarily contiguous) — catches
-         cases like a JD's "data governance" matching a resume's
-         "established governance frameworks across enterprise data"
-    Exact substring matching alone was producing false-negative "gaps" for
-    skills that were genuinely present in the resume, just phrased,
-    abbreviated, or spelled differently than the JD's exact wording.
-    """
-    sk = _normalize_skill(skill)
-
-    if any(sk in cs or cs in sk for cs in candidate_skills):
-        return True
-
-    if sk in resume_lower:
-        return True
-
-    for variant in _SKILL_SYNONYMS.get(sk, []):
-        if _normalize_skill(variant) in resume_lower:
-            return True
-
-    words = [w for w in sk.split() if len(w) > 2]
-    if len(words) >= 2 and all(w in resume_lower for w in words):
-        return True
-
-    return False
-
-
-def _normalize_text(s: str) -> str:
-    """Same UK/US spelling normalization as _normalize_skill, applied to a
-    full block of text (resume/JD) rather than a single skill phrase — both
-    sides of a comparison need this or spelling normalization does nothing."""
-    s = s.lower()
-    for pattern, repl in _UK_TO_US_SPELLING:
-        s = re.sub(pattern, repl, s)
-    return s
-
-
-def _compute_weighted_score(jd_req: dict, strengths: dict, resume: str) -> dict:
-    """Deterministic scoring math over the extracted fields, BUT the actual
-    essential/good-to-have match determination now comes directly from the
-    LLM's own per-item verdict (strengths["essential_matched"/"essential_missing"]
-    from utils.llm_extraction.extract_candidate_strengths) rather than being
-    re-derived here via string/token matching — that matching could not
-    reliably judge long capability-statement requirements or requirements
-    phrased differently than the resume (e.g. "Data Modeling" vs a resume
-    that says "Dimensional Modeling", a specific technique that IS a form
-    of it). The deterministic _skill_present check is kept only as a
-    fallback for the rare case the LLM path didn't populate these fields.
-    Weights: essential coverage 50%, experience-level fit 25%, education
-    fit 10%, good-to-have bonus 10%, baseline content-depth allowance 5%."""
-    resume_lower = _normalize_text(resume)
-    candidate_skill_set = {
-        _normalize_skill(s) for s in
-        (strengths.get("technical_skills", []) + strengths.get("business_skills", []))
-    }
-
-    essential = [s for s in jd_req.get("essential", []) if s]
-    good_to_have = [s for s in jd_req.get("good_to_have", []) if s]
-
-    if "essential_matched" in strengths or "essential_missing" in strengths:
-        matched = strengths.get("essential_matched", [])
-        missing = strengths.get("essential_missing", [])
-        matched_good = strengths.get("good_to_have_matched", [])
-    else:
-        matched = [s for s in essential if _skill_present(_normalize_skill(s), candidate_skill_set, resume_lower)]
-        missing = [s for s in essential if s not in matched]
-        matched_good = [s for s in good_to_have if _skill_present(_normalize_skill(s), candidate_skill_set, resume_lower)]
-
-    skills_pct = round(len(matched) / len(essential) * 100) if essential else 70
-
-    min_years = jd_req.get("min_years_experience") or 0
-    cand_years = strengths.get("years_experience") or 0
-    if min_years <= 0:
-        experience_pct = 85
-    else:
-        experience_pct = max(20, min(100, round(cand_years / min_years * 100)))
-
-    edu_req = (jd_req.get("education_requirement") or "").lower()
-    edu_cand = (strengths.get("education") or "").lower()
-    if not edu_req:
-        education_pct = 90
-    elif edu_cand and (edu_cand in edu_req or edu_req in edu_cand or
-                        any(w in edu_cand for w in ["bachelor", "master", "phd", "degree", "diploma"] if w in edu_req)):
-        education_pct = 100
-    else:
-        education_pct = 45
-
-    good_to_have_bonus_pct = min(100, len(matched_good) * 25) if good_to_have else 60
-
-    overall = (
-        skills_pct * 0.50 +
-        experience_pct * 0.25 +
-        education_pct * 0.10 +
-        good_to_have_bonus_pct * 0.10 +
-        75 * 0.05
-    )
-    overall = max(8, min(98, round(overall)))
-
-    return {
-        "overall": overall,
-        "skills_pct": skills_pct,
-        "experience_pct": experience_pct,
-        "education_pct": education_pct,
-        "matched": matched,
-        "missing": missing,
-        "matched_good_to_have": matched_good,
-    }
+# ── Skill matching + technical scoring: MOVED to utils/technical_scoring.py
+# so CVIntel and CandidateLens (routers/joblens.py) share the exact same
+# matching logic and scoring formula instead of each maintaining a
+# separate, silently-diverging copy — see that module's docstring for the
+# full story of why they'd been producing different scores for the same
+# resume/JD pair. Aliased back to the original names here so every
+# existing call site below (_skill_present(...), _compute_weighted_score(...))
+# keeps working unchanged.
+from utils.technical_scoring import (
+    skill_present as _skill_present,
+    normalize_skill as _normalize_skill,
+    normalize_text as _normalize_text,
+    compute_technical_score as _compute_weighted_score,
+)
 
 
 async def _score_resume(
     resume: str, jd: str, groq_key: Optional[str], groq_model: str = DEFAULT_GROQ_MODEL,
     ollama_base_url: Optional[str] = None, ollama_model: Optional[str] = None, db=None, user_id: Optional[int] = None,
+    weight_overrides: Optional[dict] = None, disqualifier_overrides: Optional[dict] = None,
 ) -> dict:
     from utils.llm_extraction import (
         extract_jd_requirements_categorized, extract_candidate_strengths, extract_resume_facts,
-        get_taxonomy_hint, enrich_skill_taxonomy,
+        get_taxonomy_hint, get_semantic_taxonomy_hint, enrich_skill_taxonomy,
     )
 
-    known_terms = await get_taxonomy_hint(db) if db is not None else []
+    # Semantic (pgvector-backed) taxonomy hint: terms relevant to THIS JD,
+    # not just the globally most-frequent ones — see get_semantic_taxonomy_hint's
+    # docstring. Gracefully falls back to frequency-based if embeddings/pgvector
+    # aren't available.
+    known_terms = await get_semantic_taxonomy_hint(db, jd) if db is not None else []
 
     # JD categorization and resume-facts extraction are genuinely
     # independent of each other — the JD's requirements don't depend on
@@ -423,9 +247,19 @@ async def _score_resume(
         jd_key, jd_model = groq_key, groq_model
         resume_key, resume_model = groq_key, groq_model
 
+    # user_id is deliberately NOT passed to either of these two calls (even
+    # though db is) — db alone is enough to enable the extraction CACHE
+    # (see models.ExtractionCache; that cache always uses its own isolated
+    # DB session, so it's safe under any concurrency pattern), but db+user_id
+    # TOGETHER also enable each function's internal API-key-POOL resolution,
+    # which DOES use the shared `db` session directly and is NOT safe to run
+    # concurrently — and these two calls run concurrently via gather() right
+    # below. Omitting user_id here keeps that pool logic off for exactly the
+    # same reason it's kept off for CandidateLens's concurrent per-candidate
+    # calls (see routers/joblens.py) — while still getting the caching fix.
     jd_req, resume_facts = await asyncio.gather(
-        extract_jd_requirements_categorized(jd, jd_key, jd_model, ollama_base_url, ollama_model, known_terms),
-        extract_resume_facts(resume, resume_key, resume_model, ollama_base_url, ollama_model),
+        extract_jd_requirements_categorized(jd, jd_key, jd_model, ollama_base_url, ollama_model, known_terms, db=db, user_id=None),
+        extract_resume_facts(resume, resume_key, resume_model, ollama_base_url, ollama_model, db=db, user_id=None),
     )
     # If the concurrent resume-facts call didn't succeed for any reason,
     # don't pass a None down as if it were real data — just omit it, and
@@ -460,11 +294,37 @@ async def _score_resume(
             "business": strengths.get("business_skills", []),
             "soft": strengths.get("soft_skills", []),
         })
-    scoring = _compute_weighted_score(jd_req, strengths, resume)
+    from utils.scoring import (
+        merge_weights, merge_disqualifiers, compute_non_technical_score,
+        check_hard_disqualifiers, compute_composite_score,
+    )
+    weights = merge_weights(weight_overrides)
+    disqualifiers = merge_disqualifiers(disqualifier_overrides)
+
+    scoring = _compute_weighted_score(jd_req, strengths, resume, weights)
     ai_powered = bool(strengths.get("ai_powered", False))
 
     matched, missing = scoring["matched"], scoring["missing"]
-    overall = scoring["overall"]
+    technical_score = scoring["overall"]
+
+    # ── Non-technical / logistics track — decoupled from the technical
+    # score above, exactly like RevaMatrix-AI's dual-track design: salary
+    # expectation vs. budget, notice period vs. max acceptable, location/
+    # remote fit. Fields come from LLM-extracted JD constraints (jd_req)
+    # and candidate facts (strengths) — see utils/llm_extraction.py.
+    logistics = {
+        "expected_salary": strengths.get("expected_salary") or 0,
+        "notice_period_days": strengths.get("notice_period_days", -1),
+        "current_location": strengths.get("current_location") or "",
+        "salary_budget_min": jd_req.get("salary_budget_min") or 0,
+        "salary_budget_max": jd_req.get("salary_budget_max") or 0,
+        "max_notice_days": jd_req.get("max_notice_days") or 0,
+        "jd_location": jd_req.get("location") or "",
+        "remote_allowed": jd_req.get("remote_allowed") or False,
+    }
+    non_technical = compute_non_technical_score(logistics, weights)
+    is_disqualified, disqualify_reason = check_hard_disqualifiers(logistics, disqualifiers)
+    overall = compute_composite_score(technical_score, non_technical, weights)
 
     gaps = strengths.get("gaps") or [f"Missing required skill: {s}" for s in missing[:6]]
     if not gaps:
@@ -483,6 +343,9 @@ async def _score_resume(
             f"Matches {scoring['skills_pct']}% of the essential requirements{exp_clause}. "
             f"Overall fit: {'Strong' if overall >= 75 else 'Moderate' if overall >= 55 else 'Needs improvement'}."
         )
+    if is_disqualified:
+        summary = f"⚠ Hard disqualifier: {disqualify_reason}. {summary}"
+        gaps = [f"Disqualifying logistics gap: {disqualify_reason}"] + gaps
 
     format_warnings = [
         "Use standard ATS-compatible section headers (Experience, Education, Skills)",
@@ -507,18 +370,57 @@ async def _score_resume(
         "summaryAssessment": summary,
         "formatWarnings": format_warnings[:4],
         "detailedScores": {
+            # ── Real category breakdown (was previously a fake offset from
+            # "overall" for domain/softSkills — e.g. "overall - 5" — not an
+            # actual measurement of anything). Now backed by the JD's own
+            # per-requirement type tagging (see utils/llm_extraction.py's
+            # extract_jd_requirements_categorized "requirement_types").
+            # pct is null when the JD had zero requirements of that type —
+            # the frontend should show "N/A", not "0%", for that case.
             "skillsMatch": scoring["skills_pct"],
             "experience": scoring["experience_pct"],
-            "tools": scoring["skills_pct"],
-            "domain": max(30, overall - 5),
-            "softSkills": max(30, overall - 10),
+            "tools": scoring["category_breakdown"]["tool"]["pct"],
+            "domain": scoring["category_breakdown"]["domain"]["pct"],
+            "softSkills": scoring["category_breakdown"]["soft_skill"]["pct"],
             "format": min(92, overall + 8),
+        },
+        # ── Full tier + type breakdown for a detailed score view ────────
+        "scoreBreakdown": {
+            "essential": {"pct": scoring["essential_pct"], "label": "Essential Requirements"},
+            "goodToHave": {"pct": scoring["good_to_have_pct"], "label": "Good to Have"},
+            "qualification": {"pct": scoring["qualification_pct"], "label": "Qualification / Education"},
+            "technical": {**scoring["category_breakdown"]["technical"], "label": "Technical Skills"},
+            "tools": {**scoring["category_breakdown"]["tool"], "label": "Tools & Platforms"},
+            "domain": {**scoring["category_breakdown"]["domain"], "label": "Domain Knowledge"},
+            "softSkills": {**scoring["category_breakdown"]["soft_skill"], "label": "Soft Skills"},
+            "finalATS": overall,
         },
         "matchedSkills": matched[:15],
         "missingSkills": missing[:15],
         "aiPowered": ai_powered,
         "groqModel": groq_model if ai_powered else None,
         "groqKeyPreview": ", ".join(all_key_previews) if (ai_powered and all_key_previews) else None,
+        # ── Dual-track scoring (technical vs. non-technical/logistics) —
+        # closes the gap vs. RevaMatrix-AI's decoupled scoring design.
+        # overallScore above is now the WEIGHTED COMPOSITE of these two.
+        "technicalScore": technical_score,
+        "nonTechnicalScore": non_technical["score"],
+        "logisticsBreakdown": {
+            "applicable": non_technical["applicable"],
+            "salaryScore": non_technical["salary_score"],
+            "noticeScore": non_technical["notice_score"],
+            "locationScore": non_technical["location_score"],
+            "candidateExpectedSalary": logistics["expected_salary"] or None,
+            "candidateNoticeDays": logistics["notice_period_days"] if logistics["notice_period_days"] >= 0 else None,
+            "candidateLocation": logistics["current_location"] or None,
+            "jdSalaryBudgetMin": logistics["salary_budget_min"] or None,
+            "jdSalaryBudgetMax": logistics["salary_budget_max"] or None,
+            "jdMaxNoticeDays": logistics["max_notice_days"] or None,
+            "jdRemoteAllowed": logistics["remote_allowed"],
+        },
+        "hardDisqualified": is_disqualified,
+        "disqualifyReason": disqualify_reason,
+        "weightsUsed": weights,
         # ── Categorized strengths — the actual point of this round's change ──
         "strengthsBreakdown": {
             "essentialMatched": strengths.get("essential_matched", []),
@@ -548,12 +450,48 @@ async def _score_resume(
 
 # ── ENDPOINT ───────────────────────────────────────────────────────────────────
 
+@router.post("/fetch-jd-url")
+async def fetch_jd_url(
+    payload: dict,
+    current_user: User = Depends(get_current_user),
+):
+    """Converts a job-posting URL (Seek, LinkedIn, Indeed, Greenhouse,
+    Lever, Workday, etc.) into JD text — see utils/jd_url_fetch.py for the
+    extraction strategy and its honest limitations. Returns the extracted
+    text for the frontend to drop into the SAME "paste JD text" field
+    used everywhere else, so the actual analysis that follows is 100%
+    identical to pasting the text directly — this endpoint only changes
+    HOW the text gets into the box, not anything about how it's scored.
+
+    Body: {"url": "https://..."}
+    """
+    from utils.jd_url_fetch import fetch_jd_from_url, JDFetchError
+
+    url = (payload.get("url") or "").strip()
+    if not url:
+        raise HTTPException(400, "A URL is required.")
+
+    try:
+        result = await fetch_jd_from_url(url)
+    except JDFetchError as e:
+        raise HTTPException(422, str(e))
+
+    return result
+
+
 @router.post("/analyze")
 async def analyze_resume(
     job_description: str   = Form(""),
     resume_text: str       = Form(""),
     file:     Optional[UploadFile] = File(None),
     jd_file:  Optional[UploadFile] = File(None),
+    # ── Dynamic weighting engine ────────────────────────────────────────
+    # JSON strings from the frontend's weighting sliders (see
+    # utils/scoring.DEFAULT_WEIGHTS / DEFAULT_DISQUALIFIERS for the shape).
+    # Optional and backward-compatible: omitted entirely, an existing
+    # caller gets identical behavior to before this change.
+    weights: Optional[str]       = Form(None),
+    disqualifiers: Optional[str] = Form(None),
     current_user: User     = Depends(get_current_user),
     db: AsyncSession       = Depends(get_db),
 ):
@@ -603,12 +541,73 @@ async def analyze_resume(
     ollama_base_url = ollama_creds.get("base_url")
     ollama_model = ollama_creds.get("model")
 
+    weight_overrides = None
+    if weights:
+        try:
+            weight_overrides = json.loads(weights)
+        except (json.JSONDecodeError, TypeError):
+            raise HTTPException(400, "weights must be a valid JSON object")
+
+    disqualifier_overrides = None
+    if disqualifiers:
+        try:
+            disqualifier_overrides = json.loads(disqualifiers)
+        except (json.JSONDecodeError, TypeError):
+            raise HTTPException(400, "disqualifiers must be a valid JSON object")
+
     result = await _score_resume(
         final_resume, final_jd, groq_key, groq_model,
         ollama_base_url=ollama_base_url, ollama_model=ollama_model, db=db, user_id=current_user.id,
+        weight_overrides=weight_overrides, disqualifier_overrides=disqualifier_overrides,
     )
 
     return result
+
+
+@router.post("/reweight")
+async def reweight_analysis(
+    payload: dict,
+    current_user: User = Depends(get_current_user),
+):
+    """Re-composite an ALREADY-COMPUTED analysis with new weights, purely
+    in Python — no LLM call, no re-parsing. This is what makes a
+    real-time "drag the slider, see the score change" UI possible: the
+    frontend keeps the last /analyze response (which already contains
+    technicalScore and logisticsBreakdown) and calls this endpoint on
+    every slider move instead of re-running the full analysis.
+
+    Body: {"technicalScore": float, "logistics": {...same shape as
+    logisticsBreakdown fields...}, "weights": {...overrides...},
+    "disqualifiers": {...overrides...}}
+    """
+    from utils.scoring import (
+        merge_weights, merge_disqualifiers, compute_non_technical_score,
+        check_hard_disqualifiers, compute_composite_score,
+    )
+
+    technical_score = float(payload.get("technicalScore") or 0)
+    logistics = payload.get("logistics") or {}
+    weights = merge_weights(payload.get("weights"))
+    disqualifiers = merge_disqualifiers(payload.get("disqualifiers"))
+
+    non_technical = compute_non_technical_score(logistics, weights)
+    is_disqualified, disqualify_reason = check_hard_disqualifiers(logistics, disqualifiers)
+    overall = compute_composite_score(technical_score, non_technical, weights)
+
+    return {
+        "overallScore": overall,
+        "technicalScore": technical_score,
+        "nonTechnicalScore": non_technical["score"],
+        "logisticsBreakdown": {
+            "applicable": non_technical["applicable"],
+            "salaryScore": non_technical["salary_score"],
+            "noticeScore": non_technical["notice_score"],
+            "locationScore": non_technical["location_score"],
+        },
+        "hardDisqualified": is_disqualified,
+        "disqualifyReason": disqualify_reason,
+        "weightsUsed": weights,
+    }
 
 
 # ── HISTORY (persisted server-side, so it survives browsers/devices/refresh) ──
