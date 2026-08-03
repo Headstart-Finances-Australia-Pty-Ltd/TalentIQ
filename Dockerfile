@@ -35,7 +35,30 @@ WORKDIR /app
 
 # Install Python dependencies
 COPY backend/requirements.txt ./
+# ── CPU-only torch, installed BEFORE requirements.txt ──────────────
+# sentence-transformers (in requirements.txt, for utils/embeddings.py's
+# local semantic-matching model) depends on torch. Without this step,
+# pip installs torch's DEFAULT PyPI wheel, which bundles full CUDA/GPU
+# support — confirmed while building this feature: that wheel is over
+# 1.2GB, vs. ~200-300MB for the official CPU-only build, for a feature
+# explicitly designed to run on CPU with no GPU involved at all. Installing
+# the CPU wheel FIRST satisfies sentence-transformers' torch dependency
+# before `pip install -r requirements.txt` runs, so pip does not pull in
+# the much larger GPU build afterward.
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Pre-download the local CPU embedding model (utils/embeddings.py,
+# all-MiniLM-L6-v2 — used for semantic skill matching + taxonomy search)
+# at BUILD time rather than on first use at runtime. Without this, the
+# first real request that needs it would try to fetch the model weights
+# from huggingface.co on the fly — which may be slow, or fail entirely if
+# the runtime environment's egress is more restricted than the build
+# environment's. `|| true` means a failed/offline download here doesn't
+# break the image build; the app still runs fine without it, just with
+# that one feature falling back to its TF-IDF tier (see
+# utils/semantic_match.py) until the model becomes available.
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')" || true
 
 # Install Playwright browsers
 RUN playwright install chromium --with-deps || true
