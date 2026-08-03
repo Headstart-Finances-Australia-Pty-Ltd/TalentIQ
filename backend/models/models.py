@@ -12,6 +12,20 @@ from sqlalchemy.orm import relationship
 
 from db.database import Base
 
+# pgvector's SQLAlchemy type — used only by SkillTaxonomy.embedding below,
+# for DB-backed semantic search on the SAME Postgres database (see
+# utils/embeddings.py). Guarded import: if the `pgvector` package or the
+# Postgres `vector` extension isn't set up yet, every OTHER table/feature
+# in this file still works — only the embedding column falls back to a
+# plain JSON list, and semantic search over the taxonomy simply isn't
+# available until both are installed (see requirements.txt + the
+# `CREATE EXTENSION vector` migration in db/migrate_fix.py).
+try:
+    from pgvector.sqlalchemy import Vector
+except ImportError:
+    def Vector(dim):  # type: ignore[no-redef]
+        return JSON
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # USERS
@@ -92,6 +106,41 @@ class SkillTaxonomy(Base):
     frequency     = Column(Integer, default=1, nullable=False)
     first_seen_at = Column(DateTime, default=datetime.utcnow)
     last_seen_at  = Column(DateTime, default=datetime.utcnow)
+    # ── Semantic search (pgvector, on the SAME Postgres — no separate
+    # vector-DB service) — see utils/embeddings.py. Nullable: rows created
+    # before this column existed, or created while the local embedding
+    # model was unavailable, simply don't participate in vector search
+    # until backfilled; everything else about the row still works.
+    embedding     = Column(Vector(384), nullable=True)
+
+
+class ExtractionCache(Base):
+    """Caches LLM extraction results (JD requirements, candidate strengths,
+    resume facts) keyed by a hash of their exact input text.
+
+    This exists specifically to fix a real determinism bug: the SAME
+    resume + SAME JD was producing DIFFERENT ATS scores on repeated runs.
+    Root cause was NOT simply "temperature isn't quite 0" — it's that
+    extraction races Groq against a local Ollama model (or multiple Groq
+    keys) and uses whichever responds FIRST (see race_llm_providers in
+    utils/llm_extraction.py); different providers/models can and do reach
+    different (both individually reasonable) judgments on borderline
+    essential/good-to-have calls, so WHICH one wins the race — not just
+    model randomness — was the deciding factor each run.
+
+    Caching by exact input-text hash makes a genuine repeat run (same
+    resume, same JD, unchanged) skip the LLM/race entirely and return the
+    prior result byte-for-byte — deterministic by construction. A
+    genuinely edited resume or JD gets a different hash and a fresh
+    extraction, as it should.
+    """
+    __tablename__ = "tiq_extraction_cache"
+
+    id              = Column(Integer, primary_key=True, index=True)
+    cache_key       = Column(String(64), nullable=False, unique=True, index=True)  # sha256 hex
+    extraction_type = Column(String(50), nullable=False)  # jd_requirements / candidate_strengths / resume_facts
+    result          = Column(JSON, nullable=False)
+    created_at      = Column(DateTime, default=datetime.utcnow)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -332,6 +381,25 @@ class JobLensSession(Base):
     status         = Column(String(50), default="completed")
     created_at     = Column(DateTime, default=datetime.utcnow)
 
+    # ── Dual-track scoring: JD-side logistics constraints ──────────────────
+    # Extracted from jd_text (LLM/heuristic, see utils/llm_extraction.py) or
+    # entered directly by the recruiter when creating the session. Used
+    # against each candidate's own stated logistics (see JobLensCandidate
+    # .logistics below) by utils/scoring.py's non-technical track.
+    salary_budget_min = Column(Integer, default=0)
+    salary_budget_max = Column(Integer, default=0)
+    max_notice_days   = Column(Integer, default=0)
+    jd_remote_allowed = Column(Boolean, default=False)
+
+    # ── Dynamic weighting engine ────────────────────────────────────────────
+    # The exact weights (see utils/scoring.DEFAULT_WEIGHTS for shape) used
+    # to combine technical + non-technical scores for THIS session, stored
+    # so past sessions remain reproducible even after defaults change, and
+    # so the UI can pre-fill sliders to "what was actually used" when
+    # reopening a session to re-weight it.
+    weights        = Column(JSON, default=dict)
+    disqualifiers  = Column(JSON, default=dict)  # see utils/scoring.DEFAULT_DISQUALIFIERS
+
     user       = relationship("User",             back_populates="joblens_sessions")
     candidates = relationship("JobLensCandidate", back_populates="session", cascade="all, delete-orphan")
 
@@ -356,6 +424,21 @@ class JobLensCandidate(Base):
     interview_questions = Column(JSON, default=list)
     resume_summary      = Column(JSON, default=dict)   # categorized bullets: experience/skills/education/achievements/availability_work_rights
     strengths_breakdown = Column(JSON)  # technical/business/soft skills, experience, certs — see utils/llm_extraction.py
+
+    # ── Dual-track scoring (technical vs. non-technical/logistics) ────────
+    # ats_score (above) remains the COMPOSITE score for backward-compat
+    # sorting/display everywhere it's already used. These are the two
+    # tracks that compose it — stored separately so a session can be
+    # RE-WEIGHTED and RE-RANKED later purely in Python (see the /reweight
+    # endpoint in routers/joblens.py) without re-running any LLM
+    # extraction, and so the UI can show "85% technical, but non-technical
+    # logistics only 40%" instead of one opaque blended number.
+    technical_score      = Column(Float, default=0.0)
+    non_technical_score  = Column(Float, nullable=True)   # None = no logistics data available for this candidate/JD
+    logistics            = Column(JSON, default=dict)     # {expected_salary, notice_period_days, current_location, salary_score, notice_score, location_score}
+    hard_disqualified    = Column(Boolean, default=False)
+    disqualify_reason    = Column(String(300))
+
     interview_token     = Column(String(64), unique=True, index=True, nullable=True)
     contacted           = Column(Boolean, default=False)  # invite email sent
     video_status        = Column(String(50), default="Pending")
@@ -486,6 +569,14 @@ class JDRecord(Base):
     optional_skills       = Column(JSON, default=list)
     min_years_experience  = Column(Integer, default=0)
     education_requirement = Column(String(300))
+    # ── Non-technical / logistics constraints (dual-track scoring) ────────
+    # Feeds CandidateLens sessions created from this JD (via jd_record_id)
+    # so budget/notice constraints are entered once here rather than
+    # re-entered per session. See utils/scoring.py.
+    salary_budget_min     = Column(Integer, default=0)
+    salary_budget_max     = Column(Integer, default=0)
+    max_notice_days       = Column(Integer, default=0)
+    remote_allowed        = Column(Boolean, default=False)
     # Optional uploaded JD document (Word/PDF) — description text field
     # above is still the source used for requirement extraction; this is
     # the original document for reference/download.

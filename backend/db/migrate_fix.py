@@ -187,6 +187,47 @@ MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS idx_tiq_tracked_candidates_vendor_id ON tiq_tracked_candidates(vendor_id)",
     "CREATE INDEX IF NOT EXISTS idx_tiq_tracked_candidates_duplicate_of_id ON tiq_tracked_candidates(duplicate_of_id)",
     "CREATE INDEX IF NOT EXISTS idx_tiq_candidate_status_log_candidate_id ON tiq_candidate_status_log(candidate_id)",
+
+    # ── Dual-track scoring engine (RevaMatrix-AI parity): decoupled
+    # technical/non-technical scoring, dynamic weights, hard disqualifiers.
+    # See utils/scoring.py, and the JobLensSession/JobLensCandidate model
+    # docstrings for what each field is used for.
+    "ALTER TABLE tiq_joblens_sessions ADD COLUMN IF NOT EXISTS salary_budget_min INTEGER DEFAULT 0",
+    "ALTER TABLE tiq_joblens_sessions ADD COLUMN IF NOT EXISTS salary_budget_max INTEGER DEFAULT 0",
+    "ALTER TABLE tiq_joblens_sessions ADD COLUMN IF NOT EXISTS max_notice_days INTEGER DEFAULT 0",
+    "ALTER TABLE tiq_joblens_sessions ADD COLUMN IF NOT EXISTS jd_remote_allowed BOOLEAN DEFAULT FALSE",
+    "ALTER TABLE tiq_joblens_sessions ADD COLUMN IF NOT EXISTS weights JSON DEFAULT '{}'",
+    "ALTER TABLE tiq_joblens_sessions ADD COLUMN IF NOT EXISTS disqualifiers JSON DEFAULT '{}'",
+
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS technical_score FLOAT DEFAULT 0.0",
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS non_technical_score FLOAT",
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS logistics JSON DEFAULT '{}'",
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS hard_disqualified BOOLEAN DEFAULT FALSE",
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS disqualify_reason VARCHAR(300)",
+
+    # JD Management: same logistics constraints, so a JD authored/tracked
+    # there can feed CandidateLens sessions created from it (jd_record_id
+    # link already exists) without re-entering budget/notice constraints.
+    "ALTER TABLE tiq_jd_records ADD COLUMN IF NOT EXISTS salary_budget_min INTEGER DEFAULT 0",
+    "ALTER TABLE tiq_jd_records ADD COLUMN IF NOT EXISTS salary_budget_max INTEGER DEFAULT 0",
+    "ALTER TABLE tiq_jd_records ADD COLUMN IF NOT EXISTS max_notice_days INTEGER DEFAULT 0",
+    "ALTER TABLE tiq_jd_records ADD COLUMN IF NOT EXISTS remote_allowed BOOLEAN DEFAULT FALSE",
+
+    # ── Zero-cost semantic search: pgvector on the SAME Postgres DB ──────
+    # (Supabase/Neon both support this extension natively) instead of a
+    # separate Qdrant/Pinecone service. See utils/embeddings.py and
+    # models.SkillTaxonomy.embedding. Safe no-op if the extension is
+    # already present or unavailable on this Postgres tier — caught by
+    # migrate_fix.py's existing per-statement try/except below, and the
+    # embedding column falls back to plain JSON storage (see models.py's
+    # guarded Vector import) if the extension truly can't be created.
+    "CREATE EXTENSION IF NOT EXISTS vector",
+    "ALTER TABLE tiq_skill_taxonomy ADD COLUMN IF NOT EXISTS embedding vector(384)",
+    # Approximate nearest-neighbor index (cosine distance) — makes
+    # semantic taxonomy lookup fast even at tens of thousands of terms.
+    # Requires at least a few rows to build well; harmless to create early.
+    "CREATE INDEX IF NOT EXISTS idx_tiq_skill_taxonomy_embedding "
+    "ON tiq_skill_taxonomy USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)",
 ]
 
 async def run():
