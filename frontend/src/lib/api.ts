@@ -41,9 +41,10 @@ export const authApi = {
 export const groqPoolApi = {
   list: () => api.get("/api/admin/groq-pool").then((r) => r.data),
   add: (data: { key_value: string; model?: string }) => api.post("/api/admin/groq-pool", data).then((r) => r.data),
-  update: (id: number, data: { is_active?: boolean; model?: string }) => api.patch(`/api/admin/groq-pool/${id}`, data).then((r) => r.data),
+  update: (id: number, data: { is_active?: boolean; model?: string; key_value?: string }) => api.patch(`/api/admin/groq-pool/${id}`, data).then((r) => r.data),
   remove: (id: number) => api.delete(`/api/admin/groq-pool/${id}`).then((r) => r.data),
   listModels: (key_value: string) => api.post("/api/admin/groq-pool/models", { key_value }).then((r) => r.data),
+  listModelsForExisting: (id: number) => api.post(`/api/admin/groq-pool/${id}/models`).then((r) => r.data),
 };
 
 export const jobhuntApi = {

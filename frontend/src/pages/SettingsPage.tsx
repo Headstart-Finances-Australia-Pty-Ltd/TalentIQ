@@ -1,7 +1,7 @@
 import { useNavigate } from "react-router-dom";
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, Fragment } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Settings, Key, User, Shield, Trash2 , Home} from "lucide-react";
+import { Settings, Key, User, Shield, Trash2, Pencil, Home} from "lucide-react";
 import { authApi, groqPoolApi } from "../lib/api";
 import { useAuth } from "../hooks/useAuth";
 
@@ -79,6 +79,21 @@ export default function SettingsPage() {
       setFetchingModels(false);
     }
   };
+  // Fetches models for an ALREADY-SAVED pool key using its stored value
+  // server-side — the value itself is never sent to or requested from
+  // the browser, so "just change the model" never requires re-entering
+  // or knowing the existing key.
+  const fetchModelsForExistingPoolKey = async (poolId: number) => {
+    setFetchingModels(true); setModelsFetchError(""); setFetchedModels(null);
+    try {
+      const res = await groqPoolApi.listModelsForExisting(poolId);
+      setFetchedModels(res.models || []);
+    } catch (e: any) {
+      setModelsFetchError(e.response?.data?.detail || "Could not fetch models for this key.");
+    } finally {
+      setFetchingModels(false);
+    }
+  };
   // Auto-fetches shortly after the user stops typing/pasting a
   // plausible-looking key — no extra click needed, models just show up
   // the way they would if you were looking at Groq's own console. The
@@ -112,6 +127,30 @@ export default function SettingsPage() {
     onError: (e: any) => flashPool(`❌ ${e.response?.data?.detail || "Failed to remove key"}`),
   });
 
+  // ── Inline editing for an existing pool key ─────────────────────────
+  // Lets an admin change the model and/or replace the key value on an
+  // existing pool entry, instead of only being able to Disable/Remove it
+  // and add a brand new one. The key value field starts blank (the real
+  // value is never returned by the API) — leaving it blank keeps the
+  // current key and only updates the model.
+  const [editingPoolId, setEditingPoolId] = useState<number | null>(null);
+  const [editPoolModel, setEditPoolModel] = useState("");
+  const [editPoolKeyValue, setEditPoolKeyValue] = useState("");
+  const startPoolEdit = (k: any) => {
+    setEditingPoolId(k.id); setEditPoolModel(k.model || ""); setEditPoolKeyValue("");
+    setFetchedModels(null); setModelsFetchError("");
+  };
+  const cancelPoolEdit = () => {
+    setEditingPoolId(null); setEditPoolModel(""); setEditPoolKeyValue("");
+    setFetchedModels(null); setModelsFetchError("");
+  };
+  const editPoolMut = useMutation({
+    mutationFn: ({ id, model, key_value }: { id: number; model?: string; key_value?: string }) =>
+      groqPoolApi.update(id, { model, ...(key_value ? { key_value } : {}) }),
+    onSuccess: () => { refetchPool(); flashPool("Pool key updated."); cancelPoolEdit(); },
+    onError: (e: any) => flashPool(`❌ ${e.response?.data?.detail || "Failed to update key"}`),
+  });
+
   const saveKey = async (service: string, fields: Record<string, string>) => {
     const entries = Object.entries(fields).filter(([, v]) => v.trim() !== "");
     if (entries.length === 0) { flashMsg("Enter at least one value to save."); return; }
@@ -134,6 +173,35 @@ export default function SettingsPage() {
     mutationFn: (id: number) => authApi.deleteApiKey(id),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["api-keys"] }),
   });
+
+  // ── Inline editing for an already-saved key ─────────────────────────
+  // The actual key value is never returned by the API (see key_preview
+  // instead), so "editing" means: type a NEW value to replace the old
+  // one — the backend's POST /api-keys already upserts on matching
+  // service+key_name, so this reuses that same endpoint.
+  const [editingKeyId, setEditingKeyId] = useState<number | null>(null);
+  const [editValue, setEditValue] = useState("");
+  const [editSaving, setEditSaving] = useState(false);
+  const [editError, setEditError] = useState("");
+
+  const startEdit = (k: any) => { setEditingKeyId(k.id); setEditValue(""); setEditError(""); };
+  const cancelEdit = () => { setEditingKeyId(null); setEditValue(""); setEditError(""); };
+  const saveEdit = async (k: any) => {
+    if (!editValue.trim()) { setEditError("Enter a new value first."); return; }
+    setEditSaving(true);
+    setEditError("");
+    try {
+      await authApi.saveApiKey({ service: k.service, key_name: k.key_name, key_value: editValue.trim(), is_global: k.is_global });
+      qc.invalidateQueries({ queryKey: ["api-keys"] });
+      qc.invalidateQueries({ queryKey: ["global-keys"] });
+      flashMsg(`✅ ${k.service} / ${k.key_name} updated successfully!`);
+      cancelEdit();
+    } catch (e: any) {
+      setEditError(e?.response?.data?.detail || "Failed to update — try again.");
+    } finally {
+      setEditSaving(false);
+    }
+  };
 
   // ── ADMIN USERS ──────────────────────────────────────────────────
   const { data: users = [] } = useQuery({
@@ -291,7 +359,8 @@ export default function SettingsPage() {
                       );
                       const numberOf = new Map(byAddedAsc.map((k: any, i: number) => [k.id, i + 1]));
                       return poolKeys.map((k: any) => (
-                      <div key={k.id} style={{
+                      <div key={k.id}>
+                      <div style={{
                         display: "flex", alignItems: "center", gap: 10, padding: "8px 12px",
                         border: "1px solid var(--border)", borderRadius: 8,
                         opacity: k.is_active ? 1 : 0.5,
@@ -313,6 +382,12 @@ export default function SettingsPage() {
                         <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
                           <button
                             className="tiq-btn tiq-btn-sm"
+                            onClick={() => editingPoolId === k.id ? cancelPoolEdit() : startPoolEdit(k)}
+                          >
+                            <Pencil size={13} />
+                          </button>
+                          <button
+                            className="tiq-btn tiq-btn-sm"
                             onClick={() => togglePoolMut.mutate({ id: k.id, is_active: !k.is_active })}
                           >
                             {k.is_active ? "Disable" : "Enable"}
@@ -325,6 +400,66 @@ export default function SettingsPage() {
                             <Trash2 size={13} />
                           </button>
                         </div>
+                      </div>
+                      {editingPoolId === k.id && (
+                        <div style={{
+                          display: "flex", flexDirection: "column", gap: 8, padding: "10px 14px",
+                          background: "var(--bg-secondary)", border: "1px solid var(--border)", borderTop: "none",
+                          borderRadius: "0 0 8px 8px", marginTop: -1,
+                        }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <span style={{ fontSize: 12, color: "var(--text-secondary)", whiteSpace: "nowrap", width: 90 }}>Replace key:</span>
+                            <input
+                              type="password"
+                              value={editPoolKeyValue}
+                              onChange={e => setEditPoolKeyValue(e.target.value)}
+                              placeholder="leave blank to keep the current key, only change the model"
+                              style={{ flex: 1, padding: "6px 10px", fontSize: 12.5, borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg-tertiary)", color: "var(--text-primary)" }}
+                            />
+                            <button className="tiq-btn tiq-btn-outline tiq-btn-sm" style={{ whiteSpace: "nowrap" }}
+                              onClick={() => editPoolKeyValue.trim() ? fetchModelsForKey(editPoolKeyValue.trim()) : fetchModelsForExistingPoolKey(k.id)}
+                              disabled={fetchingModels}>
+                              {fetchingModels ? "Fetching…" : (fetchedModels ? "Refetch" : "Fetch now")}
+                            </button>
+                          </div>
+                          <div style={{ fontSize: 10.5, color: "var(--text-muted)", marginTop: -2 }}>
+                            Leave "Replace key" blank and click Fetch now to pull the live model list using THIS key's
+                            already-stored value (never sent to your browser) — or type a new value above first to
+                            fetch models for that key instead.
+                          </div>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <span style={{ fontSize: 12, color: "var(--text-secondary)", whiteSpace: "nowrap", width: 90 }}>Model:</span>
+                            {fetchedModels ? (
+                              <select
+                                value={editPoolModel}
+                                onChange={e => setEditPoolModel(e.target.value)}
+                                style={{ flex: 1, padding: "6px 10px", fontSize: 12.5, borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg-tertiary)", color: "var(--text-primary)" }}
+                              >
+                                <option value="">Platform default</option>
+                                {fetchedModels.map(m => <option key={m} value={m}>{m}</option>)}
+                              </select>
+                            ) : (
+                              <input
+                                value={editPoolModel}
+                                onChange={e => setEditPoolModel(e.target.value)}
+                                placeholder="leave blank for platform default, or fetch models above to pick from a live list"
+                                style={{ flex: 1, padding: "6px 10px", fontSize: 12.5, borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg-tertiary)", color: "var(--text-primary)" }}
+                              />
+                            )}
+                          </div>
+                          {modelsFetchError && <div style={{ fontSize: 11.5, color: "#ef4444" }}>{modelsFetchError}</div>}
+                          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+                            <button className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={cancelPoolEdit} disabled={editPoolMut.isPending}>
+                              Cancel
+                            </button>
+                            <button className="tiq-btn tiq-btn-primary tiq-btn-sm"
+                              onClick={() => editPoolMut.mutate({ id: k.id, model: editPoolModel.trim(), key_value: editPoolKeyValue.trim() || undefined })}
+                              disabled={editPoolMut.isPending}>
+                              {editPoolMut.isPending ? "Saving…" : "Save"}
+                            </button>
+                          </div>
+                        </div>
+                      )}
                       </div>
                       ));
                     })()}
@@ -496,20 +631,54 @@ export default function SettingsPage() {
             ) : (
               <div className="tiq-table-wrap">
                 <table className="tiq-table">
-                  <thead><tr><th>Service</th><th>Key</th><th>Saved</th><th></th></tr></thead>
+                  <thead><tr><th>Service</th><th>Key</th><th>Value</th><th>Saved</th><th></th></tr></thead>
                   <tbody>
                     {savedKeys.map((k: any) => (
-                      <tr key={k.id}>
-                        <td><span className="tiq-badge tiq-badge-slate">{k.service}</span></td>
-                        <td style={{ fontFamily: "monospace", fontSize: 12 }}>{k.key_name}</td>
-                        <td style={{ fontSize: 12, color: "var(--text-muted)" }}>{new Date(k.created_at).toLocaleDateString()}</td>
-                        <td>
-                          <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" style={{ color: "var(--rose-500)" }}
-                            onClick={() => deleteKeyMut.mutate(k.id)}>
-                            <Trash2 size={13} />
-                          </button>
-                        </td>
-                      </tr>
+                      <Fragment key={k.id}>
+                        <tr>
+                          <td><span className="tiq-badge tiq-badge-slate">{k.service}</span></td>
+                          <td style={{ fontFamily: "monospace", fontSize: 12 }}>{k.key_name}</td>
+                          <td style={{ fontFamily: "monospace", fontSize: 12, color: "var(--text-muted)" }}>{k.key_preview || "—"}</td>
+                          <td style={{ fontSize: 12, color: "var(--text-muted)" }}>{new Date(k.created_at).toLocaleDateString()}</td>
+                          <td style={{ display: "flex", gap: 4 }}>
+                            <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" title="Edit — enter a new value to replace this key"
+                              onClick={() => editingKeyId === k.id ? cancelEdit() : startEdit(k)}>
+                              <Pencil size={13} />
+                            </button>
+                            <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" style={{ color: "var(--rose-500)" }}
+                              onClick={() => deleteKeyMut.mutate(k.id)}>
+                              <Trash2 size={13} />
+                            </button>
+                          </td>
+                        </tr>
+                        {editingKeyId === k.id && (
+                          <tr>
+                            <td colSpan={5} style={{ background: "var(--bg-secondary)", padding: "10px 14px" }}>
+                              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                <span style={{ fontSize: 12, color: "var(--text-secondary)", whiteSpace: "nowrap" }}>
+                                  New value for {k.service} / {k.key_name}:
+                                </span>
+                                <input
+                                  type={k.key_name.toLowerCase().includes("password") || k.key_name.toLowerCase().includes("key") ? "password" : "text"}
+                                  value={editValue}
+                                  onChange={e => setEditValue(e.target.value)}
+                                  onKeyDown={e => { if (e.key === "Enter") saveEdit(k); if (e.key === "Escape") cancelEdit(); }}
+                                  placeholder="Enter the new value — current value is never shown, for security"
+                                  autoFocus
+                                  style={{ flex: 1, padding: "6px 10px", fontSize: 12.5, borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg-tertiary)", color: "var(--text-primary)" }}
+                                />
+                                <button className="tiq-btn tiq-btn-primary tiq-btn-sm" onClick={() => saveEdit(k)} disabled={editSaving}>
+                                  {editSaving ? "Saving…" : "Save"}
+                                </button>
+                                <button className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={cancelEdit} disabled={editSaving}>
+                                  Cancel
+                                </button>
+                              </div>
+                              {editError && <div style={{ fontSize: 11.5, color: "var(--rose-500)", marginTop: 6 }}>{editError}</div>}
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
                     ))}
                   </tbody>
                 </table>
