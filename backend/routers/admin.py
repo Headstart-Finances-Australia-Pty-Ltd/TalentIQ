@@ -334,6 +334,45 @@ async def list_groq_models_for_key(
         raise HTTPException(400, f"Could not reach Groq to list models: {type(e).__name__}")
 
 
+@router.post("/groq-pool/{pool_id}/models")
+async def list_groq_models_for_existing_key(
+    pool_id: int,
+    _: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Same as /groq-pool/models, but for an ALREADY-SAVED pool entry —
+    uses the stored key value server-side to call Groq, and never sends
+    that value back to the frontend at any point. This is what makes
+    "just change the model, don't touch the key" actually convenient: the
+    admin can fetch a live model dropdown for the existing key without
+    ever having to re-enter or paste it, while the security property (the
+    key value never reaches the browser) is fully preserved."""
+    from models.models import GroqKeyPool
+    import requests as _requests
+    entry = await db.get(GroqKeyPool, pool_id)
+    if not entry:
+        raise HTTPException(404, "Pool key not found.")
+    try:
+        resp = _requests.get(
+            "https://api.groq.com/openai/v1/models",
+            headers={"Authorization": f"Bearer {entry.key_value}"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        models = sorted(
+            [m["id"] for m in data.get("data", []) if m.get("id")],
+        )
+        return {"models": models}
+    except _requests.exceptions.HTTPError as e:
+        status = e.response.status_code if e.response is not None else 0
+        if status == 401:
+            raise HTTPException(400, "This stored key was rejected by Groq — it may have been revoked. Try replacing it.")
+        raise HTTPException(400, f"Groq returned an error (status {status}) when listing models for this key.")
+    except Exception as e:
+        raise HTTPException(400, f"Could not reach Groq to list models: {type(e).__name__}")
+
+
 @router.get("/groq-pool", response_model=List[GroqPoolKeyOut])
 async def list_groq_pool(
     _: User = Depends(require_admin),
@@ -383,6 +422,7 @@ async def add_groq_pool_key(
 class GroqPoolKeyPatch(BaseModel):
     is_active: Optional[bool] = None
     model: Optional[str] = None
+    key_value: Optional[str] = None  # replace the actual key — see update_groq_pool_key
 
 
 @router.patch("/groq-pool/{pool_id}", response_model=GroqPoolKeyOut)
@@ -400,6 +440,24 @@ async def update_groq_pool_key(
         entry.is_active = payload.is_active
     if payload.model is not None:
         entry.model = payload.model.strip() or None
+    if payload.key_value is not None:
+        new_value = payload.key_value.strip()
+        if not new_value:
+            raise HTTPException(400, "API key value cannot be blank.")
+        # Same duplicate check as adding a new key — just excluding this
+        # entry itself, since re-saving the SAME value it already has
+        # isn't a duplicate.
+        dup = (await db.execute(
+            select(GroqKeyPool).where(GroqKeyPool.key_value == new_value, GroqKeyPool.id != pool_id)
+        )).scalar_one_or_none()
+        if dup:
+            raise HTTPException(409, "This exact key is already in the pool under a different entry.")
+        entry.key_value = new_value
+        # A replaced key is unproven again — clear any error/cooldown
+        # state from the OLD key's history so it gets a clean start,
+        # same as the existing reactivation behavior below.
+        entry.consecutive_errors = 0
+        entry.cooldown_until = None
     # Reactivating a key clears any lingering cooldown/error streak — an
     # admin flipping it back on is a deliberate "trust this again" signal.
     if payload.is_active is True:

@@ -216,6 +216,17 @@ async def save_api_key(
     return APIKeyOut.model_validate(key)
 
 
+def _mask_key_preview(value: str) -> str:
+    """Last 4 characters only, prefixed with a fixed number of dots
+    regardless of the real length — never reveals the actual key length,
+    which is itself sometimes a meaningful clue about which service/tier
+    a key belongs to."""
+    if not value:
+        return ""
+    tail = value[-4:] if len(value) >= 4 else value
+    return "••••" + tail
+
+
 @router.get("/api-keys", response_model=List[APIKeyOut])
 async def list_api_keys(
     db: AsyncSession = Depends(get_db),
@@ -224,7 +235,13 @@ async def list_api_keys(
     result = await db.execute(
         select(UserAPIKey).where(UserAPIKey.user_id == current_user.id)
     )
-    return [APIKeyOut.model_validate(k) for k in result.scalars().all()]
+    keys = result.scalars().all()
+    out = []
+    for k in keys:
+        item = APIKeyOut.model_validate(k)
+        item.key_preview = _mask_key_preview(k.key_value)
+        out.append(item)
+    return out
 
 
 @router.get("/global-keys", response_model=List[APIKeyOut])
@@ -238,7 +255,13 @@ async def list_global_keys(
     result = await db.execute(
         select(UserAPIKey).where(UserAPIKey.is_global.is_(True))
     )
-    return [APIKeyOut.model_validate(k) for k in result.scalars().all()]
+    keys = result.scalars().all()
+    out = []
+    for k in keys:
+        item = APIKeyOut.model_validate(k)
+        item.key_preview = _mask_key_preview(k.key_value)
+        out.append(item)
+    return out
 
 
 @router.delete("/api-keys/{key_id}")
