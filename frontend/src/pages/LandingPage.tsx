@@ -190,10 +190,10 @@ export default function LandingPage() {
         boxShadow: "0 1px 3px rgba(0,0,0,.06)",
       }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <div style={{ width: 32, height: 32, borderRadius: 8, background: "linear-gradient(135deg,#0ea5e9,#6366f1)", display: "flex", alignItems: "center", justifyContent: "center" }}>
-            <Zap size={18} color="white" fill="white" />
+          <div style={{ width: 32, height: 32, borderRadius: 8, background: "#5ee8db", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 2px 8px rgba(0,199,183,.35)" }}>
+            <Zap size={18} color="#f97316" fill="#f97316" />
           </div>
-          <span style={{ fontSize: 18, fontWeight: 800, letterSpacing: "-0.5px", color: "#0f172a" }}>
+          <span style={{ fontSize: 18, fontWeight: 800, letterSpacing: "-0.5px", color: "#00c7b7" }}>
             TalentIQ
           </span>
         </div>
@@ -204,7 +204,7 @@ export default function LandingPage() {
           <div style={{ width: 1, height: 20, background: "#e2e8f0", margin: "0 6px" }} />
           {isLoggedIn ? (
             <Link to="/app"
-              style={{ fontSize: 13, fontWeight: 600, padding: "8px 18px", borderRadius: 8, background: "linear-gradient(135deg,#0ea5e9,#6366f1)", color: "white", textDecoration: "none", boxShadow: "0 2px 8px rgba(14,165,233,.35)" }}>
+              style={{ fontSize: 13, fontWeight: 600, padding: "8px 18px", borderRadius: 8, background: "linear-gradient(135deg,#fdba74,#fb923c)", color: "#7c2d12", textDecoration: "none", boxShadow: "0 2px 8px rgba(251,146,60,.35)" }}>
               Go to Dashboard →
             </Link>
           ) : (
@@ -216,7 +216,7 @@ export default function LandingPage() {
                 Sign in
               </Link>
               <Link to="/register"
-                style={{ fontSize: 13, fontWeight: 600, padding: "8px 18px", borderRadius: 8, background: "linear-gradient(135deg,#0ea5e9,#6366f1)", color: "white", textDecoration: "none", boxShadow: "0 2px 8px rgba(14,165,233,.35)" }}>
+                style={{ fontSize: 13, fontWeight: 600, padding: "8px 18px", borderRadius: 8, background: "linear-gradient(135deg,#fdba74,#fb923c)", color: "#7c2d12", textDecoration: "none", boxShadow: "0 2px 8px rgba(251,146,60,.35)" }}>
                 Get started
               </Link>
             </>
@@ -242,7 +242,7 @@ export default function LandingPage() {
 
         <h1 style={{ fontSize: "clamp(36px,6vw,68px)", fontWeight: 900, lineHeight: 1.06, letterSpacing: "-2px", marginBottom: 24, color: "#0f172a" }}>
           Hire smarter with<br />
-          <span style={{ background: "linear-gradient(135deg,#0ea5e9,#6366f1,#a855f7)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>
+          <span style={{ background: "linear-gradient(135deg,#5ee8db,#00c7b7,#009e90)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>
             six AI agents
           </span>
         </h1>
@@ -257,8 +257,8 @@ export default function LandingPage() {
             <Link to="/app" style={{
               display: "inline-flex", alignItems: "center", gap: 8,
               padding: "14px 32px", borderRadius: 12, fontWeight: 700, fontSize: 15,
-              background: "linear-gradient(135deg,#0ea5e9,#6366f1)", color: "white",
-              textDecoration: "none", boxShadow: "0 4px 16px rgba(14,165,233,.4)",
+              background: "linear-gradient(135deg,#fdba74,#fb923c)", color: "#7c2d12",
+              textDecoration: "none", boxShadow: "0 4px 16px rgba(251,146,60,.4)",
             }}>
               Go to Dashboard <ArrowRight size={16} />
             </Link>
@@ -267,8 +267,8 @@ export default function LandingPage() {
               <Link to="/register" style={{
                 display: "inline-flex", alignItems: "center", gap: 8,
                 padding: "14px 32px", borderRadius: 12, fontWeight: 700, fontSize: 15,
-                background: "linear-gradient(135deg,#0ea5e9,#6366f1)", color: "white",
-                textDecoration: "none", boxShadow: "0 4px 16px rgba(14,165,233,.4)",
+                background: "linear-gradient(135deg,#fdba74,#fb923c)", color: "#7c2d12",
+                textDecoration: "none", boxShadow: "0 4px 16px rgba(251,146,60,.4)",
               }}>
                 Start free <ArrowRight size={16} />
               </Link>
@@ -355,20 +355,20 @@ export default function LandingPage() {
 
       {/* ── CTA ── */}
       <section style={{
-        background: "linear-gradient(135deg, #0ea5e9 0%, #6366f1 50%, #a855f7 100%)",
+        background: "#00c7b7",
         padding: "80px 5%", textAlign: "center",
       }}>
         <h2 style={{ fontSize: "clamp(28px,5vw,52px)", fontWeight: 900, letterSpacing: "-1.5px", marginBottom: 16, color: "white" }}>
           Ready to hire smarter?
         </h2>
-        <p style={{ fontSize: 18, color: "rgba(255,255,255,.8)", marginBottom: 40 }}>
+        <p style={{ fontSize: 18, color: "rgba(255,255,255,.85)", marginBottom: 40 }}>
           Free to start. All six modules included. Your data stays yours.
         </p>
         {isLoggedIn ? (
           <Link to="/app" style={{
             display: "inline-flex", alignItems: "center", gap: 8,
             padding: "16px 40px", borderRadius: 12, fontWeight: 700, fontSize: 16,
-            background: "white", color: "#6366f1",
+            background: "white", color: "#009e90",
             textDecoration: "none", boxShadow: "0 4px 20px rgba(0,0,0,.2)",
           }}>
             Go to Dashboard <ArrowRight size={17} />
@@ -377,7 +377,7 @@ export default function LandingPage() {
           <Link to="/register" style={{
             display: "inline-flex", alignItems: "center", gap: 8,
             padding: "16px 40px", borderRadius: 12, fontWeight: 700, fontSize: 16,
-            background: "white", color: "#6366f1",
+            background: "white", color: "#009e90",
             textDecoration: "none", boxShadow: "0 4px 20px rgba(0,0,0,.2)",
           }}>
             Create free account <ArrowRight size={17} />
@@ -391,10 +391,10 @@ export default function LandingPage() {
           <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr", gap: 40, marginBottom: 48 }}>
             <div>
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
-                <div style={{ width: 30, height: 30, borderRadius: 8, background: "linear-gradient(135deg,#0ea5e9,#6366f1)", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                  <Zap size={16} color="white" fill="white" />
+                <div style={{ width: 30, height: 30, borderRadius: 8, background: "#5ee8db", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 2px 8px rgba(0,199,183,.35)" }}>
+                  <Zap size={16} color="#f97316" fill="#f97316" />
                 </div>
-                <span style={{ fontSize: 16, fontWeight: 800 }}>TalentIQ</span>
+                <span style={{ fontSize: 16, fontWeight: 800, color: "#00c7b7" }}>TalentIQ</span>
               </div>
               <p style={{ fontSize: 13, color: "#94a3b8", lineHeight: 1.7, maxWidth: 240 }}>
                 The full-stack AI platform for intelligent hiring. Five modules, one database, zero vendor lock-in.

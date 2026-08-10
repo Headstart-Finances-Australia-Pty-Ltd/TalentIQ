@@ -103,12 +103,31 @@ body {
   border-bottom: 1px solid rgba(255,255,255,.08);
 }
 
+.tiq-logo-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tiq-logo-icon {
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  border-radius: 7px;
+  background: var(--teal-300);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 0 0 1px rgba(94,232,219,.25), 0 2px 8px rgba(0,199,183,.35);
+}
+
 .tiq-logo-wordmark {
   font-family: var(--font-display);
   font-size: 20px;
-  font-weight: 700;
-  color: var(--teal-400);
+  font-weight: 800;
+  color: var(--teal-300);
   letter-spacing: -.3px;
+  line-height: 1;
 }
 
 .tiq-logo-sub {
@@ -117,6 +136,25 @@ body {
   letter-spacing: .8px;
   text-transform: uppercase;
   margin-top: 2px;
+}
+
+.tiq-brand-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 24px;
+}
+
+.tiq-brand-icon {
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  border-radius: 8px;
+  background: var(--teal-300);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 8px rgba(0,199,183,.35);
 }
 
 .tiq-nav {

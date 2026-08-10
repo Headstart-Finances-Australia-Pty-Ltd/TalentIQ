@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import axios from "axios";
+import { Zap } from "lucide-react";
 import { useAuth } from "../hooks/useAuth";
 
 export default function RegisterPage() {
@@ -35,7 +36,10 @@ export default function RegisterPage() {
   return (
     <div className="tiq-auth-wrap">
       <div className="tiq-auth-card" style={{ maxWidth: 480 }}>
-        <div className="tiq-logo-wordmark" style={{ fontSize: 20, marginBottom: 24 }}>TalentIQ</div>
+        <div className="tiq-brand-row">
+          <div className="tiq-brand-icon"><Zap size={16} color="#f97316" fill="#f97316" /></div>
+          <span className="tiq-logo-wordmark" style={{ fontSize: 20, color: "#00c7b7" }}>TalentIQ</span>
+        </div>
         <h1 className="tiq-auth-title">Create your account</h1>
         <p className="tiq-auth-sub">Get started with all three AI agents</p>
 

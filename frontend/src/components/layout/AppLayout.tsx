@@ -3,7 +3,7 @@ import { Outlet, NavLink, Link } from "react-router-dom";
 import {
   LayoutDashboard, Search, BarChart2, Users,
   Settings, LogOut, Shield, Database, BrainCircuit, Briefcase, Home, FileEdit,
-  ChevronDown, ChevronRight,
+  ChevronDown, ChevronRight, Zap,
 } from "lucide-react";
 import { useAuth } from "../../hooks/useAuth";
 
@@ -53,7 +53,10 @@ export default function AppLayout() {
     <div className="tiq-app-shell">
       <aside className="tiq-sidebar">
         <div className="tiq-logo">
-          <div className="tiq-logo-wordmark">TalentIQ</div>
+          <div className="tiq-logo-row">
+            <div className="tiq-logo-icon"><Zap size={16} color="#f97316" fill="#f97316" /></div>
+            <div className="tiq-logo-wordmark">TalentIQ</div>
+          </div>
           <div className="tiq-logo-sub">Platform</div>
         </div>
 

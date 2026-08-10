@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { Eye, EyeOff, Mail, Lock, ArrowRight, Home } from "lucide-react";
+import { Eye, EyeOff, Mail, Lock, ArrowRight, Home, Zap } from "lucide-react";
 import { useAuth } from "../hooks/useAuth";
 import { api } from "../lib/api";
 
@@ -51,7 +51,10 @@ export default function LoginPage() {
     return (
       <div className="tiq-auth-wrap">
         <div className="tiq-auth-card">
-          <div className="tiq-logo-wordmark" style={{ fontSize: 20, marginBottom: 24 }}>TalentIQ</div>
+          <div className="tiq-brand-row">
+            <div className="tiq-brand-icon"><Zap size={16} color="#f97316" fill="#f97316" /></div>
+            <span className="tiq-logo-wordmark" style={{ fontSize: 20, color: "#00c7b7" }}>TalentIQ</span>
+          </div>
           <h1 className="tiq-auth-title">Reset password</h1>
           <p className="tiq-auth-sub">Enter your email and we'll send a reset link</p>
 
@@ -103,7 +106,10 @@ export default function LoginPage() {
         <Home size={12} /> Home
       </Link>
       <div className="tiq-auth-card">
-        <div className="tiq-logo-wordmark" style={{ fontSize: 20, marginBottom: 24 }}>TalentIQ</div>
+        <div className="tiq-brand-row">
+          <div className="tiq-brand-icon"><Zap size={16} color="#f97316" fill="#f97316" /></div>
+          <span className="tiq-logo-wordmark" style={{ fontSize: 20, color: "#00c7b7" }}>TalentIQ</span>
+        </div>
         <h1 className="tiq-auth-title">Welcome back</h1>
         <p className="tiq-auth-sub">Sign in with your email address</p>
 
