@@ -60,17 +60,22 @@ RUN pip install --no-cache-dir -r requirements.txt
 # utils/semantic_match.py) until the model becomes available.
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')" || true
 
-# Install Playwright browsers
-RUN playwright install chromium --with-deps || true
+# Install Playwright browsers.
+# NOTE: no `|| true` here — if Chromium fails to install, the build should
+# fail loudly rather than silently shipping an image where LinkedIn
+# scraping/automation breaks at runtime with no clear signal.
+RUN playwright install chromium --with-deps
 
-# Copy backend source
+# Copy backend source.
+# .dockerignore excludes backend/data/linkedin/ (LinkedIn session state)
+# and backend/data/temp/ (scraped profile HTML) — these are runtime data,
+# not build inputs, and must never be baked into the image. Mount them as
+# a Northflank volume, or fetch credentials from Northflank secrets at
+# startup, instead of COPY-ing them here.
 COPY backend/ ./backend/
 
 # Copy built frontend into backend/static so FastAPI can serve it
 COPY --from=frontend-build /app/frontend/dist ./backend/static/
-
-# Copy data directory (LinkedIn session, location.json)
-COPY backend/data/ ./backend/data/
 
 # Update main.py to serve frontend static files
 WORKDIR /app/backend
@@ -80,6 +85,14 @@ ENV PORT=8000 \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
+# Run as a non-root user for defense-in-depth in production
+RUN useradd --create-home --uid 1001 appuser \
+    && chown -R appuser:appuser /app
+USER appuser
+
 EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:${PORT}/ || exit 1
 
 CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT}"]
