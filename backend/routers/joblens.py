@@ -823,6 +823,8 @@ def _fmt(c: JobLensCandidate) -> dict:
         "video_transcript": c.video_transcript or "",
         "video_analysis": c.video_analysis or None,
         "video_analysis_status": c.video_analysis_status or "Pending",
+        "qa_evaluation": c.qa_evaluation or None,
+        "qa_evaluation_score": c.qa_evaluation_score,
         "source_vendor_id": c.source_vendor_id,
         "source_vendor_name": c.source_vendor_name or "",
         "strengths_breakdown": c.strengths_breakdown or None,

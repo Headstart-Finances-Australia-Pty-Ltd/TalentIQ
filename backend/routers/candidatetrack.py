@@ -14,6 +14,7 @@ construction.
 """
 import csv
 import io
+import logging
 from datetime import datetime
 from typing import List, Optional
 
@@ -28,10 +29,13 @@ from models.models import (
     User, Client, JDRecord, Vendor, TrackedCandidate, CandidateStatusLog, JDVendorLink,
     JD_STATUSES, JD_IN_PROGRESS_STATUSES, CANDIDATE_STATUSES, WORK_PERMISSION_OPTIONS,
 )
+from capabilities.requisition.models import Requisition, ClientContact
+from capabilities.acquisition import service as acquisition_service
 from utils.auth_utils import get_current_user
 from utils.sequencing import next_sequence_number
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 class BulkIds(BaseModel):
@@ -165,16 +169,48 @@ async def update_client(
     return _fmt_client(c)
 
 
+async def _blocking_client_refs(db: AsyncSession, client_id: int) -> str:
+    """Returns a human-readable reason a client can't be deleted, or "" if
+    it's clear. JDs and requisitions are real business records — deleting
+    a client out from under them would silently orphan work a recruiter
+    cares about, so those block deletion with an actionable message rather
+    than either cascading (data loss) or crashing with a raw Postgres FK
+    error (see delete_client's docstring for how this used to fail)."""
+    jd_count = (await db.execute(select(func.count()).select_from(JDRecord).where(JDRecord.client_id == client_id))).scalar() or 0
+    req_count = (await db.execute(select(func.count()).select_from(Requisition).where(Requisition.client_id == client_id))).scalar() or 0
+    if jd_count or req_count:
+        parts = []
+        if jd_count:
+            parts.append(f"{jd_count} job description(s)")
+        if req_count:
+            parts.append(f"{req_count} requisition(s)")
+        return f"Cannot delete this client — it still has {' and '.join(parts)} linked. Reassign or delete those first."
+    return ""
+
+
 @router.delete("/clients/{client_id}")
 async def delete_client(
     client_id: int,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """Deleting a client used to crash with a raw, uncaught Postgres
+    foreign-key violation the moment that client had any ClientContact,
+    JDRecord, or Requisition row pointing at it (none of those three FKs
+    have cascade-delete behavior) — the request just failed with no
+    explanation. ClientContacts are dependent records (a contact person AT
+    this client, meaningless without it) so those are cleaned up
+    automatically here; JDs/requisitions are real business records, so
+    those block the delete with a clear message instead (see
+    _blocking_client_refs)."""
     r = await db.execute(select(Client).where(Client.id == client_id, Client.user_id == current_user.id))
     c = r.scalar_one_or_none()
     if not c:
         raise HTTPException(404, "Client not found")
+    reason = await _blocking_client_refs(db, client_id)
+    if reason:
+        raise HTTPException(400, reason)
+    await db.execute(sql_delete(ClientContact).where(ClientContact.client_id == client_id))
     await db.delete(c)
     await db.commit()
     return {"message": "Deleted"}
@@ -186,9 +222,25 @@ async def bulk_delete_clients(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    await db.execute(sql_delete(Client).where(Client.id.in_(payload.ids), Client.user_id == current_user.id))
+    """Per-client, not a single blanket DELETE: a bulk selection of clients
+    is very likely to mix deletable ones with ones that still have JDs/
+    requisitions attached. A single all-or-nothing DELETE would let one
+    blocked client fail the entire batch with no explanation (or silently
+    crash the whole request, per delete_client's docstring); this instead
+    deletes what it safely can and reports exactly which ones it
+    skipped and why, so nothing is a silent no-op."""
+    rows = (await db.execute(select(Client).where(Client.id.in_(payload.ids), Client.user_id == current_user.id))).scalars().all()
+    deleted, skipped = [], []
+    for c in rows:
+        reason = await _blocking_client_refs(db, c.id)
+        if reason:
+            skipped.append({"id": c.id, "name": c.name, "reason": reason})
+            continue
+        await db.execute(sql_delete(ClientContact).where(ClientContact.client_id == c.id))
+        await db.delete(c)
+        deleted.append(c.id)
     await db.commit()
-    return {"message": f"Deleted {len(payload.ids)} client(s)"}
+    return {"message": f"Deleted {len(deleted)} client(s)", "deleted": deleted, "skipped": skipped}
 
 
 @router.post("/clients/import-csv")
@@ -197,9 +249,16 @@ async def import_clients_csv(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Expected columns: name, address, abn, area_of_work
-    (name is the only required column)."""
+    """Expected columns: name, address, abn, area_of_work, contact_name,
+    contact_title, contact_email, contact_phone (name is the only required
+    column overall; the four contact_* columns are optional as a group —
+    if contact_name is present, a primary ClientContact is created and
+    linked to the new client; if contact_name is blank but contact_email
+    or contact_phone is present, the contact is still created using the
+    client's own name as a fallback contact name rather than silently
+    dropping the email/phone with no explanation)."""
     rows = _parse_csv(await file.read())
+    org = await acquisition_service.get_or_create_default_organisation(db, current_user)
     created, skipped, errors = 0, 0, []
     for i, row in enumerate(rows, start=2):  # row 1 is the header
         name = row.get("name", "").strip()
@@ -207,13 +266,30 @@ async def import_clients_csv(
             skipped += 1
             errors.append(f"Row {i}: missing 'name', skipped")
             continue
-        db.add(Client(
+        client = Client(
             user_id=current_user.id,
             name=name,
             address=row.get("address", ""),
             abn=row.get("abn", ""),
             area_of_work=row.get("area_of_work", ""),
-        ))
+        )
+        db.add(client)
+        await db.flush()  # assigns client.id so the contact below can reference it
+
+        contact_name = row.get("contact_name", "").strip()
+        contact_email = row.get("contact_email", "").strip()
+        contact_phone = row.get("contact_phone", "").strip()
+        contact_title = row.get("contact_title", "").strip()
+        if contact_name or contact_email or contact_phone:
+            db.add(ClientContact(
+                organisation_id=org.id,
+                client_id=client.id,
+                name=contact_name or name,  # fallback so an email/phone-only row isn't silently dropped
+                title=contact_title,
+                email=contact_email,
+                phone=contact_phone,
+                is_primary=True,
+            ))
         created += 1
     await db.commit()
     return {"created": created, "skipped": skipped, "errors": errors[:20]}
@@ -570,14 +646,17 @@ async def import_jds_csv(
     db: AsyncSession = Depends(get_db),
 ):
     """Expected columns: jd_title, client_name, status, description
-    (jd_title required; client_name must match an existing Client's name
-    exactly, case-insensitive — create the client first if it doesn't
-    exist yet, otherwise that row is skipped rather than guessed at)."""
+    (jd_title required). Standing policy: a JD is never left without its
+    intended client just because that client doesn't exist yet — if
+    client_name doesn't match an existing Client (case-insensitive), the
+    client is created automatically and the JD is linked to it, rather
+    than skipping the row."""
     rows = _parse_csv(await file.read())
     clients = (await db.execute(select(Client).where(Client.user_id == current_user.id))).scalars().all()
     client_by_name = {c.name.strip().lower(): c for c in clients}
 
     created, skipped, errors = 0, 0, []
+    clients_created = 0
     for i, row in enumerate(rows, start=2):
         jd_title = row.get("jd_title", "").strip()
         if not jd_title:
@@ -592,9 +671,14 @@ async def import_jds_csv(
         if client_name:
             client = client_by_name.get(client_name.lower())
             if not client:
-                skipped += 1
-                errors.append(f"Row {i}: client '{client_name}' not found — create it first, skipped")
-                continue
+                # Auto-create the client — a JD never gets left orphaned
+                # just because the client hasn't been entered yet.
+                client = Client(user_id=current_user.id, name=client_name)
+                db.add(client)
+                await db.flush()  # need client.id before the JD below can reference it
+                client_by_name[client_name.lower()] = client
+                clients_created += 1
+                errors.append(f"Row {i}: client '{client_name}' didn't exist — created it and linked this JD")
             client_id = client.id
         seq_num = await next_sequence_number(db, JDRecord, current_user.id)
         db.add(JDRecord(
@@ -603,7 +687,7 @@ async def import_jds_csv(
         ))
         created += 1
     await db.commit()
-    return {"created": created, "skipped": skipped, "errors": errors[:20]}
+    return {"created": created, "skipped": skipped, "clients_created": clients_created, "errors": errors[:20]}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -836,6 +920,8 @@ async def _fmt_candidate(db: AsyncSession, c: TrackedCandidate) -> dict:
         "duplicate_of_id": c.duplicate_of_id,
         "has_resume": bool(c.resume_blob),
         "resume_filename": c.resume_filename or "",
+        "has_cover_letter": bool(c.cover_letter_blob),
+        "cover_letter_filename": c.cover_letter_filename or "",
         "submitted_at": c.submitted_at.isoformat() if c.submitted_at else None,
         "created_at": c.created_at.isoformat() if c.created_at else None,
         "updated_at": c.updated_at.isoformat() if c.updated_at else None,
@@ -853,6 +939,7 @@ async def create_candidate(
     work_permission: str = Form(""),
     status: str = Form("Applied"),
     file: Optional[UploadFile] = File(None),
+    cover_letter_file: Optional[UploadFile] = File(None),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -876,6 +963,14 @@ async def create_candidate(
         resume_filename = file.filename
         resume_mimetype = file.content_type or "application/octet-stream"
 
+    # Cover letter is its own independent upload — separate slot on the
+    # same candidate row, not derived from or merged with the resume file.
+    cover_letter_blob = cover_letter_filename = cover_letter_mimetype = None
+    if cover_letter_file and cover_letter_file.filename:
+        cover_letter_blob = await cover_letter_file.read()
+        cover_letter_filename = cover_letter_file.filename
+        cover_letter_mimetype = cover_letter_file.content_type or "application/octet-stream"
+
     duplicate_of_id = await _detect_duplicate(db, jd_id, email, phone)
 
     candidate = TrackedCandidate(
@@ -890,6 +985,9 @@ async def create_candidate(
         resume_blob=resume_blob,
         resume_filename=resume_filename,
         resume_mimetype=resume_mimetype,
+        cover_letter_blob=cover_letter_blob,
+        cover_letter_filename=cover_letter_filename,
+        cover_letter_mimetype=cover_letter_mimetype,
         status=status,
         is_duplicate=duplicate_of_id is not None,
         duplicate_of_id=duplicate_of_id,
@@ -983,7 +1081,33 @@ async def list_candidates(
     if vendor_id is not None:
         q = q.where(TrackedCandidate.vendor_id == vendor_id)
     r = await db.execute(q.order_by(TrackedCandidate.created_at.desc()))
-    return [await _fmt_candidate(db, c) for c in r.scalars().all()]
+    candidates = r.scalars().all()
+
+    # Formatting is done row-by-row (each pulls its own JD/Vendor/Client),
+    # so one candidate with bad/inconsistent data must not take the whole
+    # list down with it. Any row that fails to format is logged and
+    # returned as a minimal, clearly-flagged stub instead of aborting the
+    # entire response — every OTHER candidate still loads normally.
+    out = []
+    for c in candidates:
+        try:
+            out.append(await _fmt_candidate(db, c))
+        except Exception:
+            logger.exception("Failed to format candidate id=%s for user_id=%s", c.id, current_user.id)
+            out.append({
+                "id": c.id,
+                "name": c.name or f"Candidate #{c.id}",
+                "email": "", "phone": "", "address": "", "work_permission": "",
+                "jd_id": c.jd_id, "jd_title": "", "client_name": "",
+                "vendor_id": c.vendor_id, "vendor_name": "",
+                "status": c.status or "Applied",
+                "is_duplicate": False, "duplicate_of_id": None,
+                "has_resume": bool(c.resume_blob), "resume_filename": c.resume_filename or "",
+                "has_cover_letter": bool(c.cover_letter_blob), "cover_letter_filename": c.cover_letter_filename or "",
+                "submitted_at": None, "created_at": None, "updated_at": None,
+                "_load_error": True,
+            })
+    return out
 
 
 @router.get("/candidates/{candidate_id}")
@@ -1094,6 +1218,49 @@ async def download_candidate_resume(
         content=c.resume_blob,
         media_type=c.resume_mimetype or "application/octet-stream",
         headers={"Content-Disposition": f'inline; filename="{c.resume_filename or "resume"}"'},
+    )
+
+
+@router.post("/candidates/{candidate_id}/cover-letter")
+async def upload_candidate_cover_letter(
+    candidate_id: int,
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Attaches/replaces the cover letter on an existing candidate — its
+    own upload slot, independent of the resume (uploading one never
+    touches the other)."""
+    r = await db.execute(select(TrackedCandidate).where(TrackedCandidate.id == candidate_id, TrackedCandidate.user_id == current_user.id))
+    c = r.scalar_one_or_none()
+    if not c:
+        raise HTTPException(404, "Candidate not found")
+    if not file.filename:
+        raise HTTPException(400, "No file provided.")
+
+    c.cover_letter_blob = await file.read()
+    c.cover_letter_filename = file.filename
+    c.cover_letter_mimetype = file.content_type or "application/octet-stream"
+    c.updated_at = datetime.utcnow()
+    await db.commit()
+    await db.refresh(c)
+    return await _fmt_candidate(db, c)
+
+
+@router.get("/candidates/{candidate_id}/cover-letter")
+async def download_candidate_cover_letter(
+    candidate_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    r = await db.execute(select(TrackedCandidate).where(TrackedCandidate.id == candidate_id, TrackedCandidate.user_id == current_user.id))
+    c = r.scalar_one_or_none()
+    if not c or not c.cover_letter_blob:
+        raise HTTPException(404, "No cover letter stored for this candidate")
+    return Response(
+        content=c.cover_letter_blob,
+        media_type=c.cover_letter_mimetype or "application/octet-stream",
+        headers={"Content-Disposition": f'inline; filename="{c.cover_letter_filename or "cover_letter"}"'},
     )
 
 

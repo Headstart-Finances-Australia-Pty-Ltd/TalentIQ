@@ -474,6 +474,13 @@ class JobLensCandidate(Base):
     video_analysis        = Column(JSON)              # structured scores/observations
     video_analysis_status = Column(String(20), default="Pending")  # Pending/Processing/Completed/Failed
 
+    # ── AI Avatar Interview Q&A evaluation — set alongside (never
+    # replacing) the video_analysis above, once an avatar interview
+    # (capabilities/avatarinterview) linked to this candidate completes.
+    # See that capability's service.write_back_to_candidatelens.
+    qa_evaluation        = Column(JSON)   # {overall_score, context_score, semantic_score, keypoints_score, questions: [...]}
+    qa_evaluation_score  = Column(Float, nullable=True)
+
     session = relationship("JobLensSession", back_populates="candidates")
 
 
@@ -640,6 +647,12 @@ class TrackedCandidate(Base):
     resume_blob      = Column(LargeBinary)
     resume_filename  = Column(String(300))
     resume_mimetype  = Column(String(100))
+    # Cover letter — uploaded independently of the resume (own file, own
+    # slot), never derived from or bundled into the resume upload. Either
+    # can be attached/replaced on its own without touching the other.
+    cover_letter_blob     = Column(LargeBinary)
+    cover_letter_filename = Column(String(300))
+    cover_letter_mimetype = Column(String(100))
     status           = Column(String(30), default="Applied")
     address          = Column(String(300))
     work_permission  = Column(String(50))   # "Work Visa" / "Permanent Resident" / "Citizenship"

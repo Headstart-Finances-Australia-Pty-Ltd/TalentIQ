@@ -30,6 +30,11 @@ MIGRATIONS = [
     "ALTER TABLE tiq_tracked_candidates ADD COLUMN IF NOT EXISTS address VARCHAR(300)",
     "ALTER TABLE tiq_tracked_candidates ADD COLUMN IF NOT EXISTS work_permission VARCHAR(50)",
 
+    # CandidateTrack: cover letter, uploaded/stored independently of the resume
+    "ALTER TABLE tiq_tracked_candidates ADD COLUMN IF NOT EXISTS cover_letter_blob BYTEA",
+    "ALTER TABLE tiq_tracked_candidates ADD COLUMN IF NOT EXISTS cover_letter_filename VARCHAR(300)",
+    "ALTER TABLE tiq_tracked_candidates ADD COLUMN IF NOT EXISTS cover_letter_mimetype VARCHAR(100)",
+
     "ALTER TABLE tiq_jd_records ADD COLUMN IF NOT EXISTS essential_skills JSON DEFAULT '[]'",
     "ALTER TABLE tiq_jd_records ADD COLUMN IF NOT EXISTS good_to_have_skills JSON DEFAULT '[]'",
     "ALTER TABLE tiq_jd_records ADD COLUMN IF NOT EXISTS optional_skills JSON DEFAULT '[]'",
@@ -188,6 +193,29 @@ MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS idx_tiq_tracked_candidates_duplicate_of_id ON tiq_tracked_candidates(duplicate_of_id)",
     "CREATE INDEX IF NOT EXISTS idx_tiq_candidate_status_log_candidate_id ON tiq_candidate_status_log(candidate_id)",
 
+    # ── Missing FK indexes, part 2 ───────────────────────────────────────
+    # The block above covers every FK column that existed when this
+    # capability first shipped. These 7 are FK columns added to
+    # ALREADY-EXISTING tables (tiq_candidates, tiq_requisitions,
+    # tiq_applications) via ADD COLUMN further up this file. The ORM model
+    # declares index=True on every one of them, but that only auto-creates
+    # an index when create_all() builds a table from scratch — it has no
+    # effect on a column bolted onto a table that already existed, which is
+    # exactly what every ADD COLUMN in this file does. Confirmed via a
+    # metadata cross-check (every ORM-declared FK column vs. every
+    # CREATE INDEX actually present in this file): these 7 were the only
+    # gaps, and every query filtering/joining on them — including the
+    # application-count-per-requisition rollup added alongside the
+    # requisitions N+1 fix — was doing a full sequential scan on Neon
+    # without them.
+    "CREATE INDEX IF NOT EXISTS idx_tiq_candidates_owner_user_id ON tiq_candidates(owner_user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tiq_candidates_merged_into_id ON tiq_candidates(merged_into_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tiq_requisitions_jd_record_id ON tiq_requisitions(jd_record_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tiq_requisitions_hiring_manager_contact_id ON tiq_requisitions(hiring_manager_contact_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tiq_requisitions_approved_by_user_id ON tiq_requisitions(approved_by_user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tiq_applications_requisition_id ON tiq_applications(requisition_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tiq_applications_jd_record_id ON tiq_applications(jd_record_id)",
+
     # ── Dual-track scoring engine (RevaMatrix-AI parity): decoupled
     # technical/non-technical scoring, dynamic weights, hard disqualifiers.
     # See utils/scoring.py, and the JobLensSession/JobLensCandidate model
@@ -228,6 +256,198 @@ MIGRATIONS = [
     # Requires at least a few rows to build well; harmless to create early.
     "CREATE INDEX IF NOT EXISTS idx_tiq_skill_taxonomy_embedding "
     "ON tiq_skill_taxonomy USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)",
+
+    # ── Fix: duplicate Organisation rows from a create-race ─────────────
+    # get_or_create_default_organisation() had a check-then-insert race:
+    # the Talent Pool page fires several requests concurrently on load,
+    # and on a brand-new account each one could see "no organisation yet"
+    # before any of them committed. The unique constraint on
+    # public_apply_slug caught most collisions (as a crash — now fixed in
+    # service.py), but if two racing requests ever computed genuinely
+    # different slugs, BOTH inserts could succeed, leaving two
+    # Organisation rows for the same owner_user_id. From then on, every
+    # request for that account hit the same crash permanently — reported
+    # as "csv import failed" / "candidates list failed with 500" even on
+    # a clean reinstall, because reinstalling the app never touches
+    # existing production data. This repoints every affected row to the
+    # oldest (canonical) organisation per user, removes the duplicates,
+    # then adds a real database-level uniqueness guarantee so this class
+    # of bug can't happen again regardless of application-level races.
+    """
+    UPDATE tiq_candidates t SET organisation_id = c.keep_id
+    FROM tiq_organisations o
+    JOIN (SELECT owner_user_id, MIN(id) AS keep_id FROM tiq_organisations GROUP BY owner_user_id) c
+      ON o.owner_user_id = c.owner_user_id
+    WHERE t.organisation_id = o.id AND o.id <> c.keep_id
+    """,
+    """
+    UPDATE tiq_talent_pools t SET organisation_id = c.keep_id
+    FROM tiq_organisations o
+    JOIN (SELECT owner_user_id, MIN(id) AS keep_id FROM tiq_organisations GROUP BY owner_user_id) c
+      ON o.owner_user_id = c.owner_user_id
+    WHERE t.organisation_id = o.id AND o.id <> c.keep_id
+    """,
+    """
+    UPDATE tiq_candidate_merge_log t SET organisation_id = c.keep_id
+    FROM tiq_organisations o
+    JOIN (SELECT owner_user_id, MIN(id) AS keep_id FROM tiq_organisations GROUP BY owner_user_id) c
+      ON o.owner_user_id = c.owner_user_id
+    WHERE t.organisation_id = o.id AND o.id <> c.keep_id
+    """,
+    """
+    UPDATE tiq_applications t SET organisation_id = c.keep_id
+    FROM tiq_organisations o
+    JOIN (SELECT owner_user_id, MIN(id) AS keep_id FROM tiq_organisations GROUP BY owner_user_id) c
+      ON o.owner_user_id = c.owner_user_id
+    WHERE t.organisation_id = o.id AND o.id <> c.keep_id
+    """,
+    """
+    UPDATE tiq_requisitions t SET organisation_id = c.keep_id
+    FROM tiq_organisations o
+    JOIN (SELECT owner_user_id, MIN(id) AS keep_id FROM tiq_organisations GROUP BY owner_user_id) c
+      ON o.owner_user_id = c.owner_user_id
+    WHERE t.organisation_id = o.id AND o.id <> c.keep_id
+    """,
+    """
+    UPDATE tiq_client_contacts t SET organisation_id = c.keep_id
+    FROM tiq_organisations o
+    JOIN (SELECT owner_user_id, MIN(id) AS keep_id FROM tiq_organisations GROUP BY owner_user_id) c
+      ON o.owner_user_id = c.owner_user_id
+    WHERE t.organisation_id = o.id AND o.id <> c.keep_id
+    """,
+    """
+    DELETE FROM tiq_organisations o
+    USING (SELECT owner_user_id, MIN(id) AS keep_id FROM tiq_organisations GROUP BY owner_user_id) c
+    WHERE o.owner_user_id = c.owner_user_id AND o.id <> c.keep_id
+    """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS ux_tiq_organisations_owner_user_id ON tiq_organisations(owner_user_id)",
+
+    # ── Defensive safety net for capabilities/acquisition tables ────────
+    # The actual bug that triggered this: cover_letter_* columns were
+    # added to the Candidate model AFTER tiq_candidates already existed
+    # live (create_all only creates missing TABLES, never adds columns to
+    # ones that already exist) — reported directly as:
+    # asyncpg.exceptions.UndefinedColumnError: column
+    # tiq_candidates.cover_letter_blob does not exist.
+    #
+    # Rather than fix only that one column and risk missing the next one
+    # the same way, every NULLABLE column on every acquisition-capability
+    # table is listed here defensively. ADD COLUMN IF NOT EXISTS is a
+    # guaranteed no-op for columns that already exist, so this is 100%
+    # safe to run against a database that's already fully up to date —
+    # it costs nothing and closes off this entire class of bug for these
+    # tables going forward. (NOT NULL / primary-key columns are
+    # deliberately excluded — those are guaranteed present since table
+    # creation and adding them defensively would carry real risk instead
+    # of being a safe no-op.)
+    "ALTER TABLE tiq_organisations ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITHOUT TIME ZONE",
+
+    "ALTER TABLE tiq_candidates ADD COLUMN IF NOT EXISTS owner_user_id INTEGER",
+    "ALTER TABLE tiq_candidates ADD COLUMN IF NOT EXISTS sequence_number INTEGER",
+    "ALTER TABLE tiq_candidates ADD COLUMN IF NOT EXISTS email VARCHAR(200)",
+    "ALTER TABLE tiq_candidates ADD COLUMN IF NOT EXISTS phone VARCHAR(50)",
+    "ALTER TABLE tiq_candidates ADD COLUMN IF NOT EXISTS location VARCHAR(300)",
+    "ALTER TABLE tiq_candidates ADD COLUMN IF NOT EXISTS linkedin_url TEXT",
+    "ALTER TABLE tiq_candidates ADD COLUMN IF NOT EXISTS portfolio_url TEXT",
+    "ALTER TABLE tiq_candidates ADD COLUMN IF NOT EXISTS current_employer VARCHAR(300)",
+    "ALTER TABLE tiq_candidates ADD COLUMN IF NOT EXISTS current_title VARCHAR(300)",
+    "ALTER TABLE tiq_candidates ADD COLUMN IF NOT EXISTS total_experience_years VARCHAR(20)",
+    "ALTER TABLE tiq_candidates ADD COLUMN IF NOT EXISTS skills JSON",
+    "ALTER TABLE tiq_candidates ADD COLUMN IF NOT EXISTS education TEXT",
+    "ALTER TABLE tiq_candidates ADD COLUMN IF NOT EXISTS certifications JSON",
+    "ALTER TABLE tiq_candidates ADD COLUMN IF NOT EXISTS work_rights VARCHAR(100)",
+    "ALTER TABLE tiq_candidates ADD COLUMN IF NOT EXISTS salary_expectation VARCHAR(100)",
+    "ALTER TABLE tiq_candidates ADD COLUMN IF NOT EXISTS notice_period_days INTEGER",
+    "ALTER TABLE tiq_candidates ADD COLUMN IF NOT EXISTS preferred_locations JSON",
+    "ALTER TABLE tiq_candidates ADD COLUMN IF NOT EXISTS preferred_employment_type VARCHAR(100)",
+    "ALTER TABLE tiq_candidates ADD COLUMN IF NOT EXISTS availability VARCHAR(100)",
+    "ALTER TABLE tiq_candidates ADD COLUMN IF NOT EXISTS source VARCHAR(100)",
+    "ALTER TABLE tiq_candidates ADD COLUMN IF NOT EXISTS referral_source VARCHAR(300)",
+    "ALTER TABLE tiq_candidates ADD COLUMN IF NOT EXISTS consent_given BOOLEAN",
+    "ALTER TABLE tiq_candidates ADD COLUMN IF NOT EXISTS consent_at TIMESTAMP WITHOUT TIME ZONE",
+    "ALTER TABLE tiq_candidates ADD COLUMN IF NOT EXISTS status VARCHAR(30)",
+    "ALTER TABLE tiq_candidates ADD COLUMN IF NOT EXISTS tags JSON",
+    "ALTER TABLE tiq_candidates ADD COLUMN IF NOT EXISTS resume_blob BYTEA",
+    "ALTER TABLE tiq_candidates ADD COLUMN IF NOT EXISTS resume_filename VARCHAR(300)",
+    "ALTER TABLE tiq_candidates ADD COLUMN IF NOT EXISTS resume_mimetype VARCHAR(100)",
+    "ALTER TABLE tiq_candidates ADD COLUMN IF NOT EXISTS resume_text TEXT",
+    "ALTER TABLE tiq_candidates ADD COLUMN IF NOT EXISTS cover_letter_blob BYTEA",
+    "ALTER TABLE tiq_candidates ADD COLUMN IF NOT EXISTS cover_letter_filename VARCHAR(300)",
+    "ALTER TABLE tiq_candidates ADD COLUMN IF NOT EXISTS cover_letter_mimetype VARCHAR(100)",
+    "ALTER TABLE tiq_candidates ADD COLUMN IF NOT EXISTS cover_letter_text TEXT",
+    "ALTER TABLE tiq_candidates ADD COLUMN IF NOT EXISTS notes TEXT",
+    "ALTER TABLE tiq_candidates ADD COLUMN IF NOT EXISTS last_activity_at TIMESTAMP WITHOUT TIME ZONE",
+    "ALTER TABLE tiq_candidates ADD COLUMN IF NOT EXISTS portal_token VARCHAR(64)",
+    "ALTER TABLE tiq_candidates ADD COLUMN IF NOT EXISTS is_merged BOOLEAN",
+    "ALTER TABLE tiq_candidates ADD COLUMN IF NOT EXISTS merged_into_id INTEGER",
+    "ALTER TABLE tiq_candidates ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITHOUT TIME ZONE",
+    "ALTER TABLE tiq_candidates ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITHOUT TIME ZONE",
+
+    "ALTER TABLE tiq_talent_pools ADD COLUMN IF NOT EXISTS description TEXT",
+    "ALTER TABLE tiq_talent_pools ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITHOUT TIME ZONE",
+
+    "ALTER TABLE tiq_candidate_pool_members ADD COLUMN IF NOT EXISTS added_at TIMESTAMP WITHOUT TIME ZONE",
+
+    "ALTER TABLE tiq_candidate_merge_log ADD COLUMN IF NOT EXISTS field_snapshot JSON",
+    "ALTER TABLE tiq_candidate_merge_log ADD COLUMN IF NOT EXISTS merged_at TIMESTAMP WITHOUT TIME ZONE",
+
+    "ALTER TABLE tiq_applications ADD COLUMN IF NOT EXISTS requisition_id INTEGER",
+    "ALTER TABLE tiq_applications ADD COLUMN IF NOT EXISTS jd_record_id INTEGER",
+    "ALTER TABLE tiq_applications ADD COLUMN IF NOT EXISTS source VARCHAR(100)",
+    "ALTER TABLE tiq_applications ADD COLUMN IF NOT EXISTS stage VARCHAR(50)",
+    "ALTER TABLE tiq_applications ADD COLUMN IF NOT EXISTS applied_at TIMESTAMP WITHOUT TIME ZONE",
+    "ALTER TABLE tiq_applications ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITHOUT TIME ZONE",
+    "ALTER TABLE tiq_applications ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITHOUT TIME ZONE",
+
+    # Phase 2 — Job Requisitions: tiq_requisitions already exists as a
+    # Phase 0/1 stub (id/organisation_id/owner_user_id/client_id/title/
+    # status/created_at/updated_at only); these add the full intake
+    # workflow. tiq_client_contacts is a brand-new table, created
+    # automatically by create_all() — no migration needed for it.
+    "ALTER TABLE tiq_requisitions ADD COLUMN IF NOT EXISTS sequence_number INTEGER",
+    "ALTER TABLE tiq_requisitions ADD COLUMN IF NOT EXISTS jd_record_id INTEGER REFERENCES tiq_jd_records(id)",
+    "ALTER TABLE tiq_requisitions ADD COLUMN IF NOT EXISTS priority VARCHAR(20) DEFAULT 'Normal'",
+    "ALTER TABLE tiq_requisitions ADD COLUMN IF NOT EXISTS vacancy_count INTEGER DEFAULT 1",
+    "ALTER TABLE tiq_requisitions ADD COLUMN IF NOT EXISTS reason_for_hire VARCHAR(30)",
+    "ALTER TABLE tiq_requisitions ADD COLUMN IF NOT EXISTS employment_type VARCHAR(50)",
+    "ALTER TABLE tiq_requisitions ADD COLUMN IF NOT EXISTS location VARCHAR(300)",
+    "ALTER TABLE tiq_requisitions ADD COLUMN IF NOT EXISTS salary_min INTEGER",
+    "ALTER TABLE tiq_requisitions ADD COLUMN IF NOT EXISTS salary_max INTEGER",
+    "ALTER TABLE tiq_requisitions ADD COLUMN IF NOT EXISTS target_hire_date TIMESTAMP",
+    "ALTER TABLE tiq_requisitions ADD COLUMN IF NOT EXISTS hiring_manager_contact_id INTEGER",
+    "ALTER TABLE tiq_requisitions ADD COLUMN IF NOT EXISTS hiring_manager_name VARCHAR(200)",
+    "ALTER TABLE tiq_requisitions ADD COLUMN IF NOT EXISTS hiring_manager_email VARCHAR(200)",
+    "ALTER TABLE tiq_requisitions ADD COLUMN IF NOT EXISTS salary_approved BOOLEAN DEFAULT FALSE",
+    "ALTER TABLE tiq_requisitions ADD COLUMN IF NOT EXISTS headcount_approved BOOLEAN DEFAULT FALSE",
+    "ALTER TABLE tiq_requisitions ADD COLUMN IF NOT EXISTS jd_approved BOOLEAN DEFAULT FALSE",
+    "ALTER TABLE tiq_requisitions ADD COLUMN IF NOT EXISTS location_confirmed BOOLEAN DEFAULT FALSE",
+    "ALTER TABLE tiq_requisitions ADD COLUMN IF NOT EXISTS approved_at TIMESTAMP",
+    "ALTER TABLE tiq_requisitions ADD COLUMN IF NOT EXISTS approved_by_user_id INTEGER REFERENCES tiq_users(id)",
+    "ALTER TABLE tiq_requisitions ADD COLUMN IF NOT EXISTS hm_view_token VARCHAR(64)",
+    "ALTER TABLE tiq_requisitions ADD COLUMN IF NOT EXISTS notes TEXT",
+    "CREATE UNIQUE INDEX IF NOT EXISTS ix_tiq_requisitions_hm_view_token ON tiq_requisitions(hm_view_token)",
+
+    # ── Interview Management (Phase 4) — defensive retrofit ──────────────
+    # tiq_interviews itself was created fresh via create_all() when
+    # Interview Management first shipped, so this single column is the
+    # only entry needed here — everything else on that table got its
+    # index/column correctly from the initial CREATE TABLE. Added here
+    # (not just in the model) in case an install already ran that first
+    # version before interview_type existed: ALTER on an already-existing
+    # table needs an explicit statement, same reasoning as every other
+    # entry in this file (see the acquisition/requisition retrofit
+    # entries above, and capabilities/interview/models.py's own docstring
+    # for the fresh-vs-ALTER distinction this file exists to bridge).
+    "ALTER TABLE tiq_interviews ADD COLUMN IF NOT EXISTS interview_type VARCHAR(30) DEFAULT 'HR Screening'",
+
+    # ── AI Avatar Interviews — Q&A evaluation write-back to CandidateLens ──
+    # tiq_joblens_candidates has been live since Phase 3, so these two new
+    # columns need the same explicit ALTER treatment as everything else in
+    # this file — create_all() alone won't add columns to a table that
+    # already exists. See capabilities/avatarinterview/models.py's module
+    # docstring for what writes to these.
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS qa_evaluation JSON",
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS qa_evaluation_score FLOAT",
 ]
 
 async def run():
