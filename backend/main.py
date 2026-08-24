@@ -21,6 +21,20 @@ from routers import cvintel as cvintel_router
 from routers import joblens as joblens_router
 from routers import jdcreator as jdcreator_router
 from routers import candidatetrack as candidatetrack_router
+from capabilities.acquisition import router as acquisition_router
+from capabilities.acquisition import public_router as acquisition_public_router
+from capabilities.requisition import router as requisition_router
+from capabilities.requisition import public_router as requisition_public_router
+from capabilities.interview import router as interview_router
+from capabilities.interview import public_router as interview_public_router
+from capabilities.pipeline import router as pipeline_router
+from capabilities.portal import router as portal_router
+from capabilities.portal import public_router as portal_public_router
+from capabilities.communication import router as communication_router
+from capabilities.commercial import router as commercial_router
+from capabilities.governance import router as governance_router
+from capabilities.avatarinterview import router as avatarinterview_router
+from capabilities.avatarinterview.router import public_router as avatarinterview_public_router
 
 
 @asynccontextmanager
@@ -89,6 +103,82 @@ app.include_router(cvintel_router.router, prefix="/api/cvintel",   tags=["CVInte
 app.include_router(joblens_router.router, prefix="/api/joblens",   tags=["JobLens"])
 app.include_router(jdcreator_router.router, prefix="/api/jdcreator", tags=["JDCreator"])
 app.include_router(candidatetrack_router.router, prefix="/api/candidatetrack", tags=["CandidateTracker"])
+
+# ── Capability: Candidate Acquisition & Talent Pool (Phase 0 + Phase 1) ──
+# Self-contained module — see backend/capabilities/acquisition/models.py
+# for the architecture rationale. Additive only: no existing router/model
+# above this line is modified.
+app.include_router(acquisition_router.router, prefix="/api/acquisition", tags=["Acquisition"])
+app.include_router(acquisition_public_router.router, prefix="/api/public/acquisition", tags=["Acquisition (Public)"])
+
+# ── Capability: Job Requisitions (Phase 2) ──────────────────────────────
+# Requisition's Python class moved here from capabilities/acquisition —
+# same table (tiq_requisitions), Application's FK is unaffected. Importing
+# both modules here (order doesn't matter) lets SQLAlchemy resolve the
+# "Requisition"/"Application" string-based relationship on either side.
+app.include_router(requisition_router.router, prefix="/api/requisitions", tags=["Requisitions"])
+app.include_router(requisition_public_router.router, prefix="/api/public/requisitions", tags=["Requisitions (Public)"])
+
+# ── Capability: Interview Management (Phase 4) ──────────────────────────
+# From "let's interview them" to a recorded decision — human interviews
+# (complementing the AI video interviews already in CandidateLens),
+# structured interviewer scorecards, and token-based self-scheduling
+# links (same pattern as the candidate portal/hiring-manager view link —
+# no calendar OAuth integration). Additive only: links to Candidate
+# (acquisition) and Requisition by FK, nothing existing is modified.
+app.include_router(interview_router.router, prefix="/api/interviews", tags=["Interview Management"])
+app.include_router(interview_public_router.router, prefix="/api/public/interviews", tags=["Interview Management (Public)"])
+
+# ── Capability: Pipeline & Placements (Phase 5) ─────────────────────────
+# Candidate moves to hired without leaving the system — Kanban pipeline
+# (stages configurable per requisition, falling back to an org-wide
+# default), offer approval, and placement/guarantee-period tracking.
+# Wraps the existing Application row rather than modifying it (see
+# capabilities/pipeline/models.py docstring) — additive only.
+app.include_router(pipeline_router.router, prefix="/api/pipeline", tags=["Pipeline & Placements"])
+
+# ── Capability: Client & Vendor Collaboration (Phase 6) ─────────────────
+# Token-based client and vendor portals (same pattern as every other
+# public link in this app — no separate login system for clients/vendors).
+# Additive only: links to Client/Vendor/Requisition/Candidate/
+# PipelineEntry by FK, nothing existing is modified.
+app.include_router(portal_router.router, prefix="/api/portal", tags=["Client & Vendor Collaboration"])
+app.include_router(portal_public_router.router, prefix="/api/public/portal", tags=["Client & Vendor Collaboration (Public)"])
+
+# ── Capability: Communication & Automation (Phase 7) ────────────────────
+# Every meaningful action logged automatically, in one place — templated
+# email (reusing the SMTP infra already proven in routers/joblens.py, not
+# a stub), a unified timeline, automation rules wired into ACTUAL trigger
+# points in Interview Management and Pipeline & Placements, and a
+# cross-capability "daily workbench" view. Additive only.
+app.include_router(communication_router.router, prefix="/api/communication", tags=["Communication & Automation"])
+
+# ── Capability: Commercials (Phase 8) ────────────────────────────────────
+# The money side of a placement, tracked inside the platform — single-line
+# invoicing against a Placement (Phase 5), guarantee/rebate deadline
+# visibility (reuses Placement.guarantee_end_date, doesn't duplicate it),
+# optional contractor timesheets, and a revenue report. Additive only.
+app.include_router(commercial_router.router, prefix="/api/commercials", tags=["Commercials"])
+
+# ── Capability: Governance (Phase 9) ─────────────────────────────────────
+# Leadership sees the business; permissions match real roles. Reporting
+# metrics (time-to-fill, funnel, source-of-hire, recruiter/vendor
+# performance) computed from data every other capability already owns —
+# nothing duplicated. Access control is a real team/role feature
+# (OrganisationMembership), not a UI-only label — see
+# capabilities/governance/models.py's docstring for the honest, stated
+# boundary on where role enforcement does and doesn't reach yet.
+app.include_router(governance_router.router, prefix="/api/governance", tags=["Governance"])
+
+# ── AI Avatar Interviews (extends Interview Management, Phase 4, and
+# CandidateLens, Phase 3) ────────────────────────────────────────────────
+# Setup happens from Interview Management; the avatar-delivered Q&A and
+# its evaluation feed back into CandidateLens's final-screening view
+# alongside the existing video/emotion analysis. See
+# capabilities/avatarinterview/models.py and navtalk_client.py for the
+# explicit, isolated caveat on NavTalk's real API contract.
+app.include_router(avatarinterview_router.router, prefix="/api/avatar-interviews", tags=["AI Avatar Interviews"])
+app.include_router(avatarinterview_public_router, prefix="/api/public/avatar-interviews", tags=["AI Avatar Interviews (Public)"])
 
 
 @app.get("/health")
