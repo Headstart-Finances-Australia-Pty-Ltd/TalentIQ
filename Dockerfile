@@ -29,6 +29,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxfixes3 libxrandr2 libgbm1 libasound2 \
     libpangocairo-1.0-0 libpango-1.0-0 libcairo2 \
     libatspi2.0-0 libx11-6 libxcb1 libxext6 \
+    fonts-liberation libxshmfence1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -60,11 +61,16 @@ RUN pip install --no-cache-dir -r requirements.txt
 # utils/semantic_match.py) until the model becomes available.
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')" || true
 
-# Install Playwright browsers.
-# NOTE: no `|| true` here — if Chromium fails to install, the build should
-# fail loudly rather than silently shipping an image where LinkedIn
-# scraping/automation breaks at runtime with no clear signal.
-RUN playwright install chromium --with-deps
+# Install the Chromium browser binary only — system libraries are already
+# installed manually above. We deliberately do NOT use `--with-deps` here:
+# that flag makes Playwright auto-detect the OS and run its own apt-get
+# install with a hardcoded package list, which breaks on newer Debian
+# releases where packages were renamed (e.g. libasound2 -> libasound2t64).
+# Since the required libs are already present, plain `install chromium`
+# just downloads the browser and skips that broken OS-detection path.
+# No `|| true` — if this fails, the build should fail loudly rather than
+# silently shipping an image where LinkedIn scraping/automation is broken.
+RUN playwright install chromium
 
 # Copy backend source.
 # .dockerignore excludes backend/data/linkedin/ (LinkedIn session state)
