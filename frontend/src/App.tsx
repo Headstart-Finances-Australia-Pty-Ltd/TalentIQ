@@ -12,6 +12,21 @@ import CVIntelPage    from "./pages/CVIntelPage";
 import JobLensPage    from "./pages/JobLensPage";
 import JDCreatorPage  from "./pages/JDCreatorPage";
 import PublicInterviewPage from "./pages/PublicInterviewPage";
+import CareerApplyPage    from "./pages/CareerApplyPage";
+import CandidatePortalPage from "./pages/CandidatePortalPage";
+import RequisitionsPage    from "./pages/RequisitionsPage";
+import HiringManagerViewPage from "./pages/HiringManagerViewPage";
+import AcquisitionPage    from "./pages/AcquisitionPage";
+import InterviewsPage     from "./pages/InterviewsPage";
+import PipelinePage       from "./pages/PipelinePage";
+import PortalsPage        from "./pages/PortalsPage";
+import CommunicationPage  from "./pages/CommunicationPage";
+import CommercialsPage    from "./pages/CommercialsPage";
+import GovernancePage     from "./pages/GovernancePage";
+import PublicClientPortalPage from "./pages/PublicClientPortalPage";
+import PublicVendorPortalPage from "./pages/PublicVendorPortalPage";
+import PublicInterviewSchedulePage from "./pages/PublicInterviewSchedulePage";
+import ComingSoonPage     from "./pages/ComingSoonPage";
 import SettingsPage   from "./pages/SettingsPage";
 import AdminSetupPage from "./pages/AdminSetupPage";
 import FileManagerPage from "./pages/FileManagerPage";
@@ -45,6 +60,12 @@ export default function App() {
             <Route path="/login" element={<LoginPage />} />
             <Route path="/register" element={<RegisterPage />} />
             <Route path="/interview/:token" element={<PublicInterviewPage />} />
+            <Route path="/careers/:slug" element={<CareerApplyPage />} />
+            <Route path="/my-profile/:token" element={<CandidatePortalPage />} />
+            <Route path="/hm/:token" element={<HiringManagerViewPage />} />
+            <Route path="/schedule-interview/:token" element={<PublicInterviewSchedulePage />} />
+            <Route path="/client-portal/:token" element={<PublicClientPortalPage />} />
+            <Route path="/vendor-portal/:token" element={<PublicVendorPortalPage />} />
             <Route path="/app" element={<PrivateRoute><AppLayout /></PrivateRoute>}>
               <Route index element={<DashboardPage />} />
               <Route path="jobhunt"    element={<JobHuntPage />} />
@@ -53,6 +74,14 @@ export default function App() {
               <Route path="cvintel"    element={<CVIntelPage />} />
               <Route path="jdcreator"  element={<JDCreatorPage />} />
               <Route path="joblens"    element={<JobLensPage />} />
+              <Route path="acquisition" element={<AcquisitionPage />} />
+              <Route path="requisitions"  element={<RequisitionsPage />} />
+              <Route path="interviews"    element={<InterviewsPage />} />
+              <Route path="pipeline"      element={<PipelinePage />} />
+              <Route path="portals"       element={<PortalsPage />} />
+              <Route path="communication" element={<CommunicationPage />} />
+              <Route path="commercials"   element={<CommercialsPage />} />
+              <Route path="reporting"     element={<GovernancePage />} />
               <Route path="settings"   element={<SettingsPage />} />
               <Route path="admin-setup"  element={<AdminRoute><AdminSetupPage /></AdminRoute>} />
               <Route path="file-manager" element={<AdminRoute><FileManagerPage /></AdminRoute>} />

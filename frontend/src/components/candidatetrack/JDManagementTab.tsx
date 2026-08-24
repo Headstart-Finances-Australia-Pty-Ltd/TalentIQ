@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Plus, Edit2, Trash2, Upload, FileText } from "lucide-react";
-import { candidateTrackApi, api } from "../../lib/api";
+import { Plus, Edit2, Trash2, Upload, FileText, Link2, Check } from "lucide-react";
+import { candidateTrackApi, acquisitionApi, api } from "../../lib/api";
 import CsvImportModal from "./CsvImportModal";
 import DataTable from "../DataTable";
 
@@ -113,9 +113,23 @@ export default function JDManagementTab() {
   const qc = useQueryClient();
   const { data: jds = [] } = useQuery({ queryKey: ["ct-jds"], queryFn: candidateTrackApi.listJDs });
   const { data: clients = [] } = useQuery({ queryKey: ["ct-clients"], queryFn: candidateTrackApi.listClients });
+  const { data: org } = useQuery({ queryKey: ["acq-organisation"], queryFn: acquisitionApi.getOrganisation });
   const [modalState, setModalState] = useState<null | { mode: "create" } | { mode: "edit"; jd: any }>(null);
   const [csvImportOpen, setCsvImportOpen] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Array<number | string>>([]);
+  const [copiedJdId, setCopiedJdId] = useState<number | null>(null);
+
+  const copyApplyLink = (jdId: number) => {
+    if (!org) return;
+    // Populates the role automatically once opened — see the ?role= handling
+    // in CareerApplyPage.tsx. Different links (different job boards, social
+    // posts, etc.) can point at different roles this way, each pre-filled
+    // for whichever one was actually clicked.
+    const url = `${window.location.origin}${org.apply_url_path}?role=${jdId}`;
+    navigator.clipboard.writeText(url);
+    setCopiedJdId(jdId);
+    setTimeout(() => setCopiedJdId((cur) => (cur === jdId ? null : cur)), 2000);
+  };
 
   const deleteMut = useMutation({
     mutationFn: (id: number) => candidateTrackApi.deleteJD(id),
@@ -168,10 +182,16 @@ export default function JDManagementTab() {
           selectedKeys={selectedIds}
           onSelectionChange={setSelectedIds}
           actionsLabel="Actions"
-          actionsWidth={150}
+          actionsWidth={190}
           emptyMessage="No JDs yet — create one to get started"
           renderActions={(row) => (
             <div style={{ display: "flex", gap: 4 }}>
+              {row._raw.status === "Open" && (
+                <button className="tiq-btn tiq-btn-outline tiq-btn-sm" title="Copy role-specific apply link"
+                  onClick={() => copyApplyLink(row.id)}>
+                  {copiedJdId === row.id ? <Check size={12} /> : <Link2 size={12} />}
+                </button>
+              )}
               {row._raw.has_jd_file && (
                 <button className="tiq-btn tiq-btn-outline tiq-btn-sm" title="View JD file"
                   onClick={() => openBlobInNewTab(`/api/candidatetrack/jds/${row.id}/file`)}>

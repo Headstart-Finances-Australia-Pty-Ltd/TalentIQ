@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Plus, Edit2, Trash2, AlertTriangle, Download, History, UploadCloud, Send } from "lucide-react";
+import { Plus, Edit2, Trash2, AlertTriangle, Download, History, UploadCloud, Send, FileText } from "lucide-react";
 import { candidateTrackApi, api } from "../../lib/api";
 import DataTable from "../DataTable";
 
@@ -34,6 +34,7 @@ function CandidateFormModal({
   const [vendorId, setVendorId] = useState(initial?.vendor_id ?? vendors[0]?.id ?? "");
   const [status, setStatus] = useState(initial?.status || "Applied");
   const [file, setFile] = useState<File | null>(null);
+  const [coverLetterFile, setCoverLetterFile] = useState<File | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [duplicateWarning, setDuplicateWarning] = useState(false);
@@ -64,6 +65,7 @@ function CandidateFormModal({
         form.append("work_permission", workPermission);
         form.append("status", status);
         if (file) form.append("file", file);
+        if (coverLetterFile) form.append("cover_letter_file", coverLetterFile);
         const result = await candidateTrackApi.createCandidate(form);
         if (result.is_duplicate) setDuplicateWarning(true);
       }
@@ -158,9 +160,16 @@ function CandidateFormModal({
           </div>
         </div>
         {!initial && (
-          <div className="tiq-form-group">
-            <label className="tiq-label" style={{ color: "#374151" }}>Resume File</label>
-            <input type="file" accept=".pdf,.doc,.docx" onChange={e => setFile(e.target.files?.[0] || null)} />
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <div className="tiq-form-group">
+              <label className="tiq-label" style={{ color: "#374151" }}>Resume File</label>
+              <input type="file" accept=".pdf,.doc,.docx" onChange={e => setFile(e.target.files?.[0] || null)} />
+            </div>
+            <div className="tiq-form-group">
+              <label className="tiq-label" style={{ color: "#374151" }}>Cover Letter File</label>
+              <input type="file" accept=".pdf,.doc,.docx" onChange={e => setCoverLetterFile(e.target.files?.[0] || null)} />
+              <div style={{ fontSize: 10, color: "#9ca3af", marginTop: 4 }}>Uploaded separately from the resume — optional.</div>
+            </div>
           </div>
         )}
         <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
@@ -348,6 +357,12 @@ export default function CandidateTrackingTab({ onSendToNewAnalysis }: { onSendTo
     onSuccess: () => qc.invalidateQueries({ queryKey: ["ct-candidates"] }),
   });
 
+  const coverLetterUploadMut = useMutation({
+    mutationFn: ({ id, file }: { id: number; file: File }) => candidateTrackApi.uploadCoverLetter(id, file),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["ct-candidates"] }),
+    onError: (e: any) => alert(`Cover letter upload failed: ${e.response?.data?.detail || e.message}`),
+  });
+
   const rows = candidates.map((c: any) => ({
     id: c.id,
     "Name": c.name,
@@ -360,6 +375,7 @@ export default function CandidateTrackingTab({ onSendToNewAnalysis }: { onSendTo
     "Source Vendor": c.vendor_name || "—",
     "Status": c.status,
     "Resume": c.has_resume ? "Available" : "—",
+    "Cover Letter": c.has_cover_letter ? "Available" : "—",
     "Submitted On": c.submitted_at ? new Date(c.submitted_at).toLocaleDateString() : "",
     _raw: c,
   }));
@@ -413,7 +429,7 @@ export default function CandidateTrackingTab({ onSendToNewAnalysis }: { onSendTo
       </div>
       <div className="tiq-card" style={{ padding: 0 }}>
         <DataTable
-          columns={["Name", "Email", "Phone", "Address", "Work Permission", "JD", "Client / Company", "Source Vendor", "Status", "Resume", "Submitted On"]}
+          columns={["Name", "Email", "Phone", "Address", "Work Permission", "JD", "Client / Company", "Source Vendor", "Status", "Resume", "Cover Letter", "Submitted On"]}
           rows={rows}
           getRowKey={(row) => row.id}
           selectable
@@ -443,6 +459,17 @@ export default function CandidateTrackingTab({ onSendToNewAnalysis }: { onSendTo
                   <Download size={12} />
                 </button>
               )}
+              {row._raw.has_cover_letter && (
+                <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" title={`View cover letter${row._raw.cover_letter_filename ? `: ${row._raw.cover_letter_filename}` : ""}`}
+                  onClick={() => openBlobInNewTab(`/api/candidatetrack/candidates/${row.id}/cover-letter`)}>
+                  <FileText size={12} />
+                </button>
+              )}
+              <label className="tiq-btn tiq-btn-ghost tiq-btn-sm" title={row._raw.has_cover_letter ? "Replace cover letter" : "Upload cover letter"} style={{ cursor: "pointer" }}>
+                <UploadCloud size={12} />
+                <input type="file" hidden accept=".pdf,.doc,.docx"
+                  onChange={e => { const f = e.target.files?.[0]; if (f) coverLetterUploadMut.mutate({ id: row.id, file: f }); e.target.value = ""; }} />
+              </label>
               <button className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={() => setModalState({ mode: "edit", candidate: row._raw })}>
                 <Edit2 size={12} />
               </button>

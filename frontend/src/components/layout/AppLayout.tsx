@@ -1,44 +1,60 @@
 import { useState } from "react";
 import { Outlet, NavLink, Link } from "react-router-dom";
 import {
-  LayoutDashboard, Search, BarChart2, Users,
-  Settings, LogOut, Shield, Database, BrainCircuit, Briefcase, Home, FileEdit,
+  LayoutDashboard, Settings, LogOut, Shield, Database, Home,
   ChevronDown, ChevronRight, Zap,
 } from "lucide-react";
 import { useAuth } from "../../hooks/useAuth";
+import { CAPABILITIES, CORE_PIPELINE_CAPABILITIES, SUPPORTING_CAPABILITIES, JOBSEEKER_MODULES } from "../../lib/capabilities";
 
-const INDIVIDUAL_ITEMS = [
-  { to: "/app/cvintel",  label: "CVAnalysis",   icon: BrainCircuit },
-  { to: "/app/jobhunt",  label: "JobHunter",    icon: Search       },
-];
+// Matches .tiq-nav-item's own font exactly (14px / 500 / rgba(255,255,255,.6))
+// so a capability header reads at the same weight as the module links inside
+// it — the only visual differentiators are the chevron and the indent.
+const CAPABILITY_LABEL_STYLE: React.CSSProperties = {
+  fontSize: 14, fontWeight: 500, color: "rgba(255,255,255,.68)", lineHeight: "20px",
+};
 
-const BUSINESS_ITEMS = [
-  { to: "/app/jobintel", label: "MarketIntel",  icon: BarChart2    },
-  { to: "/app/linklens", label: "LinkExplore",  icon: Users        },
-  { to: "/app/jdcreator",label: "JD Creator",   icon: FileEdit     },
-  { to: "/app/joblens",  label: "CandidateLens",icon: Briefcase    },
-];
-
-function NavGroup({ title, items, defaultOpen = true }: { title: string; items: typeof INDIVIDUAL_ITEMS; defaultOpen?: boolean }) {
-  const [open, setOpen] = useState(defaultOpen);
+function CapabilityGroup({ capability }: { capability: (typeof CAPABILITIES)[0] }) {
+  const [open, setOpen] = useState(false);
   return (
     <div>
       <button
         onClick={() => setOpen(o => !o)}
         style={{
-          display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%",
-          background: "none", border: "none", cursor: "pointer", padding: "8px 16px",
-          fontSize: 11, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase",
-          color: "rgba(255,255,255,.35)",
+          display: "flex", alignItems: "flex-start", justifyContent: "space-between", width: "100%",
+          background: "none", border: "none", cursor: "pointer", padding: "9px 12px",
+          textAlign: "left", borderRadius: "var(--radius-sm)",
         }}
       >
-        {title}
-        {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+        {/* Fixed-width icon column — guarantees every capability's label
+            starts at the exact same x position, regardless of how wide any
+            individual emoji glyph happens to render (this was the cause of
+            the inconsistent indentation between rows). */}
+        <span style={{ display: "flex", alignItems: "flex-start", gap: 10, minWidth: 0 }}>
+          <span style={{ width: 18, flexShrink: 0, fontSize: 14, lineHeight: "20px", textAlign: "center" }}>
+            {capability.emoji}
+          </span>
+          <span style={CAPABILITY_LABEL_STYLE}>{capability.name}</span>
+        </span>
+        <span style={{ flexShrink: 0, marginLeft: 8, marginTop: 3 }}>
+          {open ? <ChevronDown size={13} color="rgba(255,255,255,.4)" /> : <ChevronRight size={13} color="rgba(255,255,255,.4)" />}
+        </span>
       </button>
-      {open && items.map(({ to, label, icon: Icon }) => (
-        <NavLink key={to} to={to}
-          className={({ isActive }) => `tiq-nav-item${isActive ? " active" : ""}`}>
-          <Icon size={16} />{label}
+      {open && capability.modules.map(({ route, name, icon: Icon, built }) => (
+        <NavLink key={route} to={route}
+          className={({ isActive }) => `tiq-nav-item${isActive ? " active" : ""}`}
+          style={{ padding: "6px 12px 6px 34px", fontSize: 12 }}>
+          <Icon size={13.5} />
+          <span style={{ flex: 1 }}>{name}</span>
+          {!built && (
+            <span style={{
+              fontSize: 8.5, fontWeight: 800, padding: "1px 6px", borderRadius: 8,
+              background: "rgba(255,255,255,.1)", color: "rgba(255,255,255,.4)",
+              textTransform: "uppercase", letterSpacing: "0.04em",
+            }}>
+              Soon
+            </span>
+          )}
         </NavLink>
       ))}
     </div>
@@ -61,14 +77,26 @@ export default function AppLayout() {
         </div>
 
         <nav className="tiq-nav">
-          <div className="tiq-nav-section">Agents</div>
+          <div className="tiq-nav-section">Overview</div>
           <NavLink to="/app" end
             className={({ isActive }) => `tiq-nav-item${isActive ? " active" : ""}`}>
             <LayoutDashboard size={16} />Dashboard
           </NavLink>
 
-          <NavGroup title="Individual" items={INDIVIDUAL_ITEMS} />
-          <NavGroup title="Business" items={BUSINESS_ITEMS} />
+          <div className="tiq-nav-section">Recruitment Capabilities</div>
+          {CORE_PIPELINE_CAPABILITIES.map((capability) => <CapabilityGroup key={capability.name} capability={capability} />)}
+
+          <div className="tiq-nav-section">Supporting Capabilities</div>
+          {SUPPORTING_CAPABILITIES.map((capability) => <CapabilityGroup key={capability.name} capability={capability} />)}
+
+          <div className="tiq-nav-section">Job Seeker Tools</div>
+          {JOBSEEKER_MODULES.map(({ route, name, icon: Icon, emoji }) => (
+            <NavLink key={route} to={route}
+              className={({ isActive }) => `tiq-nav-item${isActive ? " active" : ""}`}>
+              {emoji ? <span style={{ width: 16, textAlign: "center", fontSize: 14 }}>{emoji}</span> : <Icon size={16} />}
+              {name}
+            </NavLink>
+          ))}
 
           <div className="tiq-nav-section">Account</div>
           <NavLink to="/app/settings"
@@ -116,7 +144,9 @@ export default function AppLayout() {
           <div style={{ fontSize: 14, color: "var(--text-muted)" }}>
             Welcome back, <strong style={{ color: "var(--text-primary)" }}>{user?.name?.split(" ")[0]}</strong>
           </div>
-          {isAdmin && <span className="tiq-badge tiq-badge-violet">Admin</span>}
+          {isAdmin && user?.name?.split(" ")[0]?.toLowerCase() !== "admin" && (
+            <span className="tiq-badge tiq-badge-violet">Admin</span>
+          )}
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginLeft: "auto" }}>
             <Link to="/" style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12, fontWeight: 600, color: "var(--text-muted)", textDecoration: "none", padding: "5px 10px", borderRadius: 6, border: "1px solid var(--border)" }}
               onMouseEnter={e => { e.currentTarget.style.color = "var(--text-primary)"; e.currentTarget.style.background = "var(--bg-secondary)"; }}

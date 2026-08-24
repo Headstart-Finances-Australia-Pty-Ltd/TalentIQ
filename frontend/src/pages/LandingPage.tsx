@@ -2,69 +2,28 @@ import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../hooks/useAuth";
 import {
-  Search, BarChart2, Users, Zap, Shield, Download,
-  BrainCircuit, Briefcase, ArrowRight, CheckCircle,
-  Globe, Database, Star, TrendingUp, Mail, Twitter, Linkedin, FileEdit,
+  Zap, Shield, Download, ArrowRight, CheckCircle,
+  Globe, Database, Star, TrendingUp, Mail, Twitter, Linkedin,
 } from "lucide-react";
-
-const MODULES = [
-  {
-    icon: Search, color: "#0ea5e9", bg: "rgba(14,165,233,.12)",
-    name: "JobHunter", route: "/app/jobhunt",
-    tagline: "AI-powered job search & resume matching",
-    desc: "Upload your resume, set your criteria, and let AI scrape live jobs, score your ATS fit, and draft personalised cover letters.",
-    features: ["Live job scraping via Adzuna API", "ATS resume scoring 0–100%", "AI cover letter generation", "One-click Excel export"],
-  },
-  {
-    icon: BarChart2, color: "#a78bfa", bg: "rgba(167,139,250,.12)",
-    name: "MarketIntel", route: "/app/jobintel",
-    tagline: "Job market intelligence & salary analytics",
-    desc: "Turn hundreds of job postings into market signals. Track skill demand, salary trends, and hiring patterns.",
-    features: ["Skill & tool demand ranking", "Salary range extraction", "Experience level breakdown", "Domain & company-type split"],
-  },
-  {
-    icon: Users, color: "#34d399", bg: "rgba(52,211,153,.10)",
-    name: "LinkExplore", route: "/app/linklens",
-    tagline: "LinkedIn candidate search at scale",
-    desc: "Search LinkedIn at scale. Find candidates by title, location, and skills, extract structured profiles and contact details.",
-    features: ["Playwright-powered LinkedIn scraping", "Structured profile extraction", "Email pattern guessing", "Bulk candidate export"],
-  },
-  {
-    icon: BrainCircuit, color: "#f472b6", bg: "rgba(244,114,182,.10)",
-    name: "CVAnalysis", route: "/app/cvintel",
-    tagline: "ATS resume analyser & gap finder",
-    desc: "Score any resume against a job description instantly. Get matched skills, missing skills, and AI-powered improvement suggestions.",
-    features: ["Instant ATS keyword scoring", "Matched vs missing skills", "AI improvement suggestions", "ATS formatting checker"],
-  },
-  {
-    icon: FileEdit, color: "#0d9488", bg: "rgba(13,148,136,.10)",
-    name: "JD Creator", route: "/app/jdcreator",
-    tagline: "AI-generated job descriptions in seconds",
-    desc: "Enter a role title, required skills, experience, and education — get a formal, professionally-written Position Description, ready to download as Word.",
-    features: ["AI-written purpose & responsibilities", "Company branding from your profile", "One-click Word (.docx) download", "Saved JD history"],
-  },
-  {
-    icon: Briefcase, color: "#fb923c", bg: "rgba(251,146,60,.10)",
-    name: "CandidateLens", route: "/app/joblens",
-    tagline: "AI recruitment engine & video interviews",
-    desc: "Upload a JD and multiple CVs. AI ranks candidates by ATS score, generates interview questions, and runs video interviews.",
-    features: ["Multi-CV batch scoring", "AI interview question generation", "Webcam video interviews", "Emotion analysis & Excel export"],
-  },
-];
-
-const INDIVIDUAL_NAMES = ["CVAnalysis", "JobHunter"];
-const BUSINESS_NAMES = ["MarketIntel", "LinkExplore", "JD Creator", "CandidateLens"];
+import { CAPABILITIES, CORE_PIPELINE_CAPABILITIES, SUPPORTING_CAPABILITIES, JOBSEEKER_MODULES } from "../lib/capabilities";
+import RecruitmentWorkflow from "../components/RecruitmentWorkflow";
 
 const STATS = [
-  { value: "6", label: "AI Modules" },
+  { value: "9", label: "Capabilities" },
   { value: "100%", label: "Data Ownership" },
-  { value: "∞", label: "Searches Saved" },
+  { value: "1", label: "Database" },
   { value: "AI", label: "LLM Powered" },
 ];
 
-function NavDropdown({ label, names }: { label: string; names: string[] }) {
+const ALL_MODULES = CAPABILITIES.flatMap((cap) => cap.modules.map((m) => ({ ...m, capability: cap.name })));
+const BUILT_MODULE_COUNT = ALL_MODULES.filter((m) => m.built).length;
+
+function slugify(name: string) {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
+}
+
+function NavDropdown({ label, items }: { label: string; items: { name: string; route: string; capability?: string; emoji?: string }[] }) {
   const [open, setOpen] = useState(false);
-  const items = MODULES.filter(m => names.includes(m.name));
   return (
     <div style={{ position: "relative" }}
       onMouseEnter={() => setOpen(true)}
@@ -81,14 +40,18 @@ function NavDropdown({ label, names }: { label: string; names: string[] }) {
         <div style={{
           position: "absolute", top: "100%", left: 0, marginTop: 4,
           background: "#ffffff", borderRadius: 10, border: "1px solid #f1f5f9",
-          boxShadow: "0 12px 32px rgba(0,0,0,.12)", padding: 6, minWidth: 180, zIndex: 200,
+          boxShadow: "0 12px 32px rgba(0,0,0,.12)", padding: 6, minWidth: 220, zIndex: 200,
         }}>
           {items.map(m => (
             <Link key={m.name} to={m.route}
-              style={{ display: "block", fontSize: 13, color: "#374151", padding: "8px 10px", borderRadius: 6, textDecoration: "none", fontWeight: 500 }}
+              style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, fontSize: 13, color: "#374151", padding: "8px 10px", borderRadius: 6, textDecoration: "none", fontWeight: 500 }}
               onMouseEnter={e => { e.currentTarget.style.background = "#f8fafc"; e.currentTarget.style.color = "#0f172a"; }}
               onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "#374151"; }}>
-              {m.name}
+              <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                {m.emoji && <span style={{ fontSize: 14 }}>{m.emoji}</span>}
+                {m.name}
+              </span>
+              {m.capability && <span style={{ fontSize: 9.5, color: "#94a3b8", fontWeight: 700 }}>{m.capability}</span>}
             </Link>
           ))}
         </div>
@@ -97,7 +60,75 @@ function NavDropdown({ label, names }: { label: string; names: string[] }) {
   );
 }
 
-function ModuleCard({ m, isEven }: { m: typeof MODULES[0]; isEven: boolean }) {
+// Grouped mega-menu for "Recruitment Platform" — the flat list was hard to
+// scan with 9 capabilities' worth of modules in it. Grouped by capability,
+// each with its emoji + name as a non-clickable header, links below it.
+function CapabilityColumn({ cap }: { cap: (typeof CAPABILITIES)[0] }) {
+  return (
+    <div>
+      <a href={`#${slugify(cap.name)}`}
+        style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6, textDecoration: "none" }}>
+        <span style={{ fontSize: 15 }}>{cap.emoji}</span>
+        <span style={{ fontSize: 11.5, fontWeight: 800, color: cap.color, textTransform: "uppercase", letterSpacing: ".03em" }}>{cap.name}</span>
+      </a>
+      {cap.modules.map(m => (
+        <Link key={m.route} to={m.route}
+          style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 11.5, color: "#64748b", padding: "3px 0", paddingLeft: 21, textDecoration: "none", fontWeight: 500 }}
+          onMouseEnter={e => (e.currentTarget.style.color = "#0f172a")}
+          onMouseLeave={e => (e.currentTarget.style.color = "#64748b")}>
+          <span>{m.name}</span>
+          {!m.built && <span style={{ fontSize: 8.5, color: "#94a3b8", fontWeight: 700 }}>Soon</span>}
+        </Link>
+      ))}
+    </div>
+  );
+}
+
+function RecruitmentMegaMenu() {
+  const [open, setOpen] = useState(false);
+  return (
+    <div style={{ position: "relative" }}
+      onMouseEnter={() => setOpen(true)}
+      onMouseLeave={() => setOpen(false)}>
+      <button style={{
+        fontSize: 13, color: "#64748b", padding: "6px 10px", borderRadius: 6,
+        fontWeight: 700, background: open ? "#f8fafc" : "transparent",
+        border: "none", cursor: "pointer", display: "flex", alignItems: "center", gap: 4,
+      }}>
+        Recruitment Platform
+        <span style={{ fontSize: 9, transform: open ? "rotate(180deg)" : "none", transition: "transform .15s" }}>▾</span>
+      </button>
+      {open && (
+        <div style={{
+          position: "absolute", top: "100%", left: "50%", transform: "translateX(-50%)", marginTop: 4,
+          background: "#ffffff", borderRadius: 12, border: "1px solid #f1f5f9",
+          boxShadow: "0 16px 40px rgba(0,0,0,.14)", padding: 20, zIndex: 200, width: 640,
+        }}>
+          <div style={{ fontSize: 9.5, fontWeight: 800, color: "#94a3b8", textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 10 }}>
+            Recruitment Capabilities
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 190px)", gap: "16px 20px", marginBottom: 18 }}>
+            {CORE_PIPELINE_CAPABILITIES.map(cap => <CapabilityColumn key={cap.name} cap={cap} />)}
+          </div>
+          <div style={{ height: 1, background: "#f1f5f9", margin: "0 0 16px" }} />
+          <div style={{ fontSize: 9.5, fontWeight: 800, color: "#94a3b8", textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 10 }}>
+            Supporting Capabilities
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 190px)", gap: "16px 20px" }}>
+            {SUPPORTING_CAPABILITIES.map(cap => <CapabilityColumn key={cap.name} cap={cap} />)}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+type ModuleDef = {
+  icon: typeof Zap; emoji?: string; name: string; route: string;
+  tagline: string; desc: string; features: string[]; built: boolean;
+};
+
+function ModuleCard({ m, isEven, color, bg }: { m: ModuleDef; isEven: boolean; color: string; bg: string }) {
   const Icon = m.icon;
   return (
     <div style={{
@@ -106,26 +137,26 @@ function ModuleCard({ m, isEven }: { m: typeof MODULES[0]; isEven: boolean }) {
       direction: isEven ? "ltr" : "rtl",
     }}>
       <div style={{ direction: "ltr" }}>
-        <div style={{ display: "inline-flex", alignItems: "center", gap: 8, marginBottom: 16, padding: "6px 14px", borderRadius: 20, background: m.bg, border: `1px solid ${m.color}30` }}>
-          <Icon size={14} color={m.color} />
-          <span style={{ fontSize: 12, fontWeight: 700, color: m.color, textTransform: "uppercase", letterSpacing: ".5px" }}>{m.name}</span>
+        <div style={{ display: "inline-flex", alignItems: "center", gap: 8, marginBottom: 16, padding: "6px 14px", borderRadius: 20, background: bg, border: `1px solid ${color}30` }}>
+          {m.emoji ? <span style={{ fontSize: 14 }}>{m.emoji}</span> : <Icon size={14} color={color} />}
+          <span style={{ fontSize: 12, fontWeight: 700, color, textTransform: "uppercase", letterSpacing: ".5px" }}>{m.name}</span>
         </div>
         <h3 style={{ fontSize: "clamp(22px,3vw,32px)", fontWeight: 800, letterSpacing: "-.5px", marginBottom: 14, color: "#0f172a", lineHeight: 1.2 }}>{m.tagline}</h3>
         <p style={{ fontSize: 16, color: "#64748b", lineHeight: 1.8, marginBottom: 28 }}>{m.desc}</p>
         <ul style={{ listStyle: "none", padding: 0, margin: "0 0 32px" }}>
           {m.features.map(f => (
             <li key={f} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10, fontSize: 14, color: "#374151" }}>
-              <CheckCircle size={15} color={m.color} style={{ flexShrink: 0 }} /> {f}
+              <CheckCircle size={15} color={color} style={{ flexShrink: 0 }} /> {f}
             </li>
           ))}
         </ul>
         <Link to="/register" style={{
           display: "inline-flex", alignItems: "center", gap: 6,
           padding: "10px 22px", borderRadius: 10, fontSize: 13, fontWeight: 600,
-          background: m.bg, border: `1.5px solid ${m.color}50`,
-          color: m.color, textDecoration: "none",
+          background: bg, border: `1.5px solid ${color}50`,
+          color, textDecoration: "none",
         }}>
-          Try {m.name} <ArrowRight size={13} />
+          {m.built ? `Try ${m.name}` : `Preview ${m.name}`} <ArrowRight size={13} />
         </Link>
       </div>
 
@@ -137,14 +168,18 @@ function ModuleCard({ m, isEven }: { m: typeof MODULES[0]; isEven: boolean }) {
           boxShadow: "0 8px 40px rgba(0,0,0,.08)",
         }}>
           <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 24, paddingBottom: 20, borderBottom: "1px solid #f1f5f9" }}>
-            <div style={{ width: 44, height: 44, borderRadius: 12, background: m.bg, display: "flex", alignItems: "center", justifyContent: "center" }}>
-              <Icon size={22} color={m.color} />
+            <div style={{ width: 44, height: 44, borderRadius: 12, background: bg, display: "flex", alignItems: "center", justifyContent: "center", fontSize: m.emoji ? 22 : undefined }}>
+              {m.emoji ? m.emoji : <Icon size={22} color={color} />}
             </div>
             <div>
               <div style={{ fontSize: 15, fontWeight: 700, color: "#0f172a" }}>{m.name}</div>
               <div style={{ fontSize: 12, color: "#94a3b8" }}>AI Module</div>
             </div>
-            <div style={{ marginLeft: "auto", padding: "4px 12px", borderRadius: 20, background: "#f0fdf4", border: "1px solid #bbf7d0", fontSize: 11, color: "#16a34a", fontWeight: 700 }}>● Active</div>
+            {m.built ? (
+              <div style={{ marginLeft: "auto", padding: "4px 12px", borderRadius: 20, background: "#f0fdf4", border: "1px solid #bbf7d0", fontSize: 11, color: "#16a34a", fontWeight: 700 }}>● Live</div>
+            ) : (
+              <div style={{ marginLeft: "auto", padding: "4px 12px", borderRadius: 20, background: "#f8fafc", border: "1px solid #e2e8f0", fontSize: 11, color: "#64748b", fontWeight: 700 }}>Coming Soon</div>
+            )}
           </div>
           {m.features.map((f, fi) => (
             <div key={f} style={{
@@ -152,7 +187,7 @@ function ModuleCard({ m, isEven }: { m: typeof MODULES[0]; isEven: boolean }) {
               background: fi % 2 === 0 ? "#f8fafc" : "transparent",
               borderRadius: 8, marginBottom: 4, fontSize: 13, color: "#475569",
             }}>
-              <div style={{ width: 6, height: 6, borderRadius: "50%", background: m.color, flexShrink: 0 }} />
+              <div style={{ width: 6, height: 6, borderRadius: "50%", background: color, flexShrink: 0 }} />
               {f}
             </div>
           ))}
@@ -162,17 +197,6 @@ function ModuleCard({ m, isEven }: { m: typeof MODULES[0]; isEven: boolean }) {
   );
 }
 
-function ModuleGroupHeading({ label, sub, color }: { label: string; sub: string; color: string }) {
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 14, margin: "0 0 40px" }}>
-      <div style={{ fontSize: "clamp(20px,2.6vw,28px)", fontWeight: 800, letterSpacing: "-.5px", color: "#0f172a" }}>{label}</div>
-      <div style={{ fontSize: 12, fontWeight: 700, color, background: `${color}15`, border: `1px solid ${color}30`, padding: "4px 12px", borderRadius: 20, textTransform: "uppercase", letterSpacing: ".05em" }}>
-        {sub}
-      </div>
-      <div style={{ flex: 1, height: 1, background: "#f1f5f9" }} />
-    </div>
-  );
-}
 
 export default function LandingPage() {
   const { user } = useAuth();
@@ -199,8 +223,8 @@ export default function LandingPage() {
         </div>
 
         <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-          <NavDropdown label="Agents for Individual" names={INDIVIDUAL_NAMES} />
-          <NavDropdown label="Agents for Business" names={BUSINESS_NAMES} />
+          <RecruitmentMegaMenu />
+          <NavDropdown label="Job Seeker Tools" items={JOBSEEKER_MODULES} />
           <div style={{ width: 1, height: 20, background: "#e2e8f0", margin: "0 6px" }} />
           {isLoggedIn ? (
             <Link to="/app"
@@ -237,19 +261,19 @@ export default function LandingPage() {
           fontSize: 12, fontWeight: 600, color: "#0284c7",
           boxShadow: "0 1px 4px rgba(14,165,233,.15)",
         }}>
-          <Zap size={11} fill="#0284c7" color="#0284c7" /> AI-Powered Recruitment Platform
+          <Zap size={11} fill="#0284c7" color="#0284c7" /> AI-Native Recruiting, Reimagined
         </div>
 
         <h1 style={{ fontSize: "clamp(36px,6vw,68px)", fontWeight: 900, lineHeight: 1.06, letterSpacing: "-2px", marginBottom: 24, color: "#0f172a" }}>
           Hire smarter with<br />
           <span style={{ background: "linear-gradient(135deg,#5ee8db,#00c7b7,#009e90)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>
-            six AI agents
+            an AI-native recruitment platform
           </span>
         </h1>
 
-        <p style={{ fontSize: 19, color: "#475569", lineHeight: 1.7, marginBottom: 40, maxWidth: 600, margin: "0 auto 40px" }}>
-          One platform for job seekers and recruiters. Search jobs, decode market trends,
-          find LinkedIn candidates, analyse CVs, and run AI-powered interviews.
+        <p style={{ fontSize: 19, color: "#475569", lineHeight: 1.7, marginBottom: 40, maxWidth: 620, margin: "0 auto 40px" }}>
+          One platform for recruiters and job seekers — source and screen candidates with AI, and manage the
+          entire hiring pipeline from first contact through to offer.
         </p>
 
         <div style={{ display: "flex", gap: 12, justifyContent: "center", flexWrap: "wrap" }}>
@@ -296,29 +320,121 @@ export default function LandingPage() {
         </div>
       </section>
 
-      {/* ── MODULES ── */}
-      <section style={{ padding: "96px 5%", maxWidth: 1200, margin: "0 auto" }}>
-        <div style={{ textAlign: "center", marginBottom: 64 }}>
+      {/* ── HOW IT WORKS — end-to-end workflow diagram ── */}
+      <section style={{ padding: "72px 5% 88px", maxWidth: 1200, margin: "0 auto" }}>
+        <div style={{ textAlign: "center", marginBottom: 48 }}>
           <div style={{ fontSize: 12, fontWeight: 700, letterSpacing: "2px", textTransform: "uppercase", color: "#94a3b8", marginBottom: 12 }}>
-            SIX SPECIALISED MODULES
+            HOW IT WORKS
+          </div>
+          <h2 style={{ fontSize: "clamp(26px,3.6vw,40px)", fontWeight: 800, letterSpacing: "-1px", color: "#0f172a", marginBottom: 16 }}>
+            End-to-end, not a bundle of tools
+          </h2>
+          <p style={{ fontSize: 16, color: "#64748b", maxWidth: 600, margin: "0 auto" }}>
+            A requisition flows through one connected pipeline — sourcing to placement — while four supporting
+            capabilities operate underneath the whole thing, not bolted on at the edges.
+          </p>
+        </div>
+        <RecruitmentWorkflow />
+      </section>
+
+      {/* ── MODULES ── */}
+      <style>{`html { scroll-behavior: smooth; }`}</style>
+      <section style={{ padding: "96px 5% 48px", maxWidth: 1200, margin: "0 auto" }}>
+        <div style={{ textAlign: "center", marginBottom: 40 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, letterSpacing: "2px", textTransform: "uppercase", color: "#94a3b8", marginBottom: 12 }}>
+            NINE CAPABILITIES, ONE PLATFORM
           </div>
           <h2 style={{ fontSize: "clamp(28px,4vw,44px)", fontWeight: 800, letterSpacing: "-1px", color: "#0f172a", marginBottom: 16 }}>
             Every tool you need to hire smarter
           </h2>
-          <p style={{ fontSize: 17, color: "#64748b", maxWidth: 560, margin: "0 auto" }}>
-            Each module is an independent AI agent, grouped below by <strong>Individual</strong> (personal job search) and <strong>Business</strong> (recruiting & talent ops) — they share the same database so your data compounds.
+          <p style={{ fontSize: 17, color: "#64748b", maxWidth: 620, margin: "0 auto" }}>
+            The recruitment platform is architected as nine capabilities, from candidate acquisition through to
+            reporting — each one a complete, working part of the hiring pipeline, built in order — plus a set of
+            standalone <strong>job seeker tools</strong>. Everything shares the same database, so your data compounds.
           </p>
         </div>
 
-        <ModuleGroupHeading label="Individual" sub="Personal Job Search" color="#0ea5e9" />
-        {MODULES.filter(m => INDIVIDUAL_NAMES.includes(m.name))
-          .sort((a, b) => INDIVIDUAL_NAMES.indexOf(a.name) - INDIVIDUAL_NAMES.indexOf(b.name))
-          .map((m, i) => <ModuleCard key={m.name} m={m} isEven={i % 2 === 0} />)}
+        {/* Jump-to-capability strip — makes moving between sections explicit */}
+        <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "center", gap: 8 }}>
+          {CAPABILITIES.map((capability) => (
+            <a key={capability.name} href={`#${slugify(capability.name)}`} style={{
+              display: "inline-flex", alignItems: "center", gap: 6,
+              padding: "7px 14px", borderRadius: 20, textDecoration: "none",
+              background: capability.bg, border: `1px solid ${capability.color}35`,
+              fontSize: 12.5, fontWeight: 700, color: capability.color,
+            }}>
+              <span>{capability.emoji}</span>{capability.name}
+            </a>
+          ))}
+          <a href="#job-seeker-tools" style={{
+            display: "inline-flex", alignItems: "center", gap: 6,
+            padding: "7px 14px", borderRadius: 20, textDecoration: "none",
+            background: "rgba(14,165,233,.12)", border: "1px solid #0ea5e935",
+            fontSize: 12.5, fontWeight: 700, color: "#0ea5e9",
+          }}>
+            <span>🧑‍💻</span>Job Seeker Tools
+          </a>
+        </div>
+      </section>
 
-        <ModuleGroupHeading label="Business" sub="Recruiting & Talent Ops" color="#fb923c" />
-        {MODULES.filter(m => BUSINESS_NAMES.includes(m.name))
-          .sort((a, b) => BUSINESS_NAMES.indexOf(a.name) - BUSINESS_NAMES.indexOf(b.name))
-          .map((m, i) => <ModuleCard key={m.name} m={m} isEven={i % 2 === 0} />)}
+      {CAPABILITIES.map((capability, idx) => (
+        <section key={capability.name} id={slugify(capability.name)} style={{
+          padding: "72px 5%",
+          background: idx % 2 === 0 ? "#ffffff" : "#f8fafc",
+          borderTop: "1px solid #f1f5f9",
+        }}>
+          <div style={{ maxWidth: 1200, margin: "0 auto" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 18, marginBottom: 8 }}>
+              <div style={{
+                width: 56, height: 56, borderRadius: 16, background: capability.bg,
+                display: "flex", alignItems: "center", justifyContent: "center", fontSize: 28, flexShrink: 0,
+              }}>
+                {capability.emoji}
+              </div>
+              <div>
+                <div style={{ fontSize: 11.5, fontWeight: 700, color: capability.color, textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 4 }}>
+                  Capability {idx + 1} of {CAPABILITIES.length}
+                </div>
+                <h3 style={{ fontSize: "clamp(24px,3vw,34px)", fontWeight: 800, letterSpacing: "-.5px", color: "#0f172a" }}>{capability.name}</h3>
+              </div>
+            </div>
+            <p style={{ fontSize: 15.5, color: "#64748b", marginBottom: 48, maxWidth: 640 }}>
+              {capability.summary}
+            </p>
+            {capability.modules.map((m, i) => (
+              <ModuleCard key={m.name} m={m} isEven={i % 2 === 0} color={capability.color} bg={capability.bg} />
+            ))}
+          </div>
+        </section>
+      ))}
+
+      <section id="job-seeker-tools" style={{
+        padding: "72px 5%", background: CAPABILITIES.length % 2 === 0 ? "#ffffff" : "#f8fafc",
+        borderTop: "1px solid #f1f5f9",
+      }}>
+        <div style={{ maxWidth: 1200, margin: "0 auto" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 18, marginBottom: 8 }}>
+            <div style={{
+              width: 56, height: 56, borderRadius: 16, background: "rgba(14,165,233,.12)",
+              display: "flex", alignItems: "center", justifyContent: "center", fontSize: 28, flexShrink: 0,
+            }}>
+              🧑‍💻
+            </div>
+            <div>
+              <div style={{ fontSize: 11.5, fontWeight: 700, color: "#0ea5e9", textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 4 }}>
+                For Individuals
+              </div>
+              <h3 style={{ fontSize: "clamp(24px,3vw,34px)", fontWeight: 800, letterSpacing: "-.5px", color: "#0f172a" }}>Job Seeker Tools</h3>
+            </div>
+          </div>
+          <p style={{ fontSize: 15.5, color: "#64748b", marginBottom: 48, maxWidth: 640 }}>
+            Standalone tools for individuals managing their own job search — separate from the recruiter-facing
+            platform above, sharing the same AI engine underneath.
+          </p>
+          {JOBSEEKER_MODULES.map((m, i) => (
+            <ModuleCard key={m.name} m={m} isEven={i % 2 === 0} color="#0ea5e9" bg="rgba(14,165,233,.12)" />
+          ))}
+        </div>
       </section>
 
       {/* ── WHY ── */}
@@ -335,7 +451,7 @@ export default function LandingPage() {
               { icon: TrendingUp, color: "#f59e0b", title: "Grows with you", body: "Start with job hunting. Add market intelligence. Build a recruiting pipeline. Each module is composable." },
               { icon: Zap, color: "#34d399", title: "LangChain + Groq", body: "Each module is a composable LangChain agent — easy to extend, chain, and deploy for your workflow." },
               { icon: Globe, color: "#f472b6", title: "No vendor lock-in", body: "Self-hosted, open architecture. Swap any LLM, API, or database. Your keys, your data." },
-              { icon: Database, color: "#fb923c", title: "One platform, six tools", body: "Stop juggling six SaaS products. TalentIQ unifies job search, market research, and recruiting." },
+              { icon: Database, color: "#fb923c", title: "One platform, one database", body: "Stop juggling separate SaaS products. TalentIQ unifies candidate acquisition, screening, and market research." },
             ].map(({ icon: Icon, color, title, body }) => (
               <div key={title} style={{
                 padding: 28, background: "white", borderRadius: 16,
@@ -362,7 +478,7 @@ export default function LandingPage() {
           Ready to hire smarter?
         </h2>
         <p style={{ fontSize: 18, color: "rgba(255,255,255,.85)", marginBottom: 40 }}>
-          Free to start. All six modules included. Your data stays yours.
+          Free to start. {BUILT_MODULE_COUNT} modules live today. Your data stays yours.
         </p>
         {isLoggedIn ? (
           <Link to="/app" style={{
@@ -397,7 +513,7 @@ export default function LandingPage() {
                 <span style={{ fontSize: 16, fontWeight: 800, color: "#00c7b7" }}>TalentIQ</span>
               </div>
               <p style={{ fontSize: 13, color: "#94a3b8", lineHeight: 1.7, maxWidth: 240 }}>
-                The full-stack AI platform for intelligent hiring. Five modules, one database, zero vendor lock-in.
+                The AI-native recruitment platform — one database, zero vendor lock-in, built to scale with you.
               </p>
               <div style={{ display: "flex", gap: 10, marginTop: 20 }}>
                 {[Twitter, Linkedin, Mail].map((Icon, i) => (
@@ -409,7 +525,7 @@ export default function LandingPage() {
             </div>
             <div>
               <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "1px", color: "#475569", marginBottom: 16 }}>Modules</div>
-              {MODULES.map(m => (
+              {ALL_MODULES.map(m => (
                 <Link key={m.name} to={m.route} style={{ display: "block", fontSize: 13, color: "#64748b", textDecoration: "none", marginBottom: 10 }}
                   onMouseEnter={e => (e.currentTarget.style.color = "white")}
                   onMouseLeave={e => (e.currentTarget.style.color = "#64748b")}>

@@ -75,10 +75,21 @@ export default function ClientManagementTab() {
   const deleteMut = useMutation({
     mutationFn: (id: number) => candidateTrackApi.deleteClient(id),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["ct-clients"] }),
+    onError: (e: any) => alert(e?.response?.data?.detail || "Could not delete this client. Please try again."),
   });
   const bulkDeleteMut = useMutation({
     mutationFn: (ids: number[]) => candidateTrackApi.bulkDeleteClients(ids),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ["ct-clients"] }); setSelectedIds([]); },
+    onSuccess: (res: any) => {
+      qc.invalidateQueries({ queryKey: ["ct-clients"] });
+      setSelectedIds([]);
+      // Bulk delete is partial-success by design (see backend docstring) —
+      // some selected clients may still have JDs/requisitions attached and
+      // get skipped rather than silently failing the whole batch.
+      if (res?.skipped?.length > 0) {
+        const lines = res.skipped.map((s: any) => `• ${s.name}: ${s.reason}`).join("\n");
+        alert(`Deleted ${res.deleted?.length ?? 0} client(s).\n\n${res.skipped.length} could not be deleted:\n${lines}`);
+      }
+    },
     onError: (e: any) => alert(`Bulk delete failed: ${e.response?.data?.detail || e.message}`),
   });
 
@@ -145,8 +156,8 @@ export default function ClientManagementTab() {
       {csvImportOpen && (
         <CsvImportModal
           title="Clients"
-          columns={["name", "address", "abn", "area_of_work"]}
-          sampleRow={["Acme Corp", "Sydney NSW", "12345678901", "Banking"]}
+          columns={["name", "address", "abn", "area_of_work", "contact_name", "contact_title", "contact_email", "contact_phone"]}
+          sampleRow={["Acme Corp", "Sydney NSW", "12345678901", "Banking", "Jane Smith", "HR Manager", "jane.smith@acme.example", "0400 111 222"]}
           onImport={candidateTrackApi.importClientsCsv}
           onClose={() => setCsvImportOpen(false)}
           onDone={() => qc.invalidateQueries({ queryKey: ["ct-clients"] })}

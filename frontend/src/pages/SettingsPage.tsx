@@ -2,7 +2,7 @@ import { useNavigate } from "react-router-dom";
 import { useState, useEffect, useRef, Fragment } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Settings, Key, User, Shield, Trash2, Pencil, Home} from "lucide-react";
-import { authApi, groqPoolApi } from "../lib/api";
+import { authApi, groqPoolApi, interviewApi } from "../lib/api";
 import { useAuth } from "../hooks/useAuth";
 
 export default function SettingsPage() {
@@ -40,6 +40,11 @@ export default function SettingsPage() {
   const [adzuna, setAdzuna] = useState({ app_id: "", app_key: "" });
   const [groq, setGroq] = useState({ api_key: "", model: "" });
   const [linkedin, setLinkedin] = useState({ email: "", password: "" });
+  const [calendly, setCalendly] = useState({ api_key: "", event_type_uri: "" });
+  const [navtalk, setNavtalk] = useState({ api_key: "", avatar_persona_id: "" });
+  const [calendlyEventTypes, setCalendlyEventTypes] = useState<any[] | null>(null);
+  const [fetchingCalendlyTypes, setFetchingCalendlyTypes] = useState(false);
+  const [calendlyFetchError, setCalendlyFetchError] = useState("");
   const [smtp, setSmtp] = useState({ host: "", port: "587", username: "", password: "", from_email: "" });
   const [ollama, setOllama] = useState({ base_url: "http://localhost:11434", model: "llama3" });
   const [morphcast, setMorphcast] = useState({ license_key: "" });
@@ -229,6 +234,27 @@ export default function SettingsPage() {
       Make this available to all users (admin only — Groq/Ollama/Adzuna can be shared platform-wide)
     </label>
   );
+
+  const fetchCalendlyEventTypes = async () => {
+    setFetchingCalendlyTypes(true);
+    setCalendlyFetchError("");
+    try {
+      // Uses whatever token is CURRENTLY SAVED on the server, so save the
+      // token first if it hasn't been saved yet this session.
+      if (calendly.api_key.trim()) {
+        await authApi.saveApiKey({ service: "calendly", key_name: "api_key", key_value: calendly.api_key.trim(), is_global: false });
+        qc.invalidateQueries({ queryKey: ["api-keys"] });
+      }
+      const types = await interviewApi.calendlyEventTypes();
+      setCalendlyEventTypes(types);
+      if (types.length === 0) setCalendlyFetchError("No active event types found on this Calendly account.");
+    } catch (e: any) {
+      setCalendlyFetchError(e?.response?.data?.detail || "Could not fetch event types — check your Personal Access Token.");
+      setCalendlyEventTypes(null);
+    } finally {
+      setFetchingCalendlyTypes(false);
+    }
+  };
 
   return (
     <div>
@@ -537,6 +563,69 @@ export default function SettingsPage() {
             </div>
             <button className="tiq-btn tiq-btn-primary" onClick={() => saveKey("linkedin", linkedin)} disabled={savingService === "linkedin"}>
               {savingService === "linkedin" ? "Saving…" : "Save LinkedIn Credentials"}
+            </button>
+          </div>
+
+          {/* CALENDLY */}
+          <div className="tiq-card tiq-mb-6">
+            <div className="tiq-card-title">Calendly — Interview Scheduling</div>
+            <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 6 }}>
+              Lets Interviews generate a single-use Calendly scheduling link for a candidate instead of
+              TalentIQ's own link-based flow — Calendly handles the actual time-slot picking and calendar conflicts.
+            </p>
+            <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>
+              Get your Personal Access Token from{" "}
+              <a href="https://calendly.com/integrations/api_webhooks" target="_blank" rel="noreferrer" style={{ color: "var(--brand-teal, #0d9488)" }}>
+                Calendly → Integrations → API & Webhooks
+              </a>. This is a private credential — only you can use it, same as your LinkedIn login above.
+            </p>
+            <div className="tiq-grid-2">
+              {inp("Personal Access Token", calendly.api_key, v => setCalendly(c => ({ ...c, api_key: v })), "password", "eyJraWQiOi...")}
+              <div className="tiq-form-group">
+                <label className="tiq-label">Event Type</label>
+                {calendlyEventTypes ? (
+                  <select className="tiq-select" value={calendly.event_type_uri}
+                          onChange={e => setCalendly(c => ({ ...c, event_type_uri: e.target.value }))}>
+                    <option value="">— Select an event type —</option>
+                    {calendlyEventTypes.map((et: any) => (
+                      <option key={et.uri} value={et.uri}>{et.name} ({et.duration} min)</option>
+                    ))}
+                  </select>
+                ) : (
+                  <input className="tiq-input" value={calendly.event_type_uri}
+                         onChange={e => setCalendly(c => ({ ...c, event_type_uri: e.target.value }))}
+                         placeholder="Click 'Fetch My Event Types' or paste an event type URI" />
+                )}
+              </div>
+            </div>
+            {calendlyFetchError && <div className="tiq-alert tiq-alert-error" style={{ marginBottom: 10, fontSize: 12 }}>{calendlyFetchError}</div>}
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <button className="tiq-btn tiq-btn-outline" onClick={fetchCalendlyEventTypes} disabled={fetchingCalendlyTypes || !calendly.api_key.trim()}>
+                {fetchingCalendlyTypes ? "Fetching…" : "Fetch My Event Types"}
+              </button>
+              <button className="tiq-btn tiq-btn-primary" onClick={() => saveKey("calendly", calendly)} disabled={savingService === "calendly"}>
+                {savingService === "calendly" ? "Saving…" : "Save Calendly Credentials"}
+              </button>
+            </div>
+          </div>
+
+          {/* NAVTALK */}
+          <div className="tiq-card tiq-mb-6">
+            <div className="tiq-card-title">NavTalk — AI Avatar Interviews</div>
+            <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 6 }}>
+              Powers "Video Interview (AI Avatar)" rounds in Interviews — a NavTalk avatar asks each candidate their
+              personalized questions, and their spoken answers are transcribed and evaluated automatically.
+            </p>
+            <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>
+              Get your API key and avatar persona ID from your NavTalk.ai dashboard. This is a private credential —
+              only you can use it, same as your LinkedIn login above.
+            </p>
+            <div className="tiq-grid-2">
+              {inp("API Key", navtalk.api_key, v => setNavtalk(n => ({ ...n, api_key: v })), "password", "nvtk_...")}
+              {inp("Avatar Persona ID", navtalk.avatar_persona_id, v => setNavtalk(n => ({ ...n, avatar_persona_id: v })), "text", "e.g. persona_abc123")}
+            </div>
+            <button className="tiq-btn tiq-btn-primary" onClick={() => saveKey("navtalk", navtalk)} disabled={savingService === "navtalk"}>
+              {savingService === "navtalk" ? "Saving…" : "Save NavTalk Credentials"}
             </button>
           </div>
 

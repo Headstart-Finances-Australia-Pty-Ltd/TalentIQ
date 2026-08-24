@@ -1032,6 +1032,54 @@ function CandidateRow({
                     )}
                   </div>
                 )}
+
+                {/* AI Avatar Interview Q&A evaluation — set alongside the
+                    video/emotion analysis above, never replacing it (see
+                    capabilities/avatarinterview's write-back). Only shows
+                    up once an avatar interview linked to this candidate
+                    has actually completed. */}
+                {c.qa_evaluation && (
+                  <div style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid var(--border)" }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 10 }}>
+                      AI Avatar Interview — Question &amp; Answer Evaluation
+                    </div>
+                    <div style={{ display: "flex", gap: 16, marginBottom: 10, flexWrap: "wrap" }}>
+                      {[
+                        ["Overall", c.qa_evaluation.overall_score, "var(--violet-500)"],
+                        ["Context", c.qa_evaluation.context_score, "#0d9488"],
+                        ["Semantic", c.qa_evaluation.semantic_score, "#0d9488"],
+                        ["Key Points", c.qa_evaluation.keypoints_score, "#0d9488"],
+                      ].map(([label, val, color]: any) => (
+                        <div key={label} style={{ textAlign: "center" }}>
+                          <div style={{ fontSize: 18, fontWeight: 800, color }}>{val ?? "—"}</div>
+                          <div style={{ fontSize: 10, color: "var(--text-muted)" }}>{label}</div>
+                        </div>
+                      ))}
+                    </div>
+                    {c.qa_evaluation.questions?.length > 0 && (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                        {c.qa_evaluation.questions.map((q: any, i: number) => (
+                          <div key={i} style={{ padding: 10, background: "var(--bg-secondary)", borderRadius: 8, fontSize: 12 }}>
+                            <div style={{ fontWeight: 600, marginBottom: 4 }}>{i + 1}. {q.question}</div>
+                            {q.candidate_answer ? (
+                              <>
+                                <div style={{ color: "var(--text-secondary)", marginBottom: 4 }}>{q.candidate_answer}</div>
+                                <div style={{ display: "flex", gap: 6, flexWrap: "wrap", fontSize: 10 }}>
+                                  <span className="tiq-badge tiq-badge-teal">Overall: {q.overall_score}</span>
+                                  <span className="tiq-badge tiq-badge-slate">Context: {q.context_score}</span>
+                                  <span className="tiq-badge tiq-badge-slate">Semantic: {q.semantic_score}</span>
+                                  <span className="tiq-badge tiq-badge-slate">Key Points: {q.keypoints_score}</span>
+                                </div>
+                              </>
+                            ) : (
+                              <div style={{ color: "var(--text-muted)", fontStyle: "italic" }}>No answer recorded.</div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
 
