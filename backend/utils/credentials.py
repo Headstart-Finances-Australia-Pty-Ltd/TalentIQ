@@ -44,7 +44,10 @@ def ollama_enabled() -> bool:
 # Only these services may ever have a shared/global fallback. Adding a
 # service here is a deliberate security decision — do not add personal
 # platform credentials (LinkedIn, email, etc.) to this set.
-SHAREABLE_SERVICES = {"groq", "ollama", "adzuna"}
+# "interview" holds platform-wide CandidateLens video-interview settings
+# (answer time per question, TTS voice) — admin-configured, not a personal
+# credential, so it belongs in the same shareable bucket as groq/adzuna.
+SHAREABLE_SERVICES = {"groq", "ollama", "adzuna", "interview"}
 
 # Fallback ONLY — used when a user (and no admin-shared global) has set a
 # Groq model. Groq periodically deprecates models (llama3-70b-8192, then

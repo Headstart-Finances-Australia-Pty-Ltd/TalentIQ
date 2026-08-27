@@ -28,6 +28,7 @@ from capabilities.requisition import public_router as requisition_public_router
 from capabilities.interview import router as interview_router
 from capabilities.interview import public_router as interview_public_router
 from capabilities.pipeline import router as pipeline_router
+from capabilities.onboarding import router as onboarding_router
 from capabilities.portal import router as portal_router
 from capabilities.portal import public_router as portal_public_router
 from capabilities.communication import router as communication_router
@@ -136,6 +137,7 @@ app.include_router(interview_public_router.router, prefix="/api/public/interview
 # Wraps the existing Application row rather than modifying it (see
 # capabilities/pipeline/models.py docstring) — additive only.
 app.include_router(pipeline_router.router, prefix="/api/pipeline", tags=["Pipeline & Placements"])
+app.include_router(onboarding_router.router, prefix="/api/onboarding", tags=["Onboarding"])
 
 # ── Capability: Client & Vendor Collaboration (Phase 6) ─────────────────
 # Token-based client and vendor portals (same pattern as every other

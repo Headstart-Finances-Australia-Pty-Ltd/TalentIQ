@@ -53,6 +53,18 @@ pgvector==0.3.6
 # ── Browser automation ─────────────────────────────────────
 playwright==1.49.1
 
+# ── Interview question voice — natural TTS (two engines) ────
+# Kokoro-82M: fully self-hosted, ~120MB model weights downloaded once on
+# first use (see utils/tts.py). CPU-only, no GPU required.
+kokoro-onnx==0.6.1
+espeakng-loader==0.2.4
+phonemizer==3.4.0
+soundfile==0.12.1
+# edge-tts: Microsoft Edge's free online neural voices — no model download
+# or native deps, just a network call per question. Good fallback if
+# Kokoro's model/espeak-ng setup isn't viable in this environment.
+edge-tts==7.2.8
+
 # ── Utilities ──────────────────────────────────────────────
 python-dotenv==1.0.1
 pdfplumber==0.11.4
