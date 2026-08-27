@@ -442,6 +442,27 @@ class JobLensCandidate(Base):
     interview_token     = Column(String(64), unique=True, index=True, nullable=True)
     contacted           = Column(Boolean, default=False)  # invite email sent
     video_status        = Column(String(50), default="Pending")
+
+    # ── Phone Interview (split out of the original combined
+    # CandidateLens workflow — see CandidateLensWeightsPanel/joblens.py
+    # module docstring) — a lightweight, non-video screening call stage
+    # that sits between Resume Screening and Video Interview. No webcam,
+    # no emotion analysis: just AI-generated call questions (reuses the
+    # same interview_questions column above) plus a recruiter-logged
+    # outcome after the actual call happens over the phone.
+    phone_screening_status         = Column(String(20), default="Not Started")  # Not Started / Contacted / Completed
+    phone_screening_recommendation = Column(String(20))   # Proceed / Hold / Reject
+    phone_screening_notes          = Column(Text)
+    phone_screening_at             = Column(DateTime, nullable=True)
+
+    # ── Video Interview — Decision & Comments (mirrors Phone Interview's
+    # recommendation/notes above) — the recruiter's own logged outcome
+    # after reviewing the recorded interview + AI video analysis, kept
+    # separate from video_analysis_status (which just tracks whether the
+    # AI scoring pipeline itself has finished).
+    video_screening_recommendation = Column(String(20))   # Proceed / Hold / Reject
+    video_screening_notes          = Column(Text)
+    video_screening_at             = Column(DateTime, nullable=True)
     emotion_happy       = Column(Integer, default=0)
     emotion_neutral     = Column(Integer, default=0)
     emotion_sad         = Column(Integer, default=0)
@@ -744,3 +765,25 @@ class GroqKeyPool(Base):
     cooldown_until     = Column(DateTime, nullable=True)  # if set and in the future, this key is skipped until then
     last_used_at       = Column(DateTime, nullable=True)
     added_at           = Column(DateTime, default=datetime.utcnow)
+
+
+class ModuleToggle(Base):
+    """Admin Console > Modules Management -- which sidebar modules are
+    currently switched on. Deliberately global (not per-organisation):
+    this app is deployed per-team, and "which modules exist on this
+    deployment" is a platform-wide admin decision, not something that
+    needs to vary per org within one deployment. module_route is the
+    same route string already used in frontend/src/lib/capabilities.ts
+    (e.g. "/app/resumescreening") -- the two are meant to stay in sync
+    by matching on that string, not a separate ID scheme.
+
+    Absence of a row for a given route means "enabled" (the default) --
+    see get_module_toggles in routers/admin.py -- so a freshly added
+    module in capabilities.ts is visible immediately without needing a
+    matching row inserted here first."""
+    __tablename__ = "tiq_module_toggles"
+
+    id            = Column(Integer, primary_key=True, index=True)
+    module_route  = Column(String(200), nullable=False, unique=True, index=True)
+    enabled       = Column(Boolean, default=True, nullable=False)
+    updated_at    = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

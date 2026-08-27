@@ -485,3 +485,57 @@ async def delete_groq_pool_key(
         raise HTTPException(404, "Pool key not found.")
     await db.delete(entry)
     return {"message": "Deleted"}
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# MODULES MANAGEMENT — Admin Console > Modules Management
+#
+# Which sidebar modules are switched on for this deployment. A missing
+# row means enabled (see get_module_toggles) so a module newly added to
+# capabilities.ts just works without needing a matching row inserted
+# here first — only modules an admin has actually turned OFF need a row
+# at all.
+# ══════════════════════════════════════════════════════════════════════════
+
+class ModuleToggleIn(BaseModel):
+    module_route: str
+    enabled: bool
+
+
+@router.get("/module-toggles")
+async def get_module_toggles(
+    _: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    from models.models import ModuleToggle
+    result = await db.execute(select(ModuleToggle))
+    # Only disabled-or-explicitly-set rows need to exist at all — the
+    # frontend treats any route absent from this map as enabled, so an
+    # empty map here correctly means "everything's on".
+    return {row.module_route: row.enabled for row in result.scalars().all()}
+
+
+@router.put("/module-toggles")
+async def set_module_toggles(
+    payload: List[ModuleToggleIn],
+    _: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Bulk upsert — Modules Management saves the whole table's checkbox
+    state in one request rather than one call per row toggled."""
+    from models.models import ModuleToggle
+    for item in payload:
+        existing = (await db.execute(
+            select(ModuleToggle).where(ModuleToggle.module_route == item.module_route)
+        )).scalar_one_or_none()
+        if existing:
+            existing.enabled = item.enabled
+        else:
+            # Only bother storing a row for modules actually turned off —
+            # saves writing a row for every enabled (i.e. default-state)
+            # module on every save.
+            if not item.enabled:
+                db.add(ModuleToggle(module_route=item.module_route, enabled=False))
+    await db.commit()
+    result = await db.execute(select(ModuleToggle))
+    return {row.module_route: row.enabled for row in result.scalars().all()}

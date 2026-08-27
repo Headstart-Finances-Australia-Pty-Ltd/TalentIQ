@@ -3,11 +3,12 @@ TalentIQ — AI Avatar Interviews (extends Interview Management, Phase 4,
 and Screening & Matching / CandidateLens, Phase 3)
 
 Setup happens FROM Interview Management (an Interview row with
-interview_type="Video Interview (AI Avatar)" gets one of these created
-against it), but the actual interview mechanics — asking questions,
-transcribing answers — run through CandidateLens's existing video
-pipeline, not a duplicate one. See service.py's module docstring for
-exactly what's reused vs. new.
+interview_type="Video Interview" gets one of these created against it,
+as one of several delivery modes for that class — see
+router.AVATAR_INTERVIEW_TYPE's docstring), but the actual interview
+mechanics — asking questions, transcribing answers — run through
+CandidateLens's existing video pipeline, not a duplicate one. See
+service.py's module docstring for exactly what's reused vs. new.
 
 ── This capability owns ────────────────────────────────────────────────
   AvatarInterviewSession — one avatar-delivered interview: which

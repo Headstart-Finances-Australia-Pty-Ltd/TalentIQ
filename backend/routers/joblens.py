@@ -596,8 +596,20 @@ def calculate_score(cv_text: str, jd_skills: list) -> dict:
 
 # ── QUESTION GENERATION ──────────────────────────────────────────────────────
 
-async def generate_questions(jd_text: str, candidate_name: str, matched_skills: list, groq_key: str, groq_model: str = DEFAULT_GROQ_MODEL) -> list:
-    """Mirrors buildQuestionPrompt + callOllamaGenerate."""
+async def generate_questions(
+    jd_text: str, candidate_name: str, matched_skills: list, groq_key: str, groq_model: str = DEFAULT_GROQ_MODEL,
+    resume_context: str = "",
+) -> list:
+    """Mirrors buildQuestionPrompt + callOllamaGenerate.
+
+    resume_context is the candidate's OWN resume content (built from
+    their already-extracted resume_summary/strengths/summary — see
+    get_questions below), not just their JD's required-skills list. This
+    is what makes a question like "Tell me about your work on the
+    payments-processing API you led at Pinnacle Systems" possible,
+    instead of only ever "Tell me about a project where you used
+    Python" — the latter is answerable by anyone who's ever listed
+    Python, the former only by someone whose actual resume says that."""
     try:
         from langchain_groq import ChatGroq
         from langchain.schema import HumanMessage
@@ -605,12 +617,22 @@ async def generate_questions(jd_text: str, candidate_name: str, matched_skills: 
 
         llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0.4, max_tokens=4000, reasoning_format="hidden", reasoning_effort="low", max_retries=0)
         skills_str = ", ".join(matched_skills[:8]) if matched_skills else "relevant skills"
-        prompt = f"""You are a recruitment AI assistant.
-Generate exactly 5 interview questions for {candidate_name} based on the Job Description below.
-Focus on required skills ({skills_str}), tools, and responsibilities.
+        resume_block = (
+            f"\n\nCandidate's Resume (their own experience — reference this specifically, not just their skills list):\n\"\"\"{_truncate_for_llm(resume_context, 'resume context', 4000)}\"\"\""
+            if resume_context.strip() else ""
+        )
+        prompt = f"""You are a recruitment AI assistant preparing phone/video interview
+questions for {candidate_name}.
+Generate exactly 5 interview questions using BOTH the Job Description AND
+the candidate's own resume below — at least 2-3 of the 5 questions should
+reference something SPECIFIC from their resume (a named employer, project,
+technology, or achievement), not just a generic skill from the JD's
+required-skills list ({skills_str}). The goal is questions only this
+specific candidate could meaningfully answer, not questions any candidate
+with the same skill list would get.
 
 Job Description:
-\"\"\"{_truncate_for_llm(jd_text, "JD text", 8000)}\"\"\"
+\"\"\"{_truncate_for_llm(jd_text, "JD text", 8000)}\"\"\"{resume_block}
 
 Return ONLY valid JSON:
 {{
@@ -834,6 +856,15 @@ def _fmt(c: JobLensCandidate) -> dict:
         "logistics": c.logistics or None,
         "hard_disqualified": bool(c.hard_disqualified),
         "disqualify_reason": c.disqualify_reason,
+        # ── Phone Interview (split-out stage) ──────────────────────────
+        "phone_screening_status": c.phone_screening_status or "Not Started",
+        "phone_screening_recommendation": c.phone_screening_recommendation or "",
+        "phone_screening_notes": c.phone_screening_notes or "",
+        "phone_screening_at": c.phone_screening_at.isoformat() if c.phone_screening_at else None,
+        # ── Video Interview — Decision & Comments ───────────────────────
+        "video_screening_recommendation": c.video_screening_recommendation or "",
+        "video_screening_notes": c.video_screening_notes or "",
+        "video_screening_at": c.video_screening_at.isoformat() if c.video_screening_at else None,
     }
 
 
@@ -1058,12 +1089,27 @@ async def run_joblens(
     # Previously there were two separate, uncoordinated concurrency limits
     # (how many candidates process at once, and — as of the last fix — how
     # many calls run per candidate) that could MULTIPLY against each other:
-    # 4 candidates x 3 concurrent calls each = up to 12 simultaneous Groq
+    # N candidates x 3 concurrent calls each = up to 3N simultaneous Groq
     # requests for one batch, an easy way to trip rate limits that neither
     # limit alone would suggest. One shared semaphore around every actual
     # Groq call means peak concurrency is bounded by this single number,
     # no matter how many candidates or calls-per-candidate are involved.
-    _groq_semaphore = asyncio.Semaphore(4)
+    #
+    # Was raised from 4 to 8 to cut wall-clock time on larger batches of
+    # longer, realistic resumes. In practice, on this deployment's
+    # container resources, that coincided with a hard crash mid-batch
+    # (container restart logged, request came back as a 503) — 8
+    # concurrent Groq calls each holding a full multi-page resume's text
+    # in memory, layered on top of concurrently parsing multiple .docx
+    # files, pushed peak memory usage past what this container has
+    # available. Dialed back down to 5 as a safer middle ground: still
+    # faster than the original 4, without doubling peak concurrent
+    # memory usage on a container that's already shown it can't absorb
+    # that. If crashes persist even at 5, the real fix is more memory
+    # for this service on Northflank, not a lower number here — this
+    # semaphore trades speed for memory pressure, it can't create memory
+    # that isn't there.
+    _groq_semaphore = asyncio.Semaphore(5)
 
     async def _with_groq_limit(coro):
         async with _groq_semaphore:
@@ -1130,7 +1176,7 @@ async def run_joblens(
             db=db,
         ))
         questions_task = (
-            _with_groq_limit(generate_questions(final_jd, info["name"], jd_focus_skills, _groq_key, _groq_model))
+            _with_groq_limit(generate_questions(final_jd, info["name"], jd_focus_skills, _groq_key, _groq_model, resume_context=cv_text))
             if _groq_key else asyncio.sleep(0, result=None)
         )
         summary_task = _with_groq_limit(generate_resume_summary(cv_text, _groq_key, _groq_model))
@@ -1569,6 +1615,7 @@ async def reweight_session(
 async def get_questions(
     session_id: int,
     candidate_id: int,
+    regenerate: bool = False,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -1589,17 +1636,39 @@ async def get_questions(
     if not candidate:
         raise HTTPException(404, "Candidate not found")
 
-    # Return existing questions or regenerate
-    if candidate.interview_questions:
+    # Return existing questions or regenerate. regenerate=True skips this
+    # cache deliberately — candidates scored before this endpoint started
+    # using resume content (see generate_questions's resume_context
+    # param) have OLD, JD-only questions cached here; a recruiter
+    # clicking "Generate" on one of them expects a fresh, resume-aware
+    # set, not the stale cached ones silently returned again.
+    if candidate.interview_questions and not regenerate:
         return {"questions": candidate.interview_questions, "ai_powered": False}
 
     groq_key = await get_credential(db, current_user.id, "groq", "api_key")
     groq_model = await get_groq_model(db, current_user.id)
 
     if groq_key:
+        # Built from data already extracted from THIS candidate's own
+        # resume during scoring (resume_summary's categorized bullets +
+        # the free-text summary + their strengths breakdown) — not the
+        # original file re-read from scratch, and not just their
+        # matched-skills list, which is JD-derived rather than
+        # resume-derived and identical for every candidate who happens
+        # to share those skills.
+        resume_parts = []
+        if candidate.resume_summary:
+            for section, bullets in candidate.resume_summary.items():
+                if bullets:
+                    resume_parts.append(f"{section.replace('_', ' ').title()}: " + "; ".join(bullets))
+        if candidate.summary:
+            resume_parts.append(f"Summary: {candidate.summary}")
+        resume_context = "\n".join(resume_parts)
+
         questions = await generate_questions(
             session.jd_text or "", candidate.name,
-            candidate.matched_skills or [], groq_key, groq_model
+            candidate.matched_skills or [], groq_key, groq_model,
+            resume_context=resume_context,
         )
     else:
         questions = _default_questions(candidate.name, candidate.matched_skills or [])
@@ -1692,6 +1761,92 @@ async def mark_contacted(
     c.contacted = True
     await db.commit()
     return {"contacted": True}
+
+
+PHONE_RECOMMENDATIONS = ["Proceed", "Hold", "Reject"]
+
+
+@router.post("/candidates/{candidate_id}/phone-contacted")
+async def mark_phone_contacted(
+    candidate_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Marks a candidate as reached for their phone screening call —
+    separate from the video-interview `contacted` flag above, since a
+    candidate can be phone-contacted long before (or without) ever being
+    invited to a video round."""
+    cr = await db.execute(select(JobLensCandidate).where(JobLensCandidate.id == candidate_id))
+    c = cr.scalar_one_or_none()
+    if not c:
+        raise HTTPException(404, "Candidate not found")
+    if c.phone_screening_status == "Not Started":
+        c.phone_screening_status = "Contacted"
+        c.phone_screening_at = datetime.utcnow()
+    await db.commit()
+    return {"phone_screening_status": c.phone_screening_status}
+
+
+class PhoneResultRequest(BaseModel):
+    recommendation: str
+    notes: str = ""
+
+
+@router.post("/candidates/{candidate_id}/phone-result")
+async def save_phone_result(
+    candidate_id: int, payload: PhoneResultRequest,
+    current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    """Records the outcome of a completed phone screening call — the
+    Phone Interview stage's equivalent of the video stage's
+    interview-result endpoint above, but simpler: no webcam/emotion data,
+    just a recruiter's own recommendation and notes after the call."""
+    if payload.recommendation not in PHONE_RECOMMENDATIONS:
+        raise HTTPException(400, f"recommendation must be one of: {', '.join(PHONE_RECOMMENDATIONS)}")
+    cr = await db.execute(select(JobLensCandidate).where(JobLensCandidate.id == candidate_id))
+    c = cr.scalar_one_or_none()
+    if not c:
+        raise HTTPException(404, "Candidate not found")
+    c.phone_screening_status = "Completed"
+    c.phone_screening_recommendation = payload.recommendation
+    c.phone_screening_notes = payload.notes.strip()
+    c.phone_screening_at = datetime.utcnow()
+    await db.commit()
+    return {
+        "phone_screening_status": c.phone_screening_status,
+        "phone_screening_recommendation": c.phone_screening_recommendation,
+        "phone_screening_notes": c.phone_screening_notes,
+    }
+
+
+class VideoResultRequest(BaseModel):
+    recommendation: str
+    notes: str = ""
+
+
+@router.post("/candidates/{candidate_id}/video-result")
+async def save_video_result(
+    candidate_id: int, payload: VideoResultRequest,
+    current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    """Records the recruiter's Decision & Comments for the Video Interview
+    stage — the video-stage equivalent of save_phone_result above, kept
+    separate from the AI video_analysis (which scores the interview
+    itself, not the recruiter's own call on it)."""
+    if payload.recommendation not in PHONE_RECOMMENDATIONS:
+        raise HTTPException(400, f"recommendation must be one of: {', '.join(PHONE_RECOMMENDATIONS)}")
+    cr = await db.execute(select(JobLensCandidate).where(JobLensCandidate.id == candidate_id))
+    c = cr.scalar_one_or_none()
+    if not c:
+        raise HTTPException(404, "Candidate not found")
+    c.video_screening_recommendation = payload.recommendation
+    c.video_screening_notes = payload.notes.strip()
+    c.video_screening_at = datetime.utcnow()
+    await db.commit()
+    return {
+        "video_screening_recommendation": c.video_screening_recommendation,
+        "video_screening_notes": c.video_screening_notes,
+    }
 
 
 @router.get("/morphcast-key")
@@ -2075,6 +2230,9 @@ async def export_session(
 
     rows = []
     for i, c in enumerate(candidates, 1):
+        sb = c.strengths_breakdown or {}
+        score_bd = sb.get("scoreBreakdown") or {}
+        va = c.video_analysis or {}
         rows.append({
             "Rank":              i,
             "Name":              c.name,
@@ -2082,10 +2240,47 @@ async def export_session(
             "Phone":             c.phone,
             "Resume Summary":    " | ".join(c.resume_summary or []),
             "ATS Score":         f"{c.ats_score:.1f}%",
+            "Technical Score":   c.technical_score,
+            "Non-Technical (Logistics) Score": c.non_technical_score,
             "Key Strength":      ", ".join(c.matched_skills or []),
             "Considerations":    ", ".join(c.missing_skills or []),
             "Status":            c.status,
+            # ── Full score breakdown (tier + skill-type %s that make up the ATS score) ──
+            "Score: Essential Requirements %":     (score_bd.get("essential") or {}).get("pct"),
+            "Score: Good to Have %":                (score_bd.get("goodToHave") or {}).get("pct"),
+            "Score: Qualification / Education %":   (score_bd.get("qualification") or {}).get("pct"),
+            "Score: Technical Skills %":            (score_bd.get("technical") or {}).get("pct"),
+            "Score: Tools & Platforms %":           (score_bd.get("tools") or {}).get("pct"),
+            "Score: Domain Knowledge %":            (score_bd.get("domain") or {}).get("pct"),
+            "Score: Soft Skills %":                 (score_bd.get("softSkills") or {}).get("pct"),
+            "Score: Final ATS":                     score_bd.get("finalATS"),
+            # ── Strengths breakdown (categorized, from resume parsing) ──
+            "Strengths: Essential Matched":         ", ".join(sb.get("essentialMatched") or []),
+            "Strengths: Technical Skills":          ", ".join(sb.get("technicalSkills") or []),
+            "Strengths: Business Skills":           ", ".join(sb.get("businessSkills") or []),
+            "Strengths: Soft Skills":                ", ".join(sb.get("softSkills") or []),
+            "Strengths: Significant Experience":    ", ".join(sb.get("significantExperience") or []),
+            "Strengths: Certifications & Degrees":  ", ".join(sb.get("certificationsDegrees") or []),
+            "Strengths: Years Experience":          sb.get("yearsExperience"),
+            "Strengths: Education":                 sb.get("education"),
+            "Bonus Points":      c.bonus,
+            "Bonus Reasons":     c.bonus_reasons,
+            "Summary":           c.summary or "",
+            # ── Phone Interview — Decision & Comments ──
+            "Phone Screening Status":         c.phone_screening_status,
+            "Phone Screening Decision":       c.phone_screening_recommendation,
+            "Phone Screening Comments":       c.phone_screening_notes,
+            "Phone Screening Date":           c.phone_screening_at.isoformat() if c.phone_screening_at else "",
+            # ── Video Interview — Decision & Comments ──
             "Video Status":      c.video_status,
+            "Video Analysis Status":          c.video_analysis_status,
+            "Video Analysis: Overall Score":       va.get("overall_score"),
+            "Video Analysis: Communication Score": va.get("communication_score"),
+            "Video Analysis: Relevance Score":     va.get("relevance_score"),
+            "Video Analysis: Confidence Score":    va.get("confidence_score"),
+            "Video Analysis: Summary":             va.get("summary"),
+            "Video Analysis: Strengths":           ", ".join(va.get("strengths") or []),
+            "Video Analysis: Concerns":            ", ".join(va.get("concerns") or []),
             "Happy %":           c.emotion_happy or 0,
             "Neutral %":         c.emotion_neutral or 0,
             "Sad %":             c.emotion_sad or 0,
@@ -2094,10 +2289,10 @@ async def export_session(
             "Disgust %":         c.emotion_disgust or 0,
             "Surprise %":        c.emotion_surprise or 0,
             "Dominant Emotion":  c.dominant_emotion or "Neutral",
+            "Video Screening Decision":       c.video_screening_recommendation,
+            "Video Screening Comments":       c.video_screening_notes,
+            "Video Screening Date":           c.video_screening_at.isoformat() if c.video_screening_at else "",
             "Shortlisted":       "Yes" if c.shortlisted else "No",
-            "Bonus Points":      c.bonus,
-            "Bonus Reasons":     c.bonus_reasons,
-            "Summary":           c.summary or "",
         })
 
     buf = io.BytesIO()

@@ -102,7 +102,33 @@ MIGRATIONS = [
     "CREATE UNIQUE INDEX IF NOT EXISTS ix_tiq_joblens_candidates_interview_token ON tiq_joblens_candidates (interview_token)",
     "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS emotion_disgust INTEGER DEFAULT 0",
     "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS emotion_surprise INTEGER DEFAULT 0",
+    # emotion_fear was missing here entirely — present on the model
+    # (JobLensCandidate.emotion_fear) and read/written by the video
+    # analysis code, but with no migration at all, not even in the
+    # original CREATE TABLE block below (which only has happy/neutral/
+    # sad/angry). Same failure mode as video_screening_*: any query
+    # touching this table 500s the moment the column is actually needed.
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS emotion_fear INTEGER DEFAULT 0",
     "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS dominant_emotion VARCHAR(20) DEFAULT 'Neutral'",
+
+    # interview_questions/video_status/emotion_happy/emotion_neutral/
+    # emotion_sad/emotion_angry/shortlisted only ever existed inside the
+    # "CREATE TABLE IF NOT EXISTS tiq_joblens_candidates (...)" bootstrap
+    # statement further below — which is a no-op on any database where
+    # that table already exists (true for every real deployment by now).
+    # Whoever added these to the model apparently added them to that
+    # CREATE block and stopped there, assuming it was equivalent to an
+    # ALTER — it isn't, for anyone who already has the table. Same
+    # "column does not exist" 500 as video_screening_*/emotion_fear,
+    # just on older, more foundational columns, which is why this broke
+    # far more than just the video-related views.
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS interview_questions JSON DEFAULT '[]'",
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS video_status VARCHAR(50) DEFAULT 'Pending'",
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS emotion_happy INTEGER DEFAULT 0",
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS emotion_neutral INTEGER DEFAULT 0",
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS emotion_sad INTEGER DEFAULT 0",
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS emotion_angry INTEGER DEFAULT 0",
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS shortlisted BOOLEAN DEFAULT FALSE",
     "ALTER TABLE tiq_jobintel_records ADD COLUMN IF NOT EXISTS job_group VARCHAR(200)",
     "ALTER TABLE tiq_jobintel_records ADD COLUMN IF NOT EXISTS company_type VARCHAR(200)",
     # Create JobLens tables if they don't exist (added after initial deployment)
@@ -427,6 +453,27 @@ MIGRATIONS = [
     "ALTER TABLE tiq_requisitions ADD COLUMN IF NOT EXISTS notes TEXT",
     "CREATE UNIQUE INDEX IF NOT EXISTS ix_tiq_requisitions_hm_view_token ON tiq_requisitions(hm_view_token)",
 
+    # ── Data repair: Req # (sequence_number) duplicates ──────────────────
+    # csv_import_requisitions used to call the "SELECT MAX(sequence_number)
+    # + 1" helper once PER ROW inside a loop, all within the same
+    # not-yet-committed transaction — so several rows in one CSV import
+    # could see the same MAX and get handed the same, or an
+    # out-of-order, sequence_number. Fixed going forward (see
+    # capabilities/requisition/router.py), but this repairs data already
+    # created by the buggy version: renumber every existing requisition
+    # sequentially, per organisation, in original creation order (by id).
+    # Idempotent — re-running this once numbers are already clean is a
+    # no-op, since the WHERE clause only touches rows that disagree.
+    """
+    UPDATE tiq_requisitions r
+    SET sequence_number = ranked.rn
+    FROM (
+        SELECT id, ROW_NUMBER() OVER (PARTITION BY organisation_id ORDER BY id) AS rn
+        FROM tiq_requisitions
+    ) ranked
+    WHERE r.id = ranked.id AND r.sequence_number IS DISTINCT FROM ranked.rn
+    """,
+
     # ── Interview Management (Phase 4) — defensive retrofit ──────────────
     # tiq_interviews itself was created fresh via create_all() when
     # Interview Management first shipped, so this single column is the
@@ -439,6 +486,47 @@ MIGRATIONS = [
     # entries above, and capabilities/interview/models.py's own docstring
     # for the fresh-vs-ALTER distinction this file exists to bridge).
     "ALTER TABLE tiq_interviews ADD COLUMN IF NOT EXISTS interview_type VARCHAR(30) DEFAULT 'HR Screening'",
+    "ALTER TABLE tiq_interviews ALTER COLUMN interview_type SET DEFAULT 'Phone Interview'",
+
+    # ── Interview Management — Screening/Approval/Panel-Majority additions ──
+    # tiq_interviews already existed (created above by the entry just
+    # above this one), so every new column needs its own explicit ALTER —
+    # create_all() alone never adds columns to a table that already
+    # exists. tiq_interview_feedback_links is a BRAND NEW table, so it
+    # needs no ALTER entry at all — create_all() in main.py's lifespan
+    # handles it the same way it did tiq_interviews and
+    # tiq_interview_scorecards on first deploy.
+    "ALTER TABLE tiq_interviews ADD COLUMN IF NOT EXISTS decision VARCHAR(20) DEFAULT 'Pending'",
+    "ALTER TABLE tiq_interviews ADD COLUMN IF NOT EXISTS decision_finalized_at TIMESTAMP",
+    "ALTER TABLE tiq_interviews ADD COLUMN IF NOT EXISTS approver_name VARCHAR(200)",
+    "ALTER TABLE tiq_interviews ADD COLUMN IF NOT EXISTS approver_email VARCHAR(200)",
+    "ALTER TABLE tiq_interviews ADD COLUMN IF NOT EXISTS approver_user_id INTEGER REFERENCES tiq_users(id)",
+    "ALTER TABLE tiq_interviews ADD COLUMN IF NOT EXISTS approval_status VARCHAR(20) DEFAULT 'Pending'",
+    "ALTER TABLE tiq_interviews ADD COLUMN IF NOT EXISTS approval_token VARCHAR(64)",
+    "ALTER TABLE tiq_interviews ADD COLUMN IF NOT EXISTS approved_at TIMESTAMP",
+    "ALTER TABLE tiq_interviews ADD COLUMN IF NOT EXISTS approved_by VARCHAR(200)",
+    "ALTER TABLE tiq_interviews ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP",
+    "ALTER TABLE tiq_interviews ADD COLUMN IF NOT EXISTS cancelled_by VARCHAR(200)",
+    "ALTER TABLE tiq_interviews ADD COLUMN IF NOT EXISTS artifacts JSON DEFAULT '[]'",
+    "CREATE UNIQUE INDEX IF NOT EXISTS ix_tiq_interviews_approval_token ON tiq_interviews(approval_token)",
+    # Interview Scheduling was simplified twice: first to a Resume
+    # Screening -> Telephonic -> Video -> Panel sequence, then again to
+    # exactly three classes (Phone Interview / Video Interview / Panel
+    # Interview) once Resume Screening moved into its own capability
+    # (the CandidateLens split — see frontend/src/lib/capabilities.ts)
+    # and "Video Interview (AI Avatar)" was folded into "Video Interview"
+    # as a delivery mode rather than its own type (see
+    # capabilities/avatarinterview/router.py's AVATAR_INTERVIEW_TYPE).
+    # Remap every old value onto its closest equivalent so no existing
+    # row is left holding a value outside the current models.INTERVIEW_TYPES.
+    # Resume Screening rounds have no equivalent left in Interview
+    # Scheduling at all (that stage now lives entirely in the Screening
+    # capability) — remapped to Phone Interview as the closest "first
+    # live conversation" stage, rather than left dangling.
+    "UPDATE tiq_interviews SET interview_type = 'Panel Interview' WHERE interview_type = 'Panel'",
+    "UPDATE tiq_interviews SET interview_type = 'Phone Interview' WHERE interview_type IN ('Telephonic Screening', 'Telephonic Interview', 'HR Screening', 'Resume Screening')",
+    "UPDATE tiq_interviews SET interview_type = 'Video Interview' WHERE interview_type = 'Video Interview (AI Avatar)'",
+    "UPDATE tiq_interviews SET interview_type = 'Panel Interview' WHERE interview_type IN ('Specialist', 'Hiring Manager')",
 
     # ── AI Avatar Interviews — Q&A evaluation write-back to CandidateLens ──
     # tiq_joblens_candidates has been live since Phase 3, so these two new
@@ -448,6 +536,29 @@ MIGRATIONS = [
     # docstring for what writes to these.
     "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS qa_evaluation JSON",
     "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS qa_evaluation_score FLOAT",
+
+    # ── CandidateLens split: Phone Interview stage ──────────────────────
+    # tiq_joblens_candidates already existed, so these four new columns
+    # (see JobLensCandidate's own docstring) need the same explicit ALTER
+    # treatment as everything else in this file.
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS phone_screening_status VARCHAR(20) DEFAULT 'Not Started'",
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS phone_screening_recommendation VARCHAR(20)",
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS phone_screening_notes TEXT",
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS phone_screening_at TIMESTAMP",
+
+    # video_screening_recommendation/_notes/_at (JobLensCandidate model) —
+    # the video-stage equivalent of the three phone_screening_* columns
+    # directly above, added to the model but MISSING from this file, which
+    # is exactly why they never existed on the real database: every query
+    # against tiq_joblens_candidates (GET /api/joblens/sessions/{id}
+    # included) was crashing with a "column does not exist" error the
+    # moment it hit the DB, surfacing to the frontend as a 500 and,
+    # without an error boundary, a blank page — nothing about this was a
+    # frontend bug, the page had nothing to render because the API call
+    # backing it never succeeded.
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS video_screening_recommendation VARCHAR(20)",
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS video_screening_notes TEXT",
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS video_screening_at TIMESTAMP",
 ]
 
 async def run():

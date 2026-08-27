@@ -20,10 +20,14 @@ from capabilities.acquisition.models import Candidate, Application
 from capabilities.requisition.models import Requisition
 from capabilities.communication import service as service_communication
 
-from .models import Interview, InterviewScorecard, INTERVIEW_STATUSES, INTERVIEW_TYPES, SELF_SCHEDULABLE_TYPES
+from .models import (
+    Interview, InterviewScorecard, InterviewFeedbackLink,
+    INTERVIEW_STATUSES, INTERVIEW_TYPES, SELF_SCHEDULABLE_TYPES,
+    DECISION_STATUSES,
+)
 from .schemas import (
     InterviewCreate, InterviewUpdate, InterviewStatusChange, SelfScheduleRequest,
-    ScorecardCreate, ScorecardUpdate, BulkIds,
+    ScorecardCreate, ScorecardUpdate, BulkIds, DecisionSet,
 )
 from . import service
 
@@ -60,7 +64,23 @@ def _fmt_scorecard(s: InterviewScorecard) -> dict:
     }
 
 
-def _fmt_interview(i: Interview, candidate_name: str = "", requisition_title: str = "", scorecards: Optional[List[dict]] = None) -> dict:
+def _fmt_feedback_link(link: InterviewFeedbackLink, submitted_names: set) -> dict:
+    return {
+        "id": link.id,
+        "interviewer_name": link.interviewer_name,
+        "interviewer_email": link.interviewer_email or "",
+        "is_internal": link.user_id is not None,
+        "token": link.token,
+        "feedback_url_path": f"/interview-feedback/{link.token}",
+        "submitted": link.interviewer_name in submitted_names,
+    }
+
+
+def _fmt_interview(
+    i: Interview, candidate_name: str = "", requisition_title: str = "",
+    scorecards: Optional[List[dict]] = None, feedback_links: Optional[List[InterviewFeedbackLink]] = None,
+) -> dict:
+    submitted_names = {s["interviewer_name"] for s in scorecards} if scorecards is not None else set()
     return {
         "id": i.id,
         "sequence_number": i.sequence_number,
@@ -70,7 +90,7 @@ def _fmt_interview(i: Interview, candidate_name: str = "", requisition_title: st
         "requisition_title": requisition_title,
         "application_id": i.application_id,
         "round_name": i.round_name,
-        "interview_type": i.interview_type or "HR Screening",
+        "interview_type": i.interview_type or "Phone Interview",
         "round_number": i.round_number,
         "interviewers": i.interviewers or [],
         "duration_minutes": i.duration_minutes,
@@ -82,12 +102,62 @@ def _fmt_interview(i: Interview, candidate_name: str = "", requisition_title: st
         "candidate_selected_at": i.candidate_selected_at.isoformat() if i.candidate_selected_at else None,
         "calendly_scheduling_url": i.calendly_scheduling_url or "",
         "notes": i.notes or "",
+        "artifacts": i.artifacts or [],
         "cancellation_reason": i.cancellation_reason or "",
+        # Round decision (panel majority, or manual override)
+        "decision": i.decision or "Pending",
+        "decision_finalized_at": i.decision_finalized_at.isoformat() if i.decision_finalized_at else None,
+        # Scheduling approval (a designated authority signing off / cancelling)
+        "approver_name": i.approver_name or "",
+        "approver_email": i.approver_email or "",
+        "approver_user_id": i.approver_user_id,
+        "approval_status": i.approval_status or "Pending",
+        "approval_token": i.approval_token,
+        "approval_url_path": f"/interview-approval/{i.approval_token}" if i.approval_token else None,
+        "approved_at": i.approved_at.isoformat() if i.approved_at else None,
+        "approved_by": i.approved_by or "",
+        "cancelled_at": i.cancelled_at.isoformat() if i.cancelled_at else None,
+        "cancelled_by": i.cancelled_by or "",
         "scorecard_count": len(scorecards) if scorecards is not None else None,
         "scorecards": scorecards,
+        "feedback_links": (
+            [_fmt_feedback_link(l, submitted_names) for l in feedback_links] if feedback_links is not None else None
+        ),
         "created_at": i.created_at.isoformat() if i.created_at else None,
         "updated_at": i.updated_at.isoformat() if i.updated_at else None,
     }
+
+
+async def _apply_decision_side_effects(
+    db: AsyncSession, org_id: int, interview: Interview, decision: str, triggering_user_id: Optional[int],
+) -> None:
+    """Shared by both the auto (panel-majority) and manual decision
+    paths: advances the linked Application's stage and fires the
+    matching communication automation. Best-effort — mirrors the
+    Completed-status side effects already in change_interview_status."""
+    if decision == "Rejected":
+        await service.advance_application_stage(db, interview.application_id, "Rejected")
+    elif decision == "Selected":
+        await service.advance_application_stage(
+            db, interview.application_id,
+            "Selected" if interview.interview_type == "Panel Interview" else f"{interview.round_name} Passed",
+        )
+    elif decision == "Hold":
+        await service.advance_application_stage(db, interview.application_id, "On Hold")
+    await db.commit()
+
+    candidate = (await db.execute(select(Candidate).where(Candidate.id == interview.candidate_id))).scalar_one_or_none()
+    req_title = await _requisition_title(db, interview.requisition_id)
+    await service_communication.fire_automation(
+        db, org_id, "interview_decision_recorded",
+        context={
+            "candidate_name": candidate.full_name if candidate else "", "requisition_title": req_title,
+            "round_name": interview.round_name, "decision": decision,
+        },
+        triggering_user_id=triggering_user_id, to_email=(candidate.email if candidate else None) or None,
+        candidate_id=interview.candidate_id, requisition_id=interview.requisition_id,
+    )
+    await db.commit()
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -116,9 +186,10 @@ async def create_interview(
         # at creation time and self-scheduled later — checked here too so
         # it can't be bypassed simply by setting proposed_slots up front
         # instead of using that separate endpoint.
-        raise HTTPException(400, f"Self-scheduling is only available for HR Screening rounds — {payload.interview_type} interviews must be scheduled directly by a recruiter.")
+        raise HTTPException(400, f"Self-scheduling is only available for Phone Interview rounds — {payload.interview_type} interviews must be scheduled directly by a recruiter.")
 
     status = "Scheduled" if payload.scheduled_at else ("Requested" if payload.proposed_slots else "Requested")
+    interviewers = [i.dict() for i in payload.interviewers]
     interview = Interview(
         organisation_id=org.id, owner_user_id=current_user.id,
         sequence_number=await service.get_next_sequence(db, org.id),
@@ -126,16 +197,24 @@ async def create_interview(
         application_id=payload.application_id,
         round_name=payload.round_name.strip(), round_number=payload.round_number,
         interview_type=payload.interview_type,
-        interviewers=[i.dict() for i in payload.interviewers],
+        interviewers=interviewers,
         duration_minutes=payload.duration_minutes, location_or_link=payload.location_or_link.strip(),
         scheduled_at=payload.scheduled_at,
         proposed_slots=[s.isoformat() for s in payload.proposed_slots],
         status=status,
         notes=payload.notes.strip(),
+        artifacts=[a.dict() for a in payload.artifacts],
+        approver_name=payload.approver_name.strip(), approver_email=payload.approver_email.strip(),
+        approver_user_id=payload.approver_user_id,
     )
+    if interview.approver_name or interview.approver_email or interview.approver_user_id:
+        interview.approval_token = service.generate_token()
     db.add(interview)
     await db.commit()
     await db.refresh(interview)
+
+    await service.sync_feedback_links(db, interview, interviewers)
+    await db.commit()
 
     if interview.status == "Scheduled":
         # Best-effort — fire_automation never raises, so this can't break
@@ -220,10 +299,89 @@ async def get_interview(interview_id: int, current_user: User = Depends(get_curr
     if not i:
         raise HTTPException(404, "Interview not found")
     scorecards = (await db.execute(select(InterviewScorecard).where(InterviewScorecard.interview_id == i.id))).scalars().all()
+    links = (await db.execute(select(InterviewFeedbackLink).where(InterviewFeedbackLink.interview_id == i.id))).scalars().all()
     return _fmt_interview(
         i, await _candidate_name(db, i.candidate_id), await _requisition_title(db, i.requisition_id),
-        [_fmt_scorecard(s) for s in scorecards],
+        [_fmt_scorecard(s) for s in scorecards], links,
     )
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# SCHEDULING APPROVAL — a designated authority approves or cancels this
+# round, online, via a tokenized link (public_router.py) or in-app if
+# they're an internal TalentIQ user.
+# ══════════════════════════════════════════════════════════════════════════
+
+@router.post("/interviews/{interview_id}/approval/regenerate-link")
+async def regenerate_approval_link(interview_id: int, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    org = await _org(db, current_user)
+    i = (await db.execute(select(Interview).where(Interview.id == interview_id, Interview.organisation_id == org.id))).scalar_one_or_none()
+    if not i:
+        raise HTTPException(404, "Interview not found")
+    if not (i.approver_name or i.approver_email or i.approver_user_id):
+        raise HTTPException(400, "Set an approver (name/email or an internal user) before generating an approval link.")
+    i.approval_token = service.generate_token()
+    i.updated_at = datetime.utcnow()
+    await db.commit()
+    return {"approval_token": i.approval_token, "approval_url_path": f"/interview-approval/{i.approval_token}"}
+
+
+@router.post("/interviews/{interview_id}/approval/approve")
+async def approve_interview_inapp(interview_id: int, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """In-app approval — for when the designated authority IS an internal
+    TalentIQ user and would rather click Approve here than use the public
+    link. Only the designated approver (or the recruiter who owns the
+    interview) may approve."""
+    org = await _org(db, current_user)
+    i = (await db.execute(select(Interview).where(Interview.id == interview_id, Interview.organisation_id == org.id))).scalar_one_or_none()
+    if not i:
+        raise HTTPException(404, "Interview not found")
+    if i.approver_user_id and i.approver_user_id != current_user.id and i.owner_user_id != current_user.id:
+        raise HTTPException(403, "Only the designated approver can approve this interview.")
+    if i.approval_status == "Approved":
+        raise HTTPException(400, "This interview has already been approved.")
+    i.approval_status = "Approved"
+    i.approved_at = datetime.utcnow()
+    i.approved_by = current_user.name or current_user.email
+    i.updated_at = datetime.utcnow()
+    await db.commit()
+    await db.refresh(i)
+    return _fmt_interview(i, await _candidate_name(db, i.candidate_id), await _requisition_title(db, i.requisition_id))
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# ROUND DECISION — manual override for rounds with 0-1 interviewers,
+# where a panel majority (service.finalize_interview_decision) isn't a
+# meaningful concept. e.g. a single phone-screener with no co-interviewer.
+# ══════════════════════════════════════════════════════════════════════════
+
+@router.post("/interviews/{interview_id}/decision")
+async def set_decision(
+    interview_id: int, payload: DecisionSet,
+    current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    if payload.decision not in DECISION_STATUSES or payload.decision == "Pending":
+        raise HTTPException(400, f"decision must be one of: Selected, Rejected, Hold")
+    org = await _org(db, current_user)
+    i = (await db.execute(select(Interview).where(Interview.id == interview_id, Interview.organisation_id == org.id))).scalar_one_or_none()
+    if not i:
+        raise HTTPException(404, "Interview not found")
+    if len(i.interviewers or []) >= 2:
+        raise HTTPException(
+            400,
+            "This round has 2+ interviewers — its decision is determined by panel majority, "
+            "not a manual override. Submit or wait for scorecards instead.",
+        )
+    i.decision = payload.decision
+    i.decision_finalized_at = datetime.utcnow()
+    if i.status not in ("Cancelled",):
+        i.status = "Completed"
+    i.updated_at = datetime.utcnow()
+    await db.commit()
+    await db.refresh(i)
+    await _apply_decision_side_effects(db, org.id, i, payload.decision, current_user.id)
+    await db.refresh(i)
+    return _fmt_interview(i, await _candidate_name(db, i.candidate_id), await _requisition_title(db, i.requisition_id))
 
 
 @router.put("/interviews/{interview_id}")
@@ -238,13 +396,23 @@ async def update_interview(
     data = payload.dict(exclude_unset=True)
     if "interviewers" in data and data["interviewers"] is not None:
         data["interviewers"] = [x if isinstance(x, dict) else x.dict() for x in data["interviewers"]]
+    if "artifacts" in data and data["artifacts"] is not None:
+        data["artifacts"] = [x if isinstance(x, dict) else x.dict() for x in data["artifacts"]]
+    new_interviewers = data.get("interviewers")
     for field, value in data.items():
         setattr(i, field, value)
     if payload.scheduled_at and i.status == "Requested":
         i.status = "Scheduled"
+    # (Re)generate the approval link the moment an authority is named, if
+    # one isn't already set — matches create_interview's behaviour.
+    if (i.approver_name or i.approver_email or i.approver_user_id) and not i.approval_token:
+        i.approval_token = service.generate_token()
     i.updated_at = datetime.utcnow()
     await db.commit()
     await db.refresh(i)
+    if new_interviewers is not None:
+        await service.sync_feedback_links(db, i, new_interviewers)
+        await db.commit()
     return _fmt_interview(i, await _candidate_name(db, i.candidate_id), await _requisition_title(db, i.requisition_id))
 
 
@@ -262,6 +430,9 @@ async def change_interview_status(
     i.status = payload.status
     if payload.status == "Cancelled":
         i.cancellation_reason = payload.cancellation_reason.strip()
+        i.cancelled_at = datetime.utcnow()
+        i.cancelled_by = current_user.name or current_user.email
+        i.approval_status = "Cancelled"
     i.updated_at = datetime.utcnow()
 
     # "Auto-updates candidate stage" — best-effort, only when this
@@ -324,7 +495,7 @@ async def create_self_schedule_link(
     if not i:
         raise HTTPException(404, "Interview not found")
     if i.interview_type not in SELF_SCHEDULABLE_TYPES:
-        raise HTTPException(400, f"Self-scheduling is only available for HR Screening rounds — {i.interview_type} interviews must be scheduled directly by a recruiter, not left to a candidate-facing link.")
+        raise HTTPException(400, f"Self-scheduling is only available for Phone Interview rounds — {i.interview_type} interviews must be scheduled directly by a recruiter, not left to a candidate-facing link.")
     if not payload.proposed_slots:
         raise HTTPException(400, "Provide at least one proposed time slot.")
     i.self_schedule_token = service.generate_self_schedule_token()
@@ -377,7 +548,7 @@ async def create_calendly_link(
     if not i:
         raise HTTPException(404, "Interview not found")
     if i.interview_type not in SELF_SCHEDULABLE_TYPES:
-        raise HTTPException(400, f"Self-scheduling is only available for HR Screening rounds — {i.interview_type} interviews must be scheduled directly by a recruiter, not left to a candidate-facing link.")
+        raise HTTPException(400, f"Self-scheduling is only available for Phone Interview rounds — {i.interview_type} interviews must be scheduled directly by a recruiter, not left to a candidate-facing link.")
     creds = await service.get_calendly_credentials(db, current_user.id)
     if not creds["api_key"] or not creds["event_type_uri"]:
         raise HTTPException(400, "Set up Calendly under Settings -> API Keys first (Personal Access Token + Event Type).")
@@ -414,6 +585,13 @@ async def create_scorecard(
     db.add(scorecard)
     await db.commit()
     await db.refresh(scorecard)
+
+    decision = await service.finalize_interview_decision(db, i)
+    if decision:
+        await db.commit()
+        await db.refresh(i)
+        await _apply_decision_side_effects(db, org.id, i, decision, current_user.id)
+
     return _fmt_scorecard(scorecard)
 
 
@@ -447,6 +625,16 @@ async def update_scorecard(
     s.updated_at = datetime.utcnow()
     await db.commit()
     await db.refresh(s)
+
+    if "recommendation" in data:
+        i = (await db.execute(select(Interview).where(Interview.id == s.interview_id))).scalar_one_or_none()
+        if i:
+            decision = await service.finalize_interview_decision(db, i)
+            if decision:
+                await db.commit()
+                await db.refresh(i)
+                await _apply_decision_side_effects(db, org.id, i, decision, current_user.id)
+
     return _fmt_scorecard(s)
 
 

@@ -28,7 +28,14 @@ from . import navtalk_client
 router = APIRouter()
 public_router = APIRouter()
 
-AVATAR_INTERVIEW_TYPE = "Video Interview (AI Avatar)"
+AVATAR_INTERVIEW_TYPE = "Video Interview"
+# Historically a distinct 4th interview_type ("Video Interview (AI
+# Avatar)"). Interview Scheduling was later simplified to exactly three
+# classes — Phone/Video/Panel — so an AI Avatar session is now just one
+# of the delivery modes available under the single "Video Interview"
+# class (alongside a live human video call or the CandidateLens
+# webcam+emotion-analysis flow), not its own round type. Any "Video
+# Interview" round can have an avatar session created for it.
 
 # PLACEHOLDER — set this to your real deployed backend origin once this
 # capability is used for real (e.g. via an environment variable). NavTalk
@@ -86,7 +93,7 @@ async def create_avatar_session(payload: AvatarSessionCreate, current_user: User
     if not interview:
         raise HTTPException(404, "Interview not found in your organisation.")
     if interview.interview_type != AVATAR_INTERVIEW_TYPE:
-        raise HTTPException(400, f"This interview's type is '{interview.interview_type}', not '{AVATAR_INTERVIEW_TYPE}'. Change the interview's type first.")
+        raise HTTPException(400, f"This interview's type is '{interview.interview_type}', not '{AVATAR_INTERVIEW_TYPE}'. Change the interview's type first, or use its other Video Interview delivery options.")
     existing = (await db.execute(select(AvatarInterviewSession).where(AvatarInterviewSession.interview_id == interview.id))).scalar_one_or_none()
     if existing:
         raise HTTPException(409, "An avatar interview session already exists for this interview.")

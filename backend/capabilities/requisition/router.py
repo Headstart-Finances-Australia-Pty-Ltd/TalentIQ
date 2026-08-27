@@ -239,6 +239,15 @@ async def csv_import_requisitions(
 
     created, skipped, errors = 0, 0, []
     clients_created = 0
+    # Compute the starting sequence number ONCE, then increment a local
+    # counter per row — NOT a fresh MAX(sequence_number) query per row.
+    # Every row in this loop is added to the same still-uncommitted
+    # transaction, so a repeated "SELECT MAX(...) + 1" can't reliably see
+    # the previous rows from this same batch as already taken, and ends
+    # up handing out the same number (or an otherwise-wrong number) to
+    # several of them — which is exactly the duplicate/out-of-order
+    # Req # values this replaces.
+    next_seq = await _next_sequence(db, org.id)
     for i, raw_row in enumerate(reader, start=2):  # row 1 is the header
         row = {(k or "").strip().lower(): (v or "").strip() for k, v in raw_row.items() if k}
         title = row.get("title", "")
@@ -287,7 +296,7 @@ async def csv_import_requisitions(
                 errors.append(f"Row {i}: target_hire_date '{row['target_hire_date']}' not in YYYY-MM-DD format, ignored")
 
         req = Requisition(
-            organisation_id=org.id, sequence_number=await _next_sequence(db, org.id),
+            organisation_id=org.id, sequence_number=next_seq,
             owner_user_id=current_user.id, client_id=client_id,
             title=title, status="Draft", priority=priority, vacancy_count=vacancy_count,
             reason_for_hire=row.get("reason_for_hire", ""), employment_type=row.get("employment_type", ""),
@@ -297,6 +306,7 @@ async def csv_import_requisitions(
             notes=row.get("notes", ""),
         )
         db.add(req)
+        next_seq += 1
         created += 1
 
     await db.commit()

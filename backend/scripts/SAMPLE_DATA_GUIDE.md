@@ -50,7 +50,7 @@ Add `--register --name "Your Name"` on the first run if that account doesn't exi
 
 This creates CandidateLens sessions and MarketIntel runs — independent of your real candidate data (it uploads its own sample CVs against sample JDs), so it's safe to run regardless of what you did in steps 1–2.
 
-Check it worked: open **CandidateLens** (`/app/joblens`) and **MarketIntel** (`/app/jobintel`).
+Check it worked: open **Resume Screening** (`/app/resumescreening`) and **MarketIntel** (`/app/jobintel`).
 
 ### 4. Run the Phase 4 seed script
 ```bash

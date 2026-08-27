@@ -5,7 +5,7 @@ from pydantic import BaseModel
 
 class AvatarSessionCreate(BaseModel):
     """Created FROM an existing Interview (interview_type must be "Video
-    Interview (AI Avatar)") — see router.create_avatar_session."""
+    Interview") — see router.create_avatar_session."""
     interview_id: int
     joblens_candidate_id: Optional[int] = None   # link to a CandidateLens screening, if this should feed its final-screening view
     question_count: int = 5

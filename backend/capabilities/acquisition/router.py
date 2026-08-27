@@ -25,6 +25,7 @@ from models.models import User
 from utils.auth_utils import get_current_user
 from capabilities.interview.models import Interview
 from capabilities.pipeline.models import PipelineEntry, Offer, Placement
+from capabilities.requisition.models import Requisition
 
 from .models import (
     Organisation, Candidate, TalentPool, CandidatePoolMember, CandidateMergeLog, Application,
@@ -48,6 +49,7 @@ def _fmt_candidate(
     pool_names: Optional[List[str]] = None,
     has_resume: Optional[bool] = None,
     has_cover_letter: Optional[bool] = None,
+    applications: Optional[List[dict]] = None,
 ) -> dict:
     """has_resume/has_cover_letter can be passed in pre-computed (see
     list_candidates) so this never has to touch the deferred resume_blob/
@@ -92,6 +94,12 @@ def _fmt_candidate(
         "cover_letter_text": c.cover_letter_text or "",
         "notes": c.notes or "",
         "pools": pool_names or [],
+        # Which open (or any-status) requisitions this candidate has been
+        # formally submitted to — see _applications_for_many. Empty list
+        # means "not an applicant to anything yet", same distinction the
+        # Requisitions table's Applications count relies on: existing in
+        # Talent Pool is not the same as having applied.
+        "applications": applications or [],
         "portal_token": c.portal_token,
         "is_merged": c.is_merged,
         "merged_into_id": c.merged_into_id,
@@ -215,6 +223,28 @@ async def _pool_names_for_many(db: AsyncSession, candidate_ids: List[int]) -> di
     return out
 
 
+async def _applications_for_many(db: AsyncSession, candidate_ids: List[int]) -> dict:
+    """Batched, same reasoning as _pool_names_for_many: one query for the
+    whole page of candidates rather than one per candidate. Existing in
+    Talent Pool is NOT the same as having applied — this only returns
+    requisitions the candidate has an actual Application row for (created
+    by pipeline.submit_to_pipeline), which is also what the Requisitions
+    table's Applications count reads from, so the two can never disagree
+    with each other."""
+    if not candidate_ids:
+        return {}
+    r = await db.execute(
+        select(Application.candidate_id, Requisition.id, Requisition.sequence_number, Requisition.title)
+        .join(Requisition, Application.requisition_id == Requisition.id)
+        .where(Application.candidate_id.in_(candidate_ids))
+        .order_by(Requisition.sequence_number)
+    )
+    out: dict = {cid: [] for cid in candidate_ids}
+    for cid, req_id, seq, title in r.all():
+        out[cid].append({"requisition_id": req_id, "sequence_number": seq, "title": title})
+    return out
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # ORGANISATION / CAREER PAGE LINK
 # ══════════════════════════════════════════════════════════════════════════
@@ -295,6 +325,7 @@ async def list_candidates(
     pool_id: Optional[int] = None,
     tag: Optional[str] = None,
     has_files: Optional[bool] = None,
+    unlinked_only: Optional[bool] = None,
     include_merged: bool = False,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -333,6 +364,17 @@ async def list_candidates(
         q = q.where(Candidate.resume_blob.isnot(None) | Candidate.cover_letter_blob.isnot(None))
     elif has_files is False:
         q = q.where(Candidate.resume_blob.is_(None), Candidate.cover_letter_blob.is_(None))
+    if unlinked_only:
+        # Genuinely orphaned files, not just "has a resume" — a candidate
+        # whose ONLY reason for existing is bulk_folder_import auto-creating
+        # a row for a file it couldn't match to anyone already on file (see
+        # bulk_folder_import's docstring). A CSV-imported or manually-added
+        # candidate who happens to also have a resume attached is a real
+        # profile, not a leftover fragment, and correctly stays out of this.
+        q = q.where(
+            Candidate.source == "bulk_folder_import",
+            Candidate.resume_blob.isnot(None) | Candidate.cover_letter_blob.isnot(None),
+        )
     q = q.order_by(Candidate.created_at.desc())
     rows = (await db.execute(q)).scalars().all()
 
@@ -348,6 +390,7 @@ async def list_candidates(
 
     candidate_ids = [c.id for c in filtered]
     pool_names_by_candidate = await _pool_names_for_many(db, candidate_ids)
+    applications_by_candidate = await _applications_for_many(db, candidate_ids)
     file_flags_by_id: dict = {}
     if candidate_ids:
         flags_result = await db.execute(
@@ -362,7 +405,7 @@ async def list_candidates(
     out = []
     for c in filtered:
         has_resume, has_cl = file_flags_by_id.get(c.id, (False, False))
-        out.append(_fmt_candidate(c, pool_names_by_candidate.get(c.id, []), has_resume, has_cl))
+        out.append(_fmt_candidate(c, pool_names_by_candidate.get(c.id, []), has_resume, has_cl, applications_by_candidate.get(c.id, [])))
     await db.commit()
     return out
 
@@ -373,7 +416,7 @@ async def get_candidate(candidate_id: int, current_user: User = Depends(get_curr
     c = (await db.execute(select(Candidate).where(Candidate.id == candidate_id, Candidate.organisation_id == org.id))).scalar_one_or_none()
     if not c:
         raise HTTPException(404, "Candidate not found")
-    return _fmt_candidate(c, await _pool_names_for(db, c.id))
+    return _fmt_candidate(c, await _pool_names_for(db, c.id), applications=(await _applications_for_many(db, [c.id])).get(c.id, []))
 
 
 @router.put("/candidates/{candidate_id}")

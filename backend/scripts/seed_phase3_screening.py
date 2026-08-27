@@ -315,7 +315,7 @@ def main():
     seed_marketintel(session, args.base_url)
 
     print(f"\nDone. {SEED_MARKER}")
-    print("Open CandidateLens (/app/joblens) and MarketIntel (/app/jobintel) to see the seeded data.")
+    print("Open Resume Screening (/app/resumescreening) and MarketIntel (/app/jobintel) to see the seeded data.")
     print("Tip: save a Groq API key under Settings -> API Keys before running this script to get")
     print("LLM-powered scoring + AI-generated interview questions instead of heuristic keyword scoring.")
 

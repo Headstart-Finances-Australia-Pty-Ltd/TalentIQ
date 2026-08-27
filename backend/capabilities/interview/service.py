@@ -10,7 +10,7 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from utils.credentials import get_all_credentials
-from .models import Interview
+from .models import Interview, InterviewScorecard, InterviewFeedbackLink
 
 CALENDLY_API_BASE = "https://api.calendly.com"
 
@@ -18,9 +18,106 @@ CALENDLY_API_BASE = "https://api.calendly.com"
 def generate_self_schedule_token() -> str:
     """Same pattern as Candidate.portal_token / Requisition.hm_view_token /
     JobLensCandidate.interview_token — a long random string IS the auth,
-    no separate candidate login system needed."""
+    no separate candidate login system needed. Reused as-is for
+    Interview.approval_token and InterviewFeedbackLink.token below — same
+    randomness requirement, no reason for a second implementation."""
     alphabet = string.ascii_letters + string.digits
     return "".join(secrets.choice(alphabet) for _ in range(48))
+
+
+# Alias — read more naturally at approval/feedback-link call sites than
+# "self_schedule_token" would.
+generate_token = generate_self_schedule_token
+
+
+async def sync_feedback_links(db: AsyncSession, interview: Interview, interviewers: list) -> None:
+    """Regenerates InterviewFeedbackLink rows to match the interview's
+    current interviewer list. Called on both create and update — any
+    time the interviewer list is set. Deliberately drop-and-recreate
+    rather than diff/patch: interviewers are matched by name (there's no
+    stable ID for a free-text interviewer entry), so a rename is
+    indistinguishable from a remove+add either way, and this keeps the
+    logic simple. Existing scorecards are untouched (they key off
+    interview_id + interviewer_name, not the link row), so a link
+    regenerating doesn't lose anyone's already-submitted feedback — it
+    just means a previously-issued link stops working and a fresh one
+    needs to be re-shared, which is the correct behaviour any time the
+    panel roster changes anyway."""
+    from models.models import User
+
+    await db.execute(
+        InterviewFeedbackLink.__table__.delete().where(InterviewFeedbackLink.interview_id == interview.id)
+    )
+    for iv in interviewers:
+        name = (iv.get("name") or "").strip()
+        if not name:
+            continue
+        email = (iv.get("email") or "").strip()
+        user_id = None
+        if email:
+            u = (await db.execute(select(User.id).where(func.lower(User.email) == email.lower()))).scalar_one_or_none()
+            user_id = u
+        db.add(InterviewFeedbackLink(
+            interview_id=interview.id, interviewer_name=name, interviewer_email=email,
+            user_id=user_id, token=generate_token(),
+        ))
+
+
+def _recommendation_bucket(recommendation: Optional[str]) -> Optional[str]:
+    if recommendation in ("Strong Yes", "Yes"):
+        return "approve"
+    if recommendation in ("No", "Strong No"):
+        return "reject"
+    return None   # "Neutral", blank, or unrecognised — counts as neither side
+
+
+async def finalize_interview_decision(db: AsyncSession, interview: Interview) -> Optional[str]:
+    """Recomputes and, if resolved, applies Interview.decision from the
+    panel's submitted scorecards — the "approval of a candidate is based
+    on majority of approval by panel" rule, for every round that has 2+
+    assigned interviewers. Call after every scorecard create/update.
+
+    Majority is measured against the TOTAL assigned panel (not just
+    votes cast so far) — the moment enough votes land on one side to be
+    mathematically unbeatable, the decision finalizes immediately rather
+    than waiting for stragglers. Returns the newly-applied decision
+    string, or None if nothing changed (already finalized, or not enough
+    votes yet to resolve one way or the other).
+
+    Rounds with 0-1 assigned interviewers never resolve here — see
+    router.set_decision for the manual-override path those use instead,
+    since "majority" isn't a meaningful concept for a single voter."""
+    if interview.decision not in (None, "Pending"):
+        return None
+    total = len(interview.interviewers or [])
+    if total < 2:
+        return None
+
+    scorecards = (await db.execute(
+        select(InterviewScorecard).where(InterviewScorecard.interview_id == interview.id)
+    )).scalars().all()
+    approve = sum(1 for s in scorecards if _recommendation_bucket(s.recommendation) == "approve")
+    reject = sum(1 for s in scorecards if _recommendation_bucket(s.recommendation) == "reject")
+    threshold = total // 2 + 1
+
+    decision = None
+    if approve >= threshold:
+        decision = "Selected"
+    elif reject >= threshold:
+        decision = "Rejected"
+    elif len(scorecards) >= total:
+        # Everyone who was assigned has voted, and neither side reached a
+        # majority (a tie, or too many Neutral votes) — park it as Hold
+        # rather than leaving it silently stuck on Pending forever.
+        decision = "Hold"
+
+    if decision:
+        interview.decision = decision
+        interview.decision_finalized_at = datetime.utcnow()
+        if interview.status not in ("Cancelled",):
+            interview.status = "Completed"
+        interview.updated_at = datetime.utcnow()
+    return decision
 
 
 async def get_next_sequence(db: AsyncSession, organisation_id: int) -> int:
