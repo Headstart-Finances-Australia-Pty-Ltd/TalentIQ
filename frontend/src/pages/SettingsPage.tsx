@@ -2,7 +2,7 @@ import { useNavigate } from "react-router-dom";
 import { useState, useEffect, useRef, Fragment } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Settings, Key, User, Shield, Trash2, Pencil, Home} from "lucide-react";
-import { authApi, groqPoolApi, interviewApi } from "../lib/api";
+import { authApi, groqPoolApi, interviewApi, candidateLensSettingsApi } from "../lib/api";
 import { useAuth } from "../hooks/useAuth";
 
 export default function SettingsPage() {
@@ -48,7 +48,30 @@ export default function SettingsPage() {
   const [smtp, setSmtp] = useState({ host: "", port: "587", username: "", password: "", from_email: "" });
   const [ollama, setOllama] = useState({ base_url: "http://localhost:11434", model: "llama3" });
   const [morphcast, setMorphcast] = useState({ license_key: "" });
+  const [interviewSettings, setInterviewSettings] = useState({ answer_seconds: "30", tts_voice: "af_heart", tts_engine: "kokoro" });
   const [keyMsg, setKeyMsg] = useState("");
+
+  // ── Interview Settings (Admin Console) — answer time + TTS voice ────
+  const { data: liveInterviewSettings } = useQuery({
+    queryKey: ["interview-settings"], queryFn: candidateLensSettingsApi.get,
+  });
+  const [kokoroVoices, setKokoroVoices] = useState<Record<string, string>>({});
+  const [edgeVoices, setEdgeVoices] = useState<Record<string, string>>({});
+  const [kokoroError, setKokoroError] = useState<string | null>(null);
+  const [interviewSettingsLoaded, setInterviewSettingsLoaded] = useState(false);
+  useEffect(() => {
+    if (liveInterviewSettings && !interviewSettingsLoaded) {
+      setInterviewSettings({
+        answer_seconds: String(liveInterviewSettings.answer_seconds ?? 30),
+        tts_voice: liveInterviewSettings.tts_voice || "af_heart",
+        tts_engine: liveInterviewSettings.tts_engine || "kokoro",
+      });
+      setKokoroVoices(liveInterviewSettings.kokoro_voices || {});
+      setEdgeVoices(liveInterviewSettings.edge_voices || {});
+      setKokoroError(liveInterviewSettings.kokoro_error || null);
+      setInterviewSettingsLoaded(true);
+    }
+  }, [liveInterviewSettings, interviewSettingsLoaded]);
 
   const flashMsg = (m: string) => { setKeyMsg(m); setTimeout(() => setKeyMsg(""), 3000); };
 
@@ -178,6 +201,26 @@ export default function SettingsPage() {
     mutationFn: (id: number) => authApi.deleteApiKey(id),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["api-keys"] }),
   });
+
+  const [savingInterview, setSavingInterview] = useState(false);
+  const saveInterviewSettings = async () => {
+    const seconds = Math.max(10, Math.min(600, Number(interviewSettings.answer_seconds) || 30));
+    setSavingInterview(true);
+    try {
+      await authApi.saveApiKey({ service: "interview", key_name: "answer_seconds", key_value: String(seconds), is_global: true });
+      await authApi.saveApiKey({ service: "interview", key_name: "tts_engine", key_value: interviewSettings.tts_engine, is_global: true });
+      if (interviewSettings.tts_engine !== "browser") {
+        await authApi.saveApiKey({ service: "interview", key_name: "tts_voice", key_value: interviewSettings.tts_voice, is_global: true });
+      }
+      qc.invalidateQueries({ queryKey: ["interview-settings"] });
+      qc.invalidateQueries({ queryKey: ["api-keys"] });
+      flashMsg("✅ Interview settings saved — applies to every recruiter and candidate.");
+    } catch (e: any) {
+      flashMsg("❌ Failed to save interview settings: " + (e.response?.data?.detail || e.message));
+    } finally {
+      setSavingInterview(false);
+    }
+  };
 
   // ── Inline editing for an already-saved key ─────────────────────────
   // The actual key value is never returned by the API (see key_preview
@@ -675,6 +718,94 @@ export default function SettingsPage() {
               </div>
             </div>
           )}
+
+          {/* INTERVIEW SETTINGS — admin-only platform-wide controls for
+              CandidateLens's phone/video interview experience: how long a
+              candidate gets to answer each question, and which voice reads
+              questions aloud (Kokoro-82M natural voice, or the browser's
+              built-in — more mechanical — SpeechSynthesis voice). */}
+          {isAdmin ? (
+            <div className="tiq-card tiq-mb-6">
+              <div className="tiq-card-title">Interview Settings — Admin Console</div>
+              <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>
+                Applies platform-wide to every Phone and Video Interview — for every recruiter and
+                every candidate link.
+              </p>
+              <div className="tiq-grid-2">
+                <div className="tiq-form-group">
+                  <label className="tiq-label">Answer time per question (seconds)</label>
+                  <input type="number" min={10} max={600} className="tiq-input"
+                    value={interviewSettings.answer_seconds}
+                    onChange={e => setInterviewSettings(s => ({ ...s, answer_seconds: e.target.value }))} />
+                </div>
+                <div className="tiq-form-group">
+                  <label className="tiq-label">Question voice engine</label>
+                  <select className="tiq-select" value={interviewSettings.tts_engine}
+                    onChange={e => {
+                      const engine = e.target.value;
+                      const defaultVoice = engine === "edge" ? "en-US-JennyNeural" : "af_heart";
+                      setInterviewSettings(s => ({ ...s, tts_engine: engine, tts_voice: defaultVoice }));
+                    }}>
+                    <option value="kokoro">Kokoro-82M — self-hosted, natural voice</option>
+                    <option value="edge">Microsoft Edge — online natural voice (no setup, needs internet)</option>
+                    <option value="browser">Browser default (built-in, more mechanical)</option>
+                  </select>
+                </div>
+              </div>
+              {interviewSettings.tts_engine === "kokoro" && (
+                <div className="tiq-form-group">
+                  <label className="tiq-label">Kokoro voice</label>
+                  <select className="tiq-select" value={interviewSettings.tts_voice}
+                    onChange={e => setInterviewSettings(s => ({ ...s, tts_voice: e.target.value }))}>
+                    {Object.entries(
+                      Object.keys(kokoroVoices).length ? kokoroVoices : {
+                        af_heart: "Heart (US English, female) — warm, default",
+                        af_bella: "Bella (US English, female)",
+                        af_nicole: "Nicole (US English, female)",
+                        am_adam: "Adam (US English, male)",
+                        am_michael: "Michael (US English, male)",
+                        bf_emma: "Emma (British English, female)",
+                        bm_george: "George (British English, male)",
+                      }
+                    ).map(([id, label]) => <option key={id} value={id}>{label as string}</option>)}
+                  </select>
+                  {kokoroError && (
+                    <div style={{ fontSize: 11, color: "#f59e0b", marginTop: 6 }}>
+                      Kokoro isn't loaded yet on the server ({kokoroError}) — interviews will use the browser
+                      voice until model files finish downloading on first use, or switch to Microsoft Edge below.
+                    </div>
+                  )}
+                </div>
+              )}
+              {interviewSettings.tts_engine === "edge" && (
+                <div className="tiq-form-group">
+                  <label className="tiq-label">Microsoft Edge voice</label>
+                  <select className="tiq-select" value={interviewSettings.tts_voice}
+                    onChange={e => setInterviewSettings(s => ({ ...s, tts_voice: e.target.value }))}>
+                    {Object.entries(
+                      Object.keys(edgeVoices).length ? edgeVoices : {
+                        "en-US-JennyNeural": "Jenny (US English, female) — warm, default",
+                        "en-US-AriaNeural": "Aria (US English, female)",
+                        "en-US-GuyNeural": "Guy (US English, male)",
+                        "en-US-DavisNeural": "Davis (US English, male)",
+                        "en-GB-SoniaNeural": "Sonia (British English, female)",
+                        "en-GB-RyanNeural": "Ryan (British English, male)",
+                        "en-AU-NatashaNeural": "Natasha (Australian English, female)",
+                        "en-IN-NeerjaNeural": "Neerja (Indian English, female)",
+                      }
+                    ).map(([id, label]) => <option key={id} value={id}>{label as string}</option>)}
+                  </select>
+                  <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 6 }}>
+                    Needs outbound internet access from the server to Microsoft's speech service — no model
+                    download or extra setup otherwise.
+                  </div>
+                </div>
+              )}
+              <button className="tiq-btn tiq-btn-primary" onClick={saveInterviewSettings} disabled={savingInterview}>
+                {savingInterview ? "Saving…" : "Save Interview Settings"}
+              </button>
+            </div>
+          ) : null}
 
           {/* MORPHCAST */}
           <div className="tiq-card tiq-mb-6">

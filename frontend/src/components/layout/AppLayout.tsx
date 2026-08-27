@@ -17,11 +17,13 @@ const CAPABILITY_LABEL_STYLE: React.CSSProperties = {
 };
 
 function CapabilityGroup({ capability, moduleToggles }: { capability: (typeof CAPABILITIES)[0]; moduleToggles: Record<string, boolean> }) {
-  // Expanded by default — a collapsed-by-default sidebar was hiding
-  // modules (Pipeline & Offers under "Placements" in particular) well
-  // enough that they read as missing rather than just one click away.
-  // Still collapsible per-group for anyone who wants to tidy it up.
-  const [open, setOpen] = useState(true);
+  // Collapsed by default, per explicit direction — the sidebar was
+  // previously changed to default-expanded when Placements only had one
+  // module and it was easy to miss; now that Placements (and every
+  // other phase) shows its full module list directly as three separate
+  // clickable entries, there's less need for auto-expansion to compensate.
+  // Still just one click to expand any group that's collapsed.
+  const [open, setOpen] = useState(false);
   // A missing entry means enabled — see Admin Console > Modules
   // Management and routers/admin.py's get_module_toggles, which only
   // ever stores rows for modules an admin has actually turned off.
@@ -51,11 +53,11 @@ function CapabilityGroup({ capability, moduleToggles }: { capability: (typeof CA
           {open ? <ChevronDown size={13} color="rgba(255,255,255,.4)" /> : <ChevronRight size={13} color="rgba(255,255,255,.4)" />}
         </span>
       </button>
-      {open && visibleModules.map(({ route, name, icon: Icon, built }) => (
+      {open && visibleModules.map(({ route, name, icon: Icon, color, built }) => (
         <NavLink key={route} to={route}
           className={({ isActive }) => `tiq-nav-item${isActive ? " active" : ""}`}
           style={{ padding: "6px 12px 6px 34px", fontSize: 12 }}>
-          <Icon size={13.5} />
+          <Icon size={13.5} color={color} />
           <span style={{ flex: 1 }}>{name}</span>
           {!built && (
             <span style={{
@@ -102,20 +104,36 @@ export default function AppLayout() {
             <LayoutDashboard size={16} />Dashboard
           </NavLink>
 
-          <div className="tiq-nav-section">Recruitment Modules</div>
+          <div className="tiq-nav-section">Recruitment Capabilities</div>
           {CORE_PIPELINE_CAPABILITIES.map((capability) => <CapabilityGroup key={capability.name} capability={capability} moduleToggles={moduleToggles} />)}
 
-          <div className="tiq-nav-section">Supporting Modules</div>
+          <div className="tiq-nav-section">Supporting Capabilities</div>
           {SUPPORTING_CAPABILITIES.map((capability) => <CapabilityGroup key={capability.name} capability={capability} moduleToggles={moduleToggles} />)}
 
-          <div className="tiq-nav-section">Job Seeker Tools</div>
-          {JOBSEEKER_MODULES.map(({ route, name, icon: Icon, emoji }) => (
-            <NavLink key={route} to={route}
-              className={({ isActive }) => `tiq-nav-item${isActive ? " active" : ""}`}>
-              {emoji ? <span style={{ width: 16, textAlign: "center", fontSize: 14 }}>{emoji}</span> : <Icon size={16} />}
-              {name}
-            </NavLink>
-          ))}
+          {/* Job Seeker Tools live outside CAPABILITIES entirely (they're
+              not part of the recruiter-facing phase groups), so they
+              need their own toggle-filtering here rather than going
+              through CapabilityGroup — and since this is a flat list,
+              not a phase group, the section title itself has to be
+              hidden by hand when nothing's left to show under it, which
+              CapabilityGroup's own "return null" handles automatically
+              for the phase groups above. */}
+          {(() => {
+            const visibleJobseekerModules = JOBSEEKER_MODULES.filter((m) => moduleToggles[m.route] !== false);
+            if (visibleJobseekerModules.length === 0) return null;
+            return (
+              <>
+                <div className="tiq-nav-section">Job Seeker Tools</div>
+                {visibleJobseekerModules.map(({ route, name, icon: Icon, emoji }) => (
+                  <NavLink key={route} to={route}
+                    className={({ isActive }) => `tiq-nav-item${isActive ? " active" : ""}`}>
+                    {emoji ? <span style={{ width: 16, textAlign: "center", fontSize: 14 }}>{emoji}</span> : <Icon size={16} />}
+                    {name}
+                  </NavLink>
+                ))}
+              </>
+            );
+          })()}
 
           <div className="tiq-nav-section">Account</div>
           <NavLink to="/app/settings"

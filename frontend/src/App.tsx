@@ -2,6 +2,9 @@ import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AuthProvider, useAuth } from "./hooks/useAuth";
 import LandingPage    from "./pages/LandingPage";
+import TermsOfUsePage from "./pages/TermsOfUsePage";
+import PrivacyPolicyPage from "./pages/PrivacyPolicyPage";
+import DataSecurityPage from "./pages/DataSecurityPage";
 import LoginPage      from "./pages/LoginPage";
 import RegisterPage   from "./pages/RegisterPage";
 import DashboardPage  from "./pages/DashboardPage";
@@ -20,8 +23,7 @@ import CandidatePortalPage from "./pages/CandidatePortalPage";
 import RequisitionsPage    from "./pages/RequisitionsPage";
 import HiringManagerViewPage from "./pages/HiringManagerViewPage";
 import AcquisitionPage    from "./pages/AcquisitionPage";
-import InterviewsPage     from "./pages/InterviewsPage";
-import PipelinePage       from "./pages/PipelinePage";
+import PlacementsPage     from "./pages/PlacementsPage";
 import PortalsPage        from "./pages/PortalsPage";
 import CommunicationPage  from "./pages/CommunicationPage";
 import CommercialsPage    from "./pages/CommercialsPage";
@@ -63,6 +65,9 @@ export default function App() {
         <BrowserRouter>
           <Routes>
             <Route path="/" element={<LandingPage />} />
+            <Route path="/terms" element={<TermsOfUsePage />} />
+            <Route path="/privacy" element={<PrivacyPolicyPage />} />
+            <Route path="/data-security" element={<DataSecurityPage />} />
             <Route path="/login" element={<LoginPage />} />
             <Route path="/register" element={<RegisterPage />} />
             <Route path="/interview/:token" element={<PublicInterviewPage />} />
@@ -87,8 +92,19 @@ export default function App() {
               <Route path="finaldecision"   element={<FinalDecisionPage />} />
               <Route path="acquisition" element={<AcquisitionPage />} />
               <Route path="requisitions"  element={<RequisitionsPage />} />
-              <Route path="interviews"    element={<InterviewsPage />} />
-              <Route path="pipeline"      element={<PipelinePage />} />
+              {/* interviews / pipeline kept as standalone routes for
+                  anyone with them bookmarked or deep-linked — the
+                  sidebar now points at placements instead, which has
+                  both as tabs alongside the new Onboarding tab. */}
+              {/* All three routes render the same PlacementsPage — see
+                  that component and capabilities.ts's Phase 5 for why:
+                  three separate sidebar entries, one shared page/tab
+                  bar, so which one you land on tab-wise depends on
+                  which sidebar link was actually clicked. */}
+              <Route path="interviews"    element={<PlacementsPage />} />
+              <Route path="pipeline"      element={<PlacementsPage />} />
+              <Route path="onboarding"    element={<PlacementsPage />} />
+              <Route path="placements"    element={<PlacementsPage />} />
               <Route path="portals"       element={<PortalsPage />} />
               <Route path="communication" element={<CommunicationPage />} />
               <Route path="commercials"   element={<CommercialsPage />} />

@@ -26,7 +26,7 @@ const PLACEMENT_STATUS_COLORS: Record<string, { fg: string; bg: string }> = {
 };
 const STAGE_TYPE_COLORS: Record<string, string> = { active: "#64748b", placed: "#10b981", rejected: "#ef4444" };
 
-export default function PipelinePage() {
+export default function PipelinePage({ embedded = false }: { embedded?: boolean } = {}) {
   const [tab, setTab] = useState<"board" | "offers" | "placements">("board");
   const [requisitions, setRequisitions] = useState<any[]>([]);
   const [candidates, setCandidates] = useState<any[]>([]);
@@ -44,12 +44,14 @@ export default function PipelinePage() {
 
   return (
     <div className="tiq-content">
-      <div className="tiq-page-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
-        <div>
-          <div className="tiq-page-title">Placements</div>
-          <div className="tiq-page-sub">Candidate moves to hired without leaving the system.</div>
+      {!embedded && (
+        <div className="tiq-page-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
+          <div>
+            <div className="tiq-page-title">Placements</div>
+            <div className="tiq-page-sub">Candidate moves to hired without leaving the system.</div>
+          </div>
         </div>
-      </div>
+      )}
 
       <div style={{ display: "flex", gap: 8, marginTop: 16, marginBottom: 16 }}>
         <button className={`tiq-btn tiq-btn-sm ${tab === "board" ? "tiq-btn-primary" : "tiq-btn-outline"}`} onClick={() => setTab("board")}>

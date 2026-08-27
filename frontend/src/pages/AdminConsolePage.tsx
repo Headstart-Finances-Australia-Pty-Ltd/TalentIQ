@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { Shield, Grid3x3, Database, Save } from "lucide-react";
-import { CAPABILITIES } from "../lib/capabilities";
+import { CAPABILITIES, JOBSEEKER_MODULES } from "../lib/capabilities";
 import AdminSetupPage from "./AdminSetupPage";
 import FileManagerPage from "./FileManagerPage";
 
@@ -39,8 +39,16 @@ function ModulesManagementTab() {
   });
 
   const dirty = Object.keys(pending).length > 0;
-  const totalModules = CAPABILITIES.reduce((n, c) => n + c.modules.length, 0);
-  const enabledCount = CAPABILITIES.reduce((n, c) => n + c.modules.filter((m) => isEnabled(m.route)).length, 0);
+  // Job Seeker Tools (JobHunter, CV Analysis) live outside CAPABILITIES
+  // entirely — they're not one of the recruiter-facing phase groups, so
+  // they were missing from this table even though they're real,
+  // toggleable sidebar entries (see AppLayout.tsx's own separate
+  // filtering of JOBSEEKER_MODULES). Folded in here as one more
+  // "phase"-shaped group so the table and its totals include them
+  // without needing a special case in the render below.
+  const allGroups = [...CAPABILITIES, { phase: "", name: "Job Seeker Tools", emoji: "🧭", modules: JOBSEEKER_MODULES }];
+  const totalModules = allGroups.reduce((n, c) => n + c.modules.length, 0);
+  const enabledCount = allGroups.reduce((n, c) => n + c.modules.filter((m) => isEnabled(m.route)).length, 0);
 
   return (
     <div>
@@ -73,7 +81,7 @@ function ModulesManagementTab() {
               </tr>
             </thead>
             <tbody>
-              {CAPABILITIES.map((cap) => (
+              {allGroups.map((cap) => (
                 cap.modules.map((m, i) => (
                   <tr key={m.route}>
                     <td style={{ textAlign: "center" }}>
@@ -81,7 +89,7 @@ function ModulesManagementTab() {
                     </td>
                     {i === 0 ? (
                       <td rowSpan={cap.modules.length} style={{ fontWeight: 600, verticalAlign: "top", color: "var(--text-secondary)" }}>
-                        {cap.emoji} {cap.phase}
+                        {cap.emoji} {cap.phase || cap.name}
                       </td>
                     ) : null}
                     <td style={{ fontWeight: 600 }}>{m.name}</td>

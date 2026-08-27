@@ -1,11 +1,277 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ClipboardList, Plus, X, Check, Link2, ChevronRight,
-  AlertTriangle, Copy, Upload, Trash2, Building2, UserPlus,
+  AlertTriangle, Copy, Upload, Trash2, Building2, UserPlus, Eye,
 } from "lucide-react";
-import { requisitionApi, candidateTrackApi, pipelineApi, acquisitionApi } from "../lib/api";
+import { requisitionApi, candidateTrackApi, pipelineApi, acquisitionApi, api } from "../lib/api";
 import { ResizableFilterHeader } from "../components/ResizableFilterHeader";
 import CsvImportModal from "../components/candidatetrack/CsvImportModal";
+
+async function openBlobInNewTab(url: string) {
+  try {
+    const res = await api.get(url, { responseType: "blob" });
+    const objectUrl = URL.createObjectURL(res.data);
+    window.open(objectUrl, "_blank");
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+  } catch {
+    alert("Could not load the JD file.");
+  }
+}
+
+// JD (Text/Word/PDF) cell — sits next to Title in the Requisitions table.
+// Upload when nothing's attached yet; once one exists, View/Replace/Remove.
+function JdFileCell({
+  req, uploading, onUpload, onDelete,
+}: { req: any; uploading: boolean; onUpload: (file: File) => void; onDelete: () => void }) {
+  const fileRef = useRef<HTMLInputElement>(null);
+  return (
+    <div onClick={(e) => e.stopPropagation()} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+      <input
+        ref={fileRef} type="file" accept=".txt,.pdf,.doc,.docx" style={{ display: "none" }}
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file) onUpload(file);
+          e.target.value = "";
+        }}
+      />
+      {uploading ? (
+        <span className="tiq-spinner" style={{ width: 14, height: 14, borderWidth: 2 }} />
+      ) : req.has_jd_file ? (
+        <>
+          <button
+            className="tiq-btn tiq-btn-ghost tiq-btn-sm" title={req.jd_file_filename || "View JD"}
+            onClick={() => openBlobInNewTab(requisitionApi.jdFileUrl(req.id))}
+            style={{ padding: "3px 6px", display: "flex", alignItems: "center", gap: 4 }}
+          >
+            <Eye size={13} /> View
+          </button>
+          <button
+            className="tiq-btn tiq-btn-ghost tiq-btn-sm" title="Replace JD file"
+            onClick={() => fileRef.current?.click()}
+            style={{ padding: "3px 6px" }}
+          >
+            <Upload size={13} />
+          </button>
+          <button
+            className="tiq-btn tiq-btn-ghost tiq-btn-sm" title="Remove JD file"
+            onClick={onDelete}
+            style={{ padding: "3px 6px", color: "var(--rose-500, #ef4444)" }}
+          >
+            <Trash2 size={13} />
+          </button>
+        </>
+      ) : (
+        <button
+          className="tiq-btn tiq-btn-outline tiq-btn-sm" title="Upload JD (Text/Word/PDF)"
+          onClick={() => fileRef.current?.click()}
+          style={{ padding: "3px 8px", display: "flex", alignItems: "center", gap: 4 }}
+        >
+          <Upload size={13} /> Upload JD
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ── Bulk JD upload ───────────────────────────────────────────────────────
+// Upload many JD files (Text/Word/PDF) at once. Each file is auto-matched
+// to a requisition by comparing its filename against requisition titles
+// (e.g. "Senior_Backend_Engineer_JD.docx" -> "Senior Backend Engineer").
+// Anything that can't be matched automatically (no title match, or more
+// than one requisition sharing that title) is left for the person to
+// resolve manually via a dropdown, then re-submitted.
+type BulkJdResult = {
+  attached: { filename: string; requisition_id: number; title: string }[];
+  unmatched: { filename: string; reason: string; candidate_ids?: number[] }[];
+  skipped: { filename: string; reason: string }[];
+  requisition_options: { id: number; title: string }[];
+};
+
+function BulkJdUploadModal({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
+  const [files, setFiles] = useState<File[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [resolving, setResolving] = useState(false);
+  const [result, setResult] = useState<BulkJdResult | null>(null);
+  const [attachedAll, setAttachedAll] = useState<BulkJdResult["attached"]>([]);
+  const [picks, setPicks] = useState<Record<string, number | "">>({});
+  const [error, setError] = useState("");
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  const handlePick = (files0: FileList | null) => {
+    if (!files0) return;
+    const allowed = /\.(txt|pdf|docx?|)$/i;
+    const picked = Array.from(files0).filter((f) => allowed.test(f.name));
+    setFiles(picked);
+    setResult(null);
+    setAttachedAll([]);
+    setPicks({});
+    setError("");
+  };
+
+  const runUpload = async () => {
+    if (!files.length) return;
+    setUploading(true);
+    setError("");
+    try {
+      const res: BulkJdResult = await requisitionApi.bulkUploadJdFiles(files);
+      setResult(res);
+      setAttachedAll(res.attached);
+      const initialPicks: Record<string, number | ""> = {};
+      res.unmatched.forEach((u) => { initialPicks[u.filename] = u.candidate_ids?.[0] ?? ""; });
+      setPicks(initialPicks);
+    } catch (e: any) {
+      setError(e?.response?.data?.detail || "Bulk upload failed. Please try again.");
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const runResolve = async () => {
+    if (!result) return;
+    const toResolve = result.unmatched.filter((u) => picks[u.filename] !== "" && picks[u.filename] !== undefined);
+    if (toResolve.length === 0) return;
+    const overrides: Record<string, number> = {};
+    toResolve.forEach((u) => { overrides[u.filename] = Number(picks[u.filename]); });
+    const resolveFiles = files.filter((f) => overrides[f.name] !== undefined);
+    if (!resolveFiles.length) return;
+    setResolving(true);
+    setError("");
+    try {
+      const res: BulkJdResult = await requisitionApi.bulkUploadJdFiles(resolveFiles, overrides);
+      setAttachedAll((prev) => [...prev, ...res.attached]);
+      const resolvedNames = new Set(res.attached.map((a) => a.filename));
+      setResult((prev) => prev && {
+        ...prev,
+        unmatched: prev.unmatched.filter((u) => !resolvedNames.has(u.filename)),
+      });
+    } catch (e: any) {
+      setError(e?.response?.data?.detail || "Could not attach the selected files. Please try again.");
+    } finally {
+      setResolving(false);
+    }
+  };
+
+  const stillUnmatched = result?.unmatched || [];
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center" }} onClick={onClose}>
+      <div style={{ background: "#fff", color: "#111827", borderRadius: 14, padding: 24, maxWidth: 640, width: "94%", maxHeight: "88vh", overflowY: "auto" }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+          <div style={{ fontWeight: 800, fontSize: 16, display: "flex", alignItems: "center", gap: 8 }}>
+            <Upload size={16} /> Bulk Upload JDs
+          </div>
+          <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer" }}><X size={18} /></button>
+        </div>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          <div style={{ fontSize: 12, color: "#6b7280" }}>
+            Select multiple JD files (.txt, .doc, .docx, .pdf). Each file is matched to a requisition by
+            name — e.g. <code>Senior_Backend_Engineer_JD.docx</code> attaches to a requisition titled
+            "Senior Backend Engineer". Anything that can't be matched automatically can be assigned manually below.
+          </div>
+
+          <div
+            onClick={() => fileRef.current?.click()}
+            style={{ border: "2px dashed #d1d5db", borderRadius: 10, padding: 18, textAlign: "center", cursor: "pointer" }}
+          >
+            <Upload size={22} color="#9ca3af" style={{ margin: "0 auto 6px" }} />
+            {files.length > 0 ? (
+              <span style={{ fontSize: 13, color: "#0d9488", fontWeight: 600 }}>
+                {files.length} file{files.length > 1 ? "s" : ""} selected
+              </span>
+            ) : (
+              <span style={{ fontSize: 13 }}>Click to select JD files — multiple allowed</span>
+            )}
+          </div>
+          <input ref={fileRef} type="file" accept=".txt,.pdf,.doc,.docx" multiple style={{ display: "none" }}
+            onChange={(e) => handlePick(e.target.files)} />
+
+          {error && (
+            <div style={{ fontSize: 12, color: "#ef4444", display: "flex", alignItems: "center", gap: 6 }}>
+              <AlertTriangle size={13} /> {error}
+            </div>
+          )}
+
+          {!result && (
+            <button className="tiq-btn tiq-btn-primary tiq-btn-sm" disabled={!files.length || uploading} onClick={runUpload}>
+              {uploading ? (<><span className="tiq-spinner" style={{ width: 14, height: 14, borderWidth: 2 }} /> Uploading & matching…</>) : "Upload & Match"}
+            </button>
+          )}
+
+          {result && (
+            <>
+              {attachedAll.length > 0 && (
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: "#0d9488", marginBottom: 6 }}>
+                    <Check size={13} style={{ display: "inline", marginRight: 4 }} />
+                    Attached ({attachedAll.length})
+                  </div>
+                  <div style={{ fontSize: 12, display: "flex", flexDirection: "column", gap: 3 }}>
+                    {attachedAll.map((a) => (
+                      <div key={a.filename}>{a.filename} → <strong>{a.title}</strong></div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {result.skipped.length > 0 && (
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: "#ef4444", marginBottom: 6 }}>
+                    Skipped ({result.skipped.length})
+                  </div>
+                  <div style={{ fontSize: 12, display: "flex", flexDirection: "column", gap: 3, color: "#6b7280" }}>
+                    {result.skipped.map((s) => (<div key={s.filename}>{s.filename} — {s.reason}</div>))}
+                  </div>
+                </div>
+              )}
+
+              {stillUnmatched.length > 0 && (
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: "#f59e0b", marginBottom: 6 }}>
+                    Needs your input ({stillUnmatched.length})
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {stillUnmatched.map((u) => (
+                      <div key={u.filename} style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                        <div style={{ fontSize: 12 }}>{u.filename}</div>
+                        <div style={{ fontSize: 11, color: "#6b7280" }}>{u.reason}</div>
+                        <select
+                          className="tiq-select" style={{ fontSize: 12 }}
+                          value={picks[u.filename] ?? ""}
+                          onChange={(e) => setPicks((p) => ({ ...p, [u.filename]: e.target.value ? Number(e.target.value) : "" }))}
+                        >
+                          <option value="">Select a requisition…</option>
+                          {result.requisition_options.map((r) => (
+                            <option key={r.id} value={r.id}>{r.title}</option>
+                          ))}
+                        </select>
+                      </div>
+                    ))}
+                  </div>
+                  <button className="tiq-btn tiq-btn-outline tiq-btn-sm" style={{ marginTop: 10 }}
+                    disabled={resolving || Object.values(picks).every((v) => v === "")}
+                    onClick={runResolve}>
+                    {resolving ? (<><span className="tiq-spinner" style={{ width: 14, height: 14, borderWidth: 2 }} /> Attaching…</>) : "Attach Selected"}
+                  </button>
+                </div>
+              )}
+
+              {attachedAll.length === 0 && result.skipped.length === 0 && stillUnmatched.length === 0 && (
+                <div style={{ fontSize: 12, color: "#6b7280" }}>Nothing to import.</div>
+              )}
+
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 4 }}>
+                <button className="tiq-btn tiq-btn-primary tiq-btn-sm" onClick={() => { onDone(); onClose(); }}>
+                  Done
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 const STATUS_FLOW = ["Draft", "Approved", "Open", "On Hold", "Filled", "Cancelled"];
 const STATUS_TRANSITIONS: Record<string, string[]> = {
@@ -32,7 +298,7 @@ const EMPLOYMENT_TYPES = ["Full-time", "Part-time", "Contract", "Temporary"];
 // Default column widths (px) — resizable per-column via the drag handle
 // in ResizableFilterHeader; these are just the starting point.
 const DEFAULT_COL_WIDTHS: Record<string, number> = {
-  sequence_number: 80, title: 190, client: 150, priority: 110, vacancy_count: 100, reason_for_hire: 150,
+  sequence_number: 80, title: 190, jd_file: 130, client: 150, priority: 110, vacancy_count: 100, reason_for_hire: 150,
   employment_type: 150, location: 140, salary_range: 150, target_hire_date: 140,
   status: 130, checklist: 120, hiring_manager: 160, application_count: 200,
 };
@@ -156,6 +422,7 @@ export default function RequisitionsPage() {
   const [checklistPopoverId, setChecklistPopoverId] = useState<number | null>(null);
 
   const [showCsv, setShowCsv] = useState(false);
+  const [showBulkJd, setShowBulkJd] = useState(false);
   const [showClientCsv, setShowClientCsv] = useState(false);
   const [showClientsTable, setShowClientsTable] = useState(false);
   const [selected, setSelected] = useState<Set<number>>(new Set());
@@ -305,6 +572,33 @@ export default function RequisitionsPage() {
     } catch (e: any) {
       setRequisitions(prev);
       alert(e?.response?.data?.detail || "Could not change priority.");
+    }
+  };
+
+  const [uploadingJdFor, setUploadingJdFor] = useState<number | null>(null);
+  const handleJdFileUpload = async (id: number, file: File) => {
+    const allowed = /\.(txt|pdf|doc|docx)$/i;
+    if (!allowed.test(file.name)) {
+      alert("JD file must be a .txt, .pdf, .doc, or .docx file.");
+      return;
+    }
+    setUploadingJdFor(id);
+    try {
+      const saved = await requisitionApi.uploadJdFile(id, file);
+      setRequisitions((rs) => rs.map((r) => (r.id === id ? saved : r)));
+    } catch (e: any) {
+      alert(e?.response?.data?.detail || "Could not upload the JD file.");
+    } finally {
+      setUploadingJdFor(null);
+    }
+  };
+  const handleJdFileDelete = async (id: number) => {
+    if (!confirm("Remove the attached JD file from this requisition?")) return;
+    try {
+      await requisitionApi.deleteJdFile(id);
+      setRequisitions((rs) => rs.map((r) => (r.id === id ? { ...r, has_jd_file: false, jd_file_filename: "" } : r)));
+    } catch (e: any) {
+      alert(e?.response?.data?.detail || "Could not remove the JD file.");
     }
   };
 
@@ -544,6 +838,9 @@ export default function RequisitionsPage() {
         <button className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={() => setShowCsv(true)}>
           <Upload size={14} /> Bulk Import Requisitions
         </button>
+        <button className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={() => setShowBulkJd(true)}>
+          <Upload size={14} /> Bulk Upload JDs
+        </button>
         <button className="tiq-btn tiq-btn-primary tiq-btn-sm" onClick={openAdd}>
           <Plus size={14} /> New Requisition
         </button>
@@ -639,6 +936,7 @@ export default function RequisitionsPage() {
                 </th>
                 <ResizableFilterHeader label="Req #" value={colFilters.sequence_number} options={colOptions("sequence_number")} onChange={(v) => setColFilter("sequence_number", v)} align="center" width={colWidths.sequence_number} onWidthChange={(w) => setColWidth("sequence_number", w)} />
                 <ResizableFilterHeader label="Title" value={colFilters.title} options={colOptions("title")} onChange={(v) => setColFilter("title", v)} width={colWidths.title} onWidthChange={(w) => setColWidth("title", w)} />
+                <ResizableFilterHeader label="JD" filterable={false} width={colWidths.jd_file} onWidthChange={(w) => setColWidth("jd_file", w)} />
                 <ResizableFilterHeader label="Client" value={colFilters.client} options={colOptions("client")} onChange={(v) => setColFilter("client", v)} width={colWidths.client} onWidthChange={(w) => setColWidth("client", w)} />
                 <ResizableFilterHeader label="Priority" value={colFilters.priority} options={colOptions("priority")} onChange={(v) => setColFilter("priority", v)} width={colWidths.priority} onWidthChange={(w) => setColWidth("priority", w)} />
                 <ResizableFilterHeader label="Vacancies" value={colFilters.vacancy_count} options={colOptions("vacancy_count")} onChange={(v) => setColFilter("vacancy_count", v)} align="center" width={colWidths.vacancy_count} onWidthChange={(w) => setColWidth("vacancy_count", w)} />
@@ -666,6 +964,14 @@ export default function RequisitionsPage() {
                   <td>
                     <div style={{ fontWeight: 600 }}>{r.title}</div>
                     {r.jd_title && <div style={{ fontSize: 11, color: "var(--text-muted)" }}>JD: {r.jd_title}</div>}
+                  </td>
+                  <td>
+                    <JdFileCell
+                      req={r}
+                      uploading={uploadingJdFor === r.id}
+                      onUpload={(file) => handleJdFileUpload(r.id, file)}
+                      onDelete={() => handleJdFileDelete(r.id)}
+                    />
                   </td>
                   <td style={{ fontSize: 12 }} onClick={(e) => e.stopPropagation()}>
                     {r.client_name ? (
@@ -1160,6 +1466,11 @@ export default function RequisitionsPage() {
           onClose={() => setShowCsv(false)}
           onDone={load}
         />
+      )}
+
+      {/* ── Bulk Upload JDs — matches each file to a requisition by name ── */}
+      {showBulkJd && (
+        <BulkJdUploadModal onClose={() => setShowBulkJd(false)} onDone={load} />
       )}
 
       {/* ── Bulk Import Clients (CSV) — kept here too, not just buried in

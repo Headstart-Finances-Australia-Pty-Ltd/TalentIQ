@@ -6,7 +6,6 @@ import { Video } from "lucide-react";
 // Standalone axios instance — this page is intentionally public (no auth
 // token, no session), reached only via the unguessable token in the URL.
 const publicApi = axios.create({ baseURL: "", timeout: 60_000 });
-
 declare global {
   interface Window { CY?: any; MphTools?: any; }
 }
@@ -47,6 +46,11 @@ export default function PublicInterviewPage() {
   const [candidateName, setCandidateName] = useState("");
   const [questions, setQuestions] = useState<string[]>([]);
   const [alreadyDone, setAlreadyDone] = useState(false);
+  const [privacyAccepted, setPrivacyAccepted] = useState(false);
+  const [privacyChecked, setPrivacyChecked] = useState(false);
+  const [acceptingPrivacy, setAcceptingPrivacy] = useState(false);
+  const [answerSeconds, setAnswerSeconds] = useState(ANSWER_SECONDS);
+  const ttsAudioRef = useRef<HTMLAudioElement | null>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const mediaRef = useRef<MediaRecorder | null>(null);
@@ -78,6 +82,9 @@ export default function PublicInterviewPage() {
         setCandidateName(r.data.candidate_name || "");
         setQuestions(r.data.questions || []);
         setAlreadyDone(r.data.video_status === "Completed");
+        setPrivacyAccepted(!!r.data.privacy_accepted);
+        setAnswerSeconds(r.data.answer_seconds || ANSWER_SECONDS);
+        setTimeLeft(r.data.answer_seconds || ANSWER_SECONDS);
       })
       .catch(() => setLoadError("This interview link is invalid or has expired. Please contact the recruiter for a new link."))
       .finally(() => setLoading(false));
@@ -90,6 +97,19 @@ export default function PublicInterviewPage() {
       .catch(() => setLicenseKey(""))
       .finally(() => setKeyChecked(true));
   }, [token]);
+
+  const acceptPrivacy = async () => {
+    if (!token || !privacyChecked) return;
+    setAcceptingPrivacy(true);
+    try {
+      await publicApi.post(`/api/joblens/public/interview/${token}/accept-privacy`);
+      setPrivacyAccepted(true);
+    } catch {
+      alert("Could not record your acceptance — please try again.");
+    } finally {
+      setAcceptingPrivacy(false);
+    }
+  };
 
   const startCamera = async () => {
     try {
@@ -192,9 +212,21 @@ export default function PublicInterviewPage() {
     }
   };
 
-  const speakQuestion = (q: string) => {
-    if (!q || !("speechSynthesis" in window)) { startRecording(); return; }
+  const speakQuestion = async (q: string) => {
+    if (!q) { startRecording(); return; }
     setIsSpeaking(true);
+    try {
+      const res = await publicApi.post(`/api/joblens/public/interview/${token}/tts`, { text: q }, { responseType: "blob" });
+      const url = URL.createObjectURL(res.data as Blob);
+      const audio = new Audio(url);
+      ttsAudioRef.current = audio;
+      audio.onended = () => { setIsSpeaking(false); URL.revokeObjectURL(url); startRecording(); };
+      audio.onerror = () => { setIsSpeaking(false); URL.revokeObjectURL(url); startRecording(); };
+      await audio.play();
+      return;
+    } catch { /* Kokoro not available/enabled on the recruiter's account — fall back below */ }
+
+    if (!("speechSynthesis" in window)) { setIsSpeaking(false); startRecording(); return; }
     const utter = new SpeechSynthesisUtterance(q);
     utter.rate = 0.92;
     utter.pitch = 1.05;
@@ -209,7 +241,7 @@ export default function PublicInterviewPage() {
     // Actual video capture already started once in startCamera() and runs
     // continuously — this just drives the per-question UI.
     setRecording(true);
-    setTimeLeft(ANSWER_SECONDS);
+    setTimeLeft(answerSeconds);
   };
 
   const timerTickRef = useRef<any>(null);
@@ -237,6 +269,7 @@ export default function PublicInterviewPage() {
     if (timerTickRef.current) { clearTimeout(timerTickRef.current); timerTickRef.current = null; }
     setRecording(false);
     speechSynthesis.cancel();
+    if (ttsAudioRef.current) { ttsAudioRef.current.pause(); ttsAudioRef.current = null; }
     try { await engineRef.current?.stop?.(); await engineRef.current?.destroy?.(); } catch {}
 
     const videoBlob: Blob | null = await new Promise(resolve => {
@@ -320,6 +353,46 @@ export default function PublicInterviewPage() {
           </div>
           <button className="tiq-btn tiq-btn-outline" onClick={() => setAlreadyDone(false)}>
             Retake interview
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // Privacy notice gate — camera/mic access is never requested, and
+  // Start Interview never renders, until the candidate explicitly
+  // accepts that the interview will be recorded, stored, and reviewed.
+  if (!privacyAccepted) {
+    return (
+      <div style={pageWrap}>
+        <div style={{ background: "#ffffff", color: "#111827", borderRadius: 16, padding: 28, maxWidth: 560, width: "100%", boxShadow: "0 10px 40px rgba(0,0,0,.12)", border: "1px solid #e5e7eb" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
+            <Video size={18} color="#0d9488" />
+            <div style={{ fontWeight: 800, fontSize: 17 }}>Before you begin, {candidateName || "there"}</div>
+          </div>
+          <div style={{ fontSize: 13.5, lineHeight: 1.7, color: "#374151", background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 10, padding: 16, marginBottom: 16 }}>
+            <p style={{ margin: "0 0 10px" }}>
+              This video interview will <strong>record your camera, microphone, and facial expressions</strong> for
+              the full duration of the session. Your recording will be:
+            </p>
+            <ul style={{ margin: "0 0 10px", paddingLeft: 20 }}>
+              <li><strong>Stored securely</strong> on the hiring company's TalentIQ account.</li>
+              <li><strong>Reviewed by decision-makers</strong> involved in this hiring process (recruiters and hiring managers).</li>
+              <li>Analysed by an AI system to help assess communication, relevance, and confidence in your answers.</li>
+              <li>Kept only as long as needed for this hiring process, per the employer's data retention practice.</li>
+            </ul>
+            <p style={{ margin: 0 }}>
+              By continuing, you consent to this recording, storage, and review. You can read the full{" "}
+              <a href="/privacy" target="_blank" rel="noopener noreferrer" style={{ color: "#0d9488" }}>Privacy Policy</a> and{" "}
+              <a href="/terms" target="_blank" rel="noopener noreferrer" style={{ color: "#0d9488" }}>Terms of Use</a> for more detail.
+            </p>
+          </div>
+          <label style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 13, marginBottom: 16, cursor: "pointer" }}>
+            <input type="checkbox" checked={privacyChecked} onChange={e => setPrivacyChecked(e.target.checked)} style={{ marginTop: 2 }} />
+            <span>I understand and agree that this interview will be recorded, stored, and reviewed by decision-makers as described above.</span>
+          </label>
+          <button className="tiq-btn tiq-btn-primary" style={{ width: "100%" }} disabled={!privacyChecked || acceptingPrivacy} onClick={acceptPrivacy}>
+            {acceptingPrivacy ? "Saving…" : "I Agree — Continue to Interview"}
           </button>
         </div>
       </div>

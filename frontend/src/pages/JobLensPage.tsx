@@ -9,6 +9,11 @@ import {
   Trash2, Mail, Building2, AlertTriangle, Phone } from "lucide-react";
 import { api } from "../lib/api";
 import { useAuth } from "../hooks/useAuth";
+
+// Same fixed per-stage colors as the sidebar (see capabilities.ts) — kept
+// here too so the Next Steps buttons' icons visually match the sidebar
+// entry they navigate to, regardless of which page they're rendered on.
+const STAGE_ICON_COLOR = { phone: "#ec4899", video: "#00c7b7", decision: "#10b981" } as const;
 import JDManagementTab from "../components/candidatetrack/JDManagementTab";
 import VendorManagementTab from "../components/candidatetrack/VendorManagementTab";
 import CandidateTrackingTab from "../components/candidatetrack/CandidateTrackingTab";
@@ -184,10 +189,18 @@ const jobLensApi = {
     api.post(`/api/joblens/candidates/${cid}/prepare-invite`).then(r => r.data),
   getMorphcastKey: () =>
     api.get(`/api/joblens/morphcast-key`).then(r => r.data),
+  getInterviewSettings: () =>
+    api.get(`/api/joblens/interview-settings`).then(r => r.data),
+  synthesizeSpeech: (text: string) =>
+    api.post(`/api/joblens/tts`, { text }, { responseType: "blob", timeout: 30_000 }).then(r => r.data),
+  getVideoViewToken: (cid: number) =>
+    api.post(`/api/joblens/candidates/${cid}/video-view-token`).then(r => r.data),
   markContacted: (cid: number) =>
     api.post(`/api/joblens/candidates/${cid}/mark-contacted`).then(r => r.data),
   markPhoneContacted: (cid: number) =>
     api.post(`/api/joblens/candidates/${cid}/phone-contacted`).then(r => r.data),
+  updateStatus: (cid: number, status: string) =>
+    api.put(`/api/joblens/candidates/${cid}/status`, { status }).then(r => r.data),
   savePhoneResult: (cid: number, data: { recommendation: string; notes: string }) =>
     api.post(`/api/joblens/candidates/${cid}/phone-result`, data).then(r => r.data),
   saveVideoResult: (cid: number, data: { recommendation: string; notes: string }) =>
@@ -201,13 +214,15 @@ const jobLensApi = {
   },
   reanalyzeVideo: (cid: number) =>
     api.post(`/api/joblens/candidates/${cid}/reanalyze-video`).then(r => r.data),
-  jdOptions: () =>
-    api.get(`/api/joblens/jd-options`).then(r => r.data),
-  vendorCandidates: (jdId: number) =>
-    api.get(`/api/joblens/vendor-candidates`, { params: { jd_id: jdId } }).then(r => r.data),
+  requisitionOptions: () =>
+    api.get(`/api/joblens/requisition-options`).then(r => r.data),
+  requisitionCandidates: (requisitionId: number) =>
+    api.get(`/api/joblens/requisition-candidates`, { params: { requisition_id: requisitionId } }).then(r => r.data),
 };
 
 // ─── HELPERS ───────────────────────────────────────────────────────────────
+const CANDIDATE_STATUSES = ["Qualified", "Review", "Not Qualified"];
+
 function StatusBadge({ status }: { status: string }) {
   const map: Record<string, string> = {
     "Qualified":     "tiq-badge-teal",
@@ -287,6 +302,46 @@ function AnchoredPopover({
   );
 }
 
+// ─── VIDEO PLAYER MODAL ─────────────────────────────────────────────────
+// "View recorded video" opens this instead of a new browser tab. Fetches
+// a short-lived, video-scoped token (proves the ownership check already
+// passed) and points a native <video> straight at the Range-aware
+// streaming endpoint — the browser buffers just the first chunk and
+// starts playing almost immediately, rather than the old approach of
+// downloading the entire file into memory before anything could play.
+function VideoPlayerModal({ candidateId, candidateName, onClose }: { candidateId: number; candidateName: string; onClose: () => void }) {
+  const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    jobLensApi.getVideoViewToken(candidateId)
+      .then(r => { if (!cancelled) setVideoUrl(r.url); })
+      .catch(() => { if (!cancelled) setError("Could not load this video. Please try again."); });
+    return () => { cancelled = true; };
+  }, [candidateId]);
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center" }} onClick={onClose}>
+      <div style={{ background: "#000", borderRadius: 14, padding: 16, maxWidth: 820, width: "92%", boxShadow: "0 25px 60px rgba(0,0,0,.5)" }} onClick={e => e.stopPropagation()}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+          <div style={{ color: "#fff", fontWeight: 700, fontSize: 14 }}>▶ {candidateName} — Recorded Interview</div>
+          <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: "#fff", fontSize: 20, lineHeight: 1 }}>×</button>
+        </div>
+        {error ? (
+          <div style={{ color: "#f87171", padding: 40, textAlign: "center" }}>{error}</div>
+        ) : !videoUrl ? (
+          <div style={{ color: "#9ca3af", padding: 40, textAlign: "center", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+            <span className="tiq-spinner" style={{ width: 16, height: 16, borderWidth: 2 }} /> Loading video…
+          </div>
+        ) : (
+          <video src={videoUrl} controls autoPlay style={{ width: "100%", maxHeight: "70vh", borderRadius: 8, display: "block", background: "#000" }} />
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── MORPHCAST LOADER ───────────────────────────────────────────────────────
 declare global {
   interface Window { CY?: any; MphTools?: any; }
@@ -337,6 +392,7 @@ function VideoInterviewModal({
   const [qIdx, setQIdx] = useState(0);
   const [recording, setRecording] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
+  const [answerSeconds, setAnswerSeconds] = useState(ANSWER_SECONDS);
   const [timeLeft, setTimeLeft] = useState(ANSWER_SECONDS);
   const [started, setStarted] = useState(false);
   const [mcReady, setMcReady] = useState(false);
@@ -347,14 +403,24 @@ function VideoInterviewModal({
   const [dominant, setDominant] = useState("Neutral");
   const [licenseKey, setLicenseKey] = useState("");
   const [keyChecked, setKeyChecked] = useState(false);
+  const ttsAudioRef = useRef<HTMLAudioElement | null>(null);
+  // Same recording/storage/review consent gate as the candidate's public
+  // interview page — shown first, every time this modal opens; camera/mic
+  // access is never requested until it's explicitly accepted.
+  const [privacyAccepted, setPrivacyAccepted] = useState(false);
+  const [privacyChecked, setPrivacyChecked] = useState(false);
 
-  // Fetch the recruiter's MorphCast key as soon as the modal mounts, so
-  // it's ready by the time Start Interview triggers initMorphcast().
+  // Fetch the recruiter's MorphCast key + the admin-configured interview
+  // settings (answer time, TTS voice) as soon as the modal mounts, so
+  // they're ready by the time Start Interview fires.
   useEffect(() => {
     jobLensApi.getMorphcastKey()
       .then(r => setLicenseKey(r.license_key || ""))
       .catch(() => setLicenseKey(""))
       .finally(() => setKeyChecked(true));
+    jobLensApi.getInterviewSettings()
+      .then(r => { setAnswerSeconds(r.answer_seconds || ANSWER_SECONDS); setTimeLeft(r.answer_seconds || ANSWER_SECONDS); })
+      .catch(() => { /* keep the 30s default */ });
   }, []);
 
   // Keep ref in sync so the MorphCast event handler (closure) sees current value
@@ -464,9 +530,26 @@ function VideoInterviewModal({
     }
   };
 
-  const speakQuestion = (q: string) => {
-    if (!q || !("speechSynthesis" in window)) { startRecording(); return; }
+  // Speaks the question using Kokoro-82M (natural, human-sounding voice)
+  // when the backend has it configured/available; falls back to the
+  // browser's built-in SpeechSynthesis voice on any failure (not
+  // configured, model unavailable, network hiccup, etc.) so the interview
+  // is never blocked on TTS.
+  const speakQuestion = async (q: string) => {
+    if (!q) { startRecording(); return; }
     setIsSpeaking(true);
+    try {
+      const audioBlob: Blob = await jobLensApi.synthesizeSpeech(q);
+      const url = URL.createObjectURL(audioBlob);
+      const audio = new Audio(url);
+      ttsAudioRef.current = audio;
+      audio.onended = () => { setIsSpeaking(false); URL.revokeObjectURL(url); startRecording(); };
+      audio.onerror = () => { setIsSpeaking(false); URL.revokeObjectURL(url); startRecording(); };
+      await audio.play();
+      return;
+    } catch { /* Kokoro not available/enabled — fall back below */ }
+
+    if (!("speechSynthesis" in window)) { setIsSpeaking(false); startRecording(); return; }
     const utter = new SpeechSynthesisUtterance(q);
     utter.rate = 0.92;
     utter.pitch = 1.05;
@@ -482,7 +565,7 @@ function VideoInterviewModal({
     // continuously for the whole interview — this just drives the
     // per-question UI (timer, REC indicator).
     setRecording(true);
-    setTimeLeft(ANSWER_SECONDS);
+    setTimeLeft(answerSeconds);
   };
 
   // Countdown timer — pauses while TTS is speaking
@@ -511,6 +594,7 @@ function VideoInterviewModal({
     if (timerTickRef.current) { clearTimeout(timerTickRef.current); timerTickRef.current = null; }
     setRecording(false);
     speechSynthesis.cancel();
+    if (ttsAudioRef.current) { ttsAudioRef.current.pause(); ttsAudioRef.current = null; }
     try { await engineRef.current?.stop?.(); await engineRef.current?.destroy?.(); } catch {}
 
     // Stop the single continuous recorder and wait for it to fully flush
@@ -537,6 +621,44 @@ function VideoInterviewModal({
   };
 
   const currentQ = questions[qIdx] || "Loading...";
+
+  if (!privacyAccepted) {
+    return (
+      <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.8)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <div style={{ background: "#ffffff", color: "#111827", borderRadius: 16, padding: 28, maxWidth: 560, width: "95%", boxShadow: "0 25px 60px rgba(0,0,0,.4)" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+            <div style={{ fontWeight: 800, fontSize: 17, color: "#111827" }}>
+              <Video size={16} style={{ display: "inline", marginRight: 8, color: "#0d9488" }} />
+              Before you begin — {candidate.name}
+            </div>
+            <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: "#6b7280", fontSize: 20 }}>×</button>
+          </div>
+          <div style={{ fontSize: 13.5, lineHeight: 1.7, color: "#374151", background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 10, padding: 16, marginBottom: 16 }}>
+            <p style={{ margin: "0 0 10px" }}>
+              This video interview will <strong>record camera, microphone, and facial expressions</strong> for
+              the full duration of the session. The recording will be:
+            </p>
+            <ul style={{ margin: "0 0 10px", paddingLeft: 20 }}>
+              <li><strong>Stored securely</strong> on this account.</li>
+              <li><strong>Reviewed by decision-makers</strong> involved in this hiring process.</li>
+              <li>Analysed by AI to help assess communication, relevance, and confidence.</li>
+            </ul>
+            <p style={{ margin: 0 }}>By continuing, you confirm the candidate has agreed to this recording, storage, and review.</p>
+          </div>
+          <label style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 13, marginBottom: 16, cursor: "pointer" }}>
+            <input type="checkbox" checked={privacyChecked} onChange={e => setPrivacyChecked(e.target.checked)} style={{ marginTop: 2 }} />
+            <span>I understand and agree that this interview will be recorded, stored, and reviewed by decision-makers as described above.</span>
+          </label>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="tiq-btn tiq-btn-primary" style={{ flex: 1 }} disabled={!privacyChecked} onClick={() => setPrivacyAccepted(true)}>
+              I Agree — Continue to Interview
+            </button>
+            <button className="tiq-btn tiq-btn-ghost" onClick={onClose}>Cancel</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.8)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -618,6 +740,8 @@ Thank you for your application. We would like to invite you to complete a short 
 Please click the link below to begin. It works directly in your browser — no account or login required:
 
 ${link}
+
+Please note: this video interview will be recorded, securely stored, and reviewed by our hiring decision-makers as part of the recruitment process. Please ensure you are in a quiet, well-lit location, dressed professionally, and ready to present yourself as you would for an in-person interview.
 
 Regards,
 HR Team`
@@ -802,6 +926,7 @@ function CandidateRow({
   const [popover, setPopover] = useState<PopoverState>(null);
   const [showTranscript, setShowTranscript] = useState(false);
   const [showDetailsModal, setShowDetailsModal] = useState(false);
+  const [showVideoPlayer, setShowVideoPlayer] = useState(false);
 
   // Local, instantly-updated shortlist state — decoupled from the parent
   // session refetch so the checkbox never waits on a network round trip.
@@ -826,6 +951,10 @@ function CandidateRow({
   const [phoneNotes, setPhoneNotes] = useState(c.phone_screening_notes || "");
   const phoneContactMut = useMutation({
     mutationFn: () => jobLensApi.markPhoneContacted(c.id),
+    onSuccess: () => { onRefresh(); },
+  });
+  const statusMut = useMutation({
+    mutationFn: (status: string) => jobLensApi.updateStatus(c.id, status),
     onSuccess: () => { onRefresh(); },
   });
   const phoneResultMut = useMutation({
@@ -1032,8 +1161,22 @@ function CandidateRow({
         )}
 
         {mode === "resume" && (
-          <td>
-            <StatusBadge status={c.status} />
+          <td onClick={(e) => e.stopPropagation()}>
+            <select
+              className="tiq-select"
+              value={c.status}
+              disabled={statusMut.isPending}
+              onChange={(e) => statusMut.mutate(e.target.value)}
+              style={{
+                fontSize: 11, fontWeight: 700, padding: "3px 22px 3px 8px", borderRadius: 999, border: "none",
+                color: c.status === "Qualified" ? "#0d9488" : c.status === "Review" ? "#b45309" : "#be123c",
+                background: c.status === "Qualified" ? "rgba(13,148,136,.12)" : c.status === "Review" ? "rgba(245,158,11,.14)" : "rgba(244,63,94,.12)",
+                cursor: statusMut.isPending ? "wait" : "pointer",
+              }}
+              title="Manual override — the AI's own score and breakdown are unaffected, only this label changes"
+            >
+              {CANDIDATE_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+            </select>
             {c.status === "Not Qualified" && c.hard_disqualified && c.disqualify_reason && (
               <div style={{ fontSize: 10, color: "#ef4444", marginTop: 4, maxWidth: 160, lineHeight: 1.4 }}>
                 ({c.disqualify_reason})
@@ -1087,7 +1230,7 @@ function CandidateRow({
               </button>
             )}
             {c.has_video && (
-              <button type="button" onClick={() => openBlobInNewTab(`/api/joblens/candidates/${c.id}/video`, "video/webm")}
+              <button type="button" onClick={() => setShowVideoPlayer(true)}
                 style={{ background: "none", border: "none", padding: 0, textAlign: "left", cursor: "pointer", fontSize: 10, color: "var(--teal-500)", marginTop: 4, display: "block" }}>
                 ▶ View recorded video
               </button>
@@ -1118,6 +1261,17 @@ function CandidateRow({
                   <div>😡 Angry: {Math.round(c.emotion_angry ?? 0)}%</div>
                 </div>
                 <div style={{ fontSize: 10.5, color: "var(--text-muted)", marginTop: 2 }}>Dominant: {c.dominant_emotion || "—"}</div>
+              </div>
+            )}
+            {c.video_analysis_status === "Completed" && c.video_analysis && !c.video_analysis.error && (
+              <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid var(--border)" }}>
+                <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", color: "var(--text-muted)", marginBottom: 4 }}>AI Interview Scores</div>
+                <div style={{ fontSize: 11, lineHeight: 1.7 }}>
+                  <div>Overall: <strong>{c.video_analysis.overall_score ?? "—"}</strong></div>
+                  <div>Communication: <strong>{c.video_analysis.communication_score ?? "—"}</strong></div>
+                  <div>Relevance: <strong>{c.video_analysis.relevance_score ?? "—"}</strong></div>
+                  <div>Confidence: <strong>{c.video_analysis.confidence_score ?? "—"}</strong></div>
+                </div>
               </div>
             )}
             {c.video_analysis_status === "Completed" && c.video_analysis && (
@@ -1159,21 +1313,25 @@ function CandidateRow({
             confirmed yet at that point); Phone/Video Interview are
             already past that gate just by being visible on their own
             page, so their next steps are offered unconditionally. */}
+        {/* Next Steps — Resume Screening offers all three: Phone Interview,
+            Video Interview, Screening Decision. Icons are the same lucide
+            icons already used for these stages elsewhere (sidebar,
+            column headers) — no extra emoji glyph layered on top of them. */}
         {mode === "resume" && (
           <td style={{ minWidth: 160 }}>
             {(shortlisted || c.status === "Qualified") ? (
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                <button className="tiq-btn tiq-btn-outline tiq-btn-sm"
+                <button className="tiq-btn tiq-btn-outline tiq-btn-sm" style={{ width: "100%", justifyContent: "flex-start", textAlign: "left" }}
                         onClick={() => navigate(`/app/phoneinterview?session=${sessionId}&candidate=${c.id}`)}>
-                  <Phone size={12} /> Telephone Interview
+                  <Phone size={14} strokeWidth={2.5} color={STAGE_ICON_COLOR.phone} /> Phone Interview
                 </button>
-                <button className="tiq-btn tiq-btn-outline tiq-btn-sm"
+                <button className="tiq-btn tiq-btn-outline tiq-btn-sm" style={{ width: "100%", justifyContent: "flex-start", textAlign: "left" }}
                         onClick={() => navigate(`/app/videointerview?session=${sessionId}&candidate=${c.id}`)}>
-                  <Video size={12} /> Video Interview
+                  <Video size={14} strokeWidth={2.5} color={STAGE_ICON_COLOR.video} /> Video Interview
                 </button>
-                <button className="tiq-btn tiq-btn-outline tiq-btn-sm"
+                <button className="tiq-btn tiq-btn-outline tiq-btn-sm" style={{ width: "100%", justifyContent: "flex-start", textAlign: "left" }}
                         onClick={() => navigate(`/app/finaldecision?session=${sessionId}&candidate=${c.id}`)}>
-                  <CheckCircle size={12} /> Final Decision
+                  <CheckCircle size={14} strokeWidth={2.5} color={STAGE_ICON_COLOR.decision} /> Screening Decision
                 </button>
               </div>
             ) : (
@@ -1228,20 +1386,20 @@ function CandidateRow({
           </td>
         )}
 
-        {/* Next Steps — Phone Interview's own version of the same
-            jump-straight-there pattern as Resume Screening's. Already
+        {/* Next Steps — Phone Interview offers Video Interview and
+            Screening Decision only (not a link back to itself). Already
             past the Qualified/shortlisted gate just by being on this
             page, so offered unconditionally. */}
         {mode === "phone" && (
-          <td style={{ minWidth: 150 }}>
+          <td style={{ minWidth: 160 }}>
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              <button className="tiq-btn tiq-btn-outline tiq-btn-sm"
+              <button className="tiq-btn tiq-btn-outline tiq-btn-sm" style={{ width: "100%", justifyContent: "flex-start", textAlign: "left" }}
                       onClick={() => navigate(`/app/videointerview?session=${sessionId}&candidate=${c.id}`)}>
-                <Video size={12} /> Video Interview
+                <Video size={14} strokeWidth={2.5} color={STAGE_ICON_COLOR.video} /> Video Interview
               </button>
-              <button className="tiq-btn tiq-btn-outline tiq-btn-sm"
+              <button className="tiq-btn tiq-btn-outline tiq-btn-sm" style={{ width: "100%", justifyContent: "flex-start", textAlign: "left" }}
                       onClick={() => navigate(`/app/finaldecision?session=${sessionId}&candidate=${c.id}`)}>
-                <CheckCircle size={12} /> Final Decision
+                <CheckCircle size={14} strokeWidth={2.5} color={STAGE_ICON_COLOR.decision} /> Screening Decision
               </button>
             </div>
           </td>
@@ -1304,14 +1462,13 @@ function CandidateRow({
           </td>
         )}
 
-        {/* Next Steps — Video Interview's own version; only Final
-            Decision makes sense from here, there's nothing further
-            after it in the pipeline. */}
+        {/* Next Steps — Video Interview offers Screening Decision only;
+            nothing further after it in the pipeline. */}
         {mode === "video" && (
-          <td style={{ minWidth: 140 }}>
-            <button className="tiq-btn tiq-btn-outline tiq-btn-sm"
+          <td style={{ minWidth: 150 }}>
+            <button className="tiq-btn tiq-btn-outline tiq-btn-sm" style={{ width: "100%", justifyContent: "flex-start", textAlign: "left" }}
                     onClick={() => navigate(`/app/finaldecision?session=${sessionId}&candidate=${c.id}`)}>
-              <CheckCircle size={12} /> Final Decision
+              <CheckCircle size={14} strokeWidth={2.5} color={STAGE_ICON_COLOR.decision} /> Screening Decision
             </button>
           </td>
         )}
@@ -1338,6 +1495,14 @@ function CandidateRow({
           shortlisted={shortlisted}
           onToggleShortlist={() => shortlistMut.mutate()}
           onClose={() => setShowDetailsModal(false)}
+        />
+      )}
+
+      {showVideoPlayer && (
+        <VideoPlayerModal
+          candidateId={c.id}
+          candidateName={c.name}
+          onClose={() => setShowVideoPlayer(false)}
         />
       )}
 
@@ -1495,33 +1660,22 @@ export default function JobLensWorkspace({ mode = "resume" }: { mode?: "resume" 
   const [jdFile, setJdFile] = useState<File | null>(null);
   const [cvFiles, setCvFiles] = useState<FileList | null>(null);
 
-  // New Analysis: optional sourcing from JD Management + Vendor Management,
+  // New Analysis: optional sourcing from Requisitions + Vendor Management,
   // additive to the original paste/upload flow (which stays default/unchanged).
-  const [jdSource, setJdSource] = useState<"upload" | "jdManagement">("upload");
-  const [selectedJdRecordId, setSelectedJdRecordId] = useState<number | "">("");
+  const [jdSource, setJdSource] = useState<"upload" | "requisition">("upload");
+  const [selectedRequisitionId, setSelectedRequisitionId] = useState<number | "">("");
   const [cvSource, setCvSource] = useState<"upload" | "vendor">("upload");
-  const [selectedVendorCandidateIds, setSelectedVendorCandidateIds] = useState<number[]>([]);
+  const [selectedApplicationIds, setSelectedApplicationIds] = useState<number[]>([]);
 
-  // Bulk "Send to New Analysis" from Profile Management — jumps to the New
-  // Analysis tab with the JD and candidates pre-selected, same underlying
-  // flow as manually picking "From Vendor Management" there.
-  const handleSendToNewAnalysis = (jdId: number, candidateIds: number[]) => {
-    setJdSource("jdManagement");
-    setSelectedJdRecordId(jdId);
-    setCvSource("vendor");
-    setSelectedVendorCandidateIds(candidateIds);
-    setTab("new");
-  };
-
-  const { data: jdOptions = [] } = useQuery({
-    queryKey: ["joblens-jd-options"],
-    queryFn: jobLensApi.jdOptions,
-    enabled: jdSource === "jdManagement",
+  const { data: requisitionOptions = [] } = useQuery({
+    queryKey: ["joblens-requisition-options"],
+    queryFn: jobLensApi.requisitionOptions,
+    enabled: jdSource === "requisition",
   });
-  const { data: vendorCandidateOptions = [] } = useQuery({
-    queryKey: ["joblens-vendor-candidates", selectedJdRecordId],
-    queryFn: () => jobLensApi.vendorCandidates(selectedJdRecordId as number),
-    enabled: cvSource === "vendor" && !!selectedJdRecordId,
+  const { data: requisitionCandidateOptions = [] } = useQuery({
+    queryKey: ["joblens-requisition-candidates", selectedRequisitionId],
+    queryFn: () => jobLensApi.requisitionCandidates(selectedRequisitionId as number),
+    enabled: cvSource === "vendor" && !!selectedRequisitionId,
   });
   const [lowT, setLowT] = useState(40);
   const [highT, setHighT] = useState(70);
@@ -1666,9 +1820,9 @@ export default function JobLensWorkspace({ mode = "resume" }: { mode?: "resume" 
       form.append("low_threshold", String(lowT));
       form.append("high_threshold", String(highT));
       if (jdSource === "upload" && jdFile) form.append("jd_file", jdFile);
-      if (jdSource === "jdManagement" && selectedJdRecordId) form.append("jd_record_id", String(selectedJdRecordId));
+      if (jdSource === "requisition" && selectedRequisitionId) form.append("requisition_id", String(selectedRequisitionId));
       if (cvSource === "upload" && cvFiles) for (let i = 0; i < cvFiles.length; i++) form.append("cv_files", cvFiles[i]);
-      if (cvSource === "vendor" && selectedVendorCandidateIds.length) form.append("source_candidate_ids", selectedVendorCandidateIds.join(","));
+      if (cvSource === "vendor" && selectedApplicationIds.length) form.append("source_application_ids", selectedApplicationIds.join(","));
       form.append("weights", JSON.stringify(clWeights));
       form.append("disqualifiers", JSON.stringify(clDisqualifiers));
       form.append("salary_budget_min", String(salaryMin));
@@ -1734,10 +1888,10 @@ export default function JobLensWorkspace({ mode = "resume" }: { mode?: "resume" 
   const finalPending     = candidates.length - finalShortlisted;
 
   const MODE_META = {
-    resume: { title: "Resume Screening", sub: "AI-ranked CVs — score, shortlist, and export candidates against a JD.", icon: Users },
-    phone:  { title: "Phone Interview",  sub: "AI-generated call questions and logged outcomes for Qualified/shortlisted candidates.", icon: Users },
-    video:  { title: "Video Interview",  sub: "Webcam interviews with live emotion analysis and AI-scored transcripts, for Qualified/shortlisted candidates.", icon: Video },
-    final:  { title: "Final Decision",   sub: "Resume, phone, and video interview scores side by side — make the final shortlist call.", icon: CheckCircle },
+    resume: { title: "Resume Screening", sub: "AI-ranked CVs — score, shortlist, and export candidates against a JD.", icon: Users, color: "#8b5cf6" },
+    phone:  { title: "Phone Interview",  sub: "AI-generated call questions and logged outcomes for Qualified/shortlisted candidates.", icon: Users, color: "#ec4899" },
+    video:  { title: "Video Interview",  sub: "Webcam interviews with live emotion analysis and AI-scored transcripts, for Qualified/shortlisted candidates.", icon: Video, color: "#00c7b7" },
+    final:  { title: "Screening Decision", sub: "Resume, phone, and video interview scores side by side — make the final shortlist call.", icon: CheckCircle, color: "#10b981" },
   } as const;
   const meta = MODE_META[mode];
 
@@ -1745,7 +1899,7 @@ export default function JobLensWorkspace({ mode = "resume" }: { mode?: "resume" 
     <div>
       <div className="tiq-page-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 8 }}>
         <h1 className="tiq-page-title" style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <meta.icon size={22} color="var(--violet-500)" /> {meta.title}
+          <meta.icon size={22} color={meta.color} /> {meta.title}
         </h1>
         <p className="tiq-page-sub">{meta.sub}</p>
       </div>
@@ -1802,24 +1956,29 @@ export default function JobLensWorkspace({ mode = "resume" }: { mode?: "resume" 
                   Paste / Upload
                 </label>
                 <label style={{ display: "flex", alignItems: "center", gap: 5, cursor: "pointer" }}>
-                  <input type="radio" checked={jdSource === "jdManagement"} onChange={() => setJdSource("jdManagement")} />
-                  From JD Management
+                  <input type="radio" checked={jdSource === "requisition"} onChange={() => setJdSource("requisition")} />
+                  From Requisitions
                 </label>
               </div>
 
-              {jdSource === "jdManagement" ? (
+              {jdSource === "requisition" ? (
                 <div className="tiq-form-group">
-                  <label className="tiq-label">Select JD</label>
-                  <select className="tiq-input" value={selectedJdRecordId}
-                    onChange={e => { setSelectedJdRecordId(e.target.value ? Number(e.target.value) : ""); setSelectedVendorCandidateIds([]); }}>
-                    <option value="">Select a JD…</option>
-                    {jdOptions.map((j: any) => (
-                      <option key={j.id} value={j.id}>{j.jd_title} — {j.client_name || "No client"}</option>
+                  <label className="tiq-label">Select Requisition</label>
+                  <select className="tiq-input" value={selectedRequisitionId}
+                    onChange={e => { setSelectedRequisitionId(e.target.value ? Number(e.target.value) : ""); setSelectedApplicationIds([]); }}>
+                    <option value="">Select a requisition…</option>
+                    {requisitionOptions.map((j: any) => (
+                      <option key={j.id} value={j.id}>{j.title} — {j.client_name || "No client"}</option>
                     ))}
                   </select>
-                  {jdOptions.length === 0 && (
+                  {requisitionOptions.length === 0 && (
                     <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 6 }}>
-                      No JDs yet — create one in the JD Management tab first.
+                      No open requisitions yet — create one on the Requisitions page first.
+                    </div>
+                  )}
+                  {selectedRequisitionId && !requisitionOptions.find((j: any) => j.id === selectedRequisitionId)?.has_jd && (
+                    <div style={{ fontSize: 11, color: "var(--amber-500, #f59e0b)", marginTop: 6 }}>
+                      This requisition has no JD attached yet — attach one on the Requisitions page before running analysis.
                     </div>
                   )}
                 </div>
@@ -1874,47 +2033,47 @@ export default function JobLensWorkspace({ mode = "resume" }: { mode?: "resume" 
                 </label>
                 <label style={{ display: "flex", alignItems: "center", gap: 5, cursor: "pointer" }}>
                   <input type="radio" checked={cvSource === "vendor"}
-                    onChange={() => { setCvSource("vendor"); setJdSource("jdManagement"); }} />
+                    onChange={() => { setCvSource("vendor"); setJdSource("requisition"); }} />
                   From Candidate Table
                 </label>
               </div>
 
               {cvSource === "vendor" ? (
                 <div style={{ marginBottom: 16 }}>
-                  {!selectedJdRecordId ? (
+                  {!selectedRequisitionId ? (
                     <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Select a JD from the dropdown on the left to load its candidates.</div>
-                  ) : vendorCandidateOptions.length === 0 ? (
-                    <div style={{ fontSize: 12, color: "var(--text-muted)" }}>No open profiles for this JD — everyone submitted has already been shortlisted, selected, or offered.</div>
+                  ) : requisitionCandidateOptions.length === 0 ? (
+                    <div style={{ fontSize: 12, color: "var(--text-muted)" }}>No candidates submitted for this requisition yet.</div>
                   ) : (
                     <>
                       <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 8 }}>
-                        Showing profiles not yet shortlisted, selected, or offered — check the header box to select all.
+                        Showing candidates submitted for this requisition — check the header box to select all.
                       </div>
                       <div className="tiq-card" style={{ padding: 0, marginBottom: 8 }}>
                         <DataTable
-                          columns={["Name", "Vendor", "Status", "Resume"]}
-                          rows={vendorCandidateOptions.map((vc: any) => ({
+                          columns={["Name", "Email", "Status", "Resume"]}
+                          rows={requisitionCandidateOptions.map((vc: any) => ({
                             id: vc.id,
                             "Name": vc.name,
-                            "Vendor": vc.vendor_name || "—",
+                            "Email": vc.email || "—",
                             "Status": vc.status,
                             "Resume": vc.has_resume ? "Available" : "Missing",
                             _raw: vc,
                           }))}
                           getRowKey={(row) => row.id}
                           selectable
-                          selectedKeys={selectedVendorCandidateIds}
-                          onSelectionChange={(keys) => setSelectedVendorCandidateIds(
-                            (keys as number[]).filter(id => vendorCandidateOptions.find((vc: any) => vc.id === id)?.has_resume)
+                          selectedKeys={selectedApplicationIds}
+                          onSelectionChange={(keys) => setSelectedApplicationIds(
+                            (keys as number[]).filter(id => requisitionCandidateOptions.find((vc: any) => vc.id === id)?.has_resume)
                           )}
-                          emptyMessage="No profiles"
+                          emptyMessage="No candidates"
                         />
                       </div>
                     </>
                   )}
-                  {selectedVendorCandidateIds.length > 0 && (
+                  {selectedApplicationIds.length > 0 && (
                     <div style={{ fontSize: 12, color: "var(--teal-500)", fontWeight: 600 }}>
-                      {selectedVendorCandidateIds.length} candidate{selectedVendorCandidateIds.length > 1 ? "s" : ""} selected
+                      {selectedApplicationIds.length} candidate{selectedApplicationIds.length > 1 ? "s" : ""} selected
                     </div>
                   )}
                 </div>
@@ -1977,8 +2136,8 @@ export default function JobLensWorkspace({ mode = "resume" }: { mode?: "resume" 
               onClick={() => runMut.mutate()}
               disabled={
                 runState.status === "pending" ||
-                (jdSource === "upload" ? (!jdText.trim() && !jdFile) : !selectedJdRecordId) ||
-                (cvSource === "upload" ? !cvFiles?.length : selectedVendorCandidateIds.length === 0)
+                (jdSource === "upload" ? (!jdText.trim() && !jdFile) : !selectedRequisitionId) ||
+                (cvSource === "upload" ? !cvFiles?.length : selectedApplicationIds.length === 0)
               }>
               {runState.status === "pending"
                 ? <><span className="tiq-spinner" style={{ width: 16, height: 16, borderWidth: 2 }} /> Analysing CVs…</>

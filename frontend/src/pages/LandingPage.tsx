@@ -504,7 +504,7 @@ export default function LandingPage() {
       {/* ── FOOTER ── */}
       <footer style={{ background: "#0f172a", color: "white", padding: "56px 5% 32px" }}>
         <div style={{ maxWidth: 1100, margin: "0 auto" }}>
-          <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr", gap: 40, marginBottom: 48 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr 1fr", gap: 40, marginBottom: 48 }}>
             <div>
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
                 <div style={{ width: 30, height: 30, borderRadius: 8, background: "#5ee8db", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 2px 8px rgba(0,199,183,.35)" }}>
@@ -549,10 +549,25 @@ export default function LandingPage() {
                 <div key={t} style={{ fontSize: 13, color: "#475569", marginBottom: 10 }}>{t}</div>
               ))}
             </div>
+            <div>
+              <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "1px", color: "#475569", marginBottom: 16 }}>Legal Centre</div>
+              {[["Terms of Use", "/terms"], ["Privacy Policy", "/privacy"], ["Data Security", "/data-security"]].map(([label, to]) => (
+                <Link key={label} to={to} style={{ display: "block", fontSize: 13, color: "#64748b", textDecoration: "none", marginBottom: 10 }}
+                  onMouseEnter={e => (e.currentTarget.style.color = "white")}
+                  onMouseLeave={e => (e.currentTarget.style.color = "#64748b")}>
+                  {label}
+                </Link>
+              ))}
+            </div>
           </div>
-          <div style={{ borderTop: "1px solid #1e293b", paddingTop: 24, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div style={{ borderTop: "1px solid #1e293b", paddingTop: 24, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12 }}>
             <div style={{ fontSize: 12, color: "#475569" }}>© {new Date().getFullYear()} TalentIQ Platform. All rights reserved.</div>
-            <div style={{ fontSize: 12, color: "#475569" }}>Built with LangChain · Playwright </div>
+            <div style={{ display: "flex", gap: 18, alignItems: "center" }}>
+              <Link to="/terms" style={{ fontSize: 12, color: "#475569", textDecoration: "none" }}>Terms of Use</Link>
+              <Link to="/privacy" style={{ fontSize: 12, color: "#475569", textDecoration: "none" }}>Privacy Policy</Link>
+              <Link to="/data-security" style={{ fontSize: 12, color: "#475569", textDecoration: "none" }}>Data Security</Link>
+              <div style={{ fontSize: 12, color: "#475569" }}>Built with LangChain · Playwright</div>
+            </div>
           </div>
         </div>
       </footer>

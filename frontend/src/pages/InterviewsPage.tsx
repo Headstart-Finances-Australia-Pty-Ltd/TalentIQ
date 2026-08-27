@@ -59,7 +59,7 @@ const emptyForm = {
   approver_name: "", approver_email: "",
 };
 
-export default function InterviewsPage() {
+export default function InterviewsPage({ embedded = false }: { embedded?: boolean } = {}) {
   const [interviews, setInterviews] = useState<any[]>([]);
   const [candidates, setCandidates] = useState<any[]>([]);
   const [requisitions, setRequisitions] = useState<any[]>([]);
@@ -417,17 +417,26 @@ export default function InterviewsPage() {
 
   return (
     <div className="tiq-content">
-      <div className="tiq-page-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
-        <div>
-          <div className="tiq-page-title">Interviews</div>
-          <div className="tiq-page-sub">From "let's interview them" to a recorded decision.</div>
+      {!embedded && (
+        <div className="tiq-page-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
+          <div>
+            <div className="tiq-page-title">Interviews</div>
+            <div className="tiq-page-sub">From "let's interview them" to a recorded decision.</div>
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button className="tiq-btn tiq-btn-primary tiq-btn-sm" onClick={openAdd}>
+              <Plus size={14} /> Schedule Interview
+            </button>
+          </div>
         </div>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+      )}
+      {embedded && (
+        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}>
           <button className="tiq-btn tiq-btn-primary tiq-btn-sm" onClick={openAdd}>
             <Plus size={14} /> Schedule Interview
           </button>
         </div>
-      </div>
+      )}
 
       <div style={{ display: "flex", gap: 8, marginTop: 16, marginBottom: 16, flexWrap: "wrap", alignItems: "center" }}>
         <button className={`tiq-btn tiq-btn-sm ${statusFilter === "" ? "tiq-btn-primary" : "tiq-btn-outline"}`} onClick={() => setStatusFilter("")}>All</button>

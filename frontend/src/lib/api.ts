@@ -120,6 +120,25 @@ export const requisitionApi = {
     api.put(`/api/requisitions/requisitions/${id}/checklist`, data).then((r) => r.data),
   generateHmViewLink: (id: number) => api.post(`/api/requisitions/requisitions/${id}/hm-view-link`).then((r) => r.data),
 
+  uploadJdFile: (id: number, file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return api.post(`/api/requisitions/requisitions/${id}/jd-file`, form, {
+      headers: { "Content-Type": "multipart/form-data" },
+    }).then((r) => r.data);
+  },
+  jdFileUrl: (id: number) => `/api/requisitions/requisitions/${id}/jd-file`,
+  deleteJdFile: (id: number) => api.delete(`/api/requisitions/requisitions/${id}/jd-file`).then((r) => r.data),
+  bulkUploadJdFiles: (files: File[], overrides?: Record<string, number>) => {
+    const form = new FormData();
+    files.forEach((f) => form.append("files", f));
+    if (overrides && Object.keys(overrides).length) form.append("overrides", JSON.stringify(overrides));
+    return api.post("/api/requisitions/requisitions/jd-files/bulk", form, {
+      headers: { "Content-Type": "multipart/form-data" },
+      timeout: 120_000,
+    }).then((r) => r.data);
+  },
+
   listContacts: (client_id?: number) =>
     api.get("/api/requisitions/client-contacts", { params: client_id ? { client_id } : {} }).then((r) => r.data),
   createContact: (data: any) => api.post("/api/requisitions/client-contacts", data).then((r) => r.data),
@@ -132,6 +151,13 @@ export const publicRequisitionApi = {
 };
 
 // ── Capability: Interviews (Phase 4) ──
+// ── CandidateLens interview settings (Admin Console) — answer time per
+// question + TTS voice, shared platform-wide. Kept separate from
+// interviewApi above (that's the unrelated Interview Scheduling capability).
+export const candidateLensSettingsApi = {
+  get: () => api.get("/api/joblens/interview-settings").then((r) => r.data),
+};
+
 export const interviewApi = {
   list: (params?: { candidate_id?: number; requisition_id?: number; status?: string; upcoming_only?: boolean }) =>
     api.get("/api/interviews/interviews", { params }).then((r) => r.data),
@@ -228,6 +254,32 @@ export const pipelineApi = {
   changePlacementStatus: (id: number, status: string, fell_through_reason = "") =>
     api.post(`/api/pipeline/placements/${id}/status`, { status, fell_through_reason }).then((r) => r.data),
   deletePlacement: (id: number) => api.delete(`/api/pipeline/placements/${id}`).then((r) => r.data),
+};
+
+// ── Capability: Onboarding (Phase 5, alongside Pipeline & Offers) ──
+export const onboardingApi = {
+  listPlacements: () => api.get("/api/onboarding/placements").then((r) => r.data),
+  listTasks: (placementId: number) => api.get("/api/onboarding/tasks", { params: { placement_id: placementId } }).then((r) => r.data),
+  createTask: (data: { placement_id: number; title: string; category?: string; due_date?: string; assigned_to?: string; notes?: string }) =>
+    api.post("/api/onboarding/tasks", data).then((r) => r.data),
+  updateTask: (id: number, data: any) => api.put(`/api/onboarding/tasks/${id}`, data).then((r) => r.data),
+  deleteTask: (id: number) => api.delete(`/api/onboarding/tasks/${id}`).then((r) => r.data),
+
+  // Reference Checks — one row per referee, per placement. mode is
+  // "Online" (typed up directly / referee self-submitted) or "Offline"
+  // (a scanned/emailed paper form, stored via uploadReferenceCheckForm).
+  referenceCheckOptions: () => api.get("/api/onboarding/reference-check-options").then((r) => r.data),
+  listReferenceChecks: (placementId: number) => api.get("/api/onboarding/reference-checks", { params: { placement_id: placementId } }).then((r) => r.data),
+  createReferenceCheck: (data: any) => api.post("/api/onboarding/reference-checks", data).then((r) => r.data),
+  updateReferenceCheck: (id: number, data: any) => api.put(`/api/onboarding/reference-checks/${id}`, data).then((r) => r.data),
+  deleteReferenceCheck: (id: number) => api.delete(`/api/onboarding/reference-checks/${id}`).then((r) => r.data),
+  uploadReferenceCheckForm: (id: number, file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return api.post(`/api/onboarding/reference-checks/${id}/form`, form, { headers: { "Content-Type": "multipart/form-data" } }).then((r) => r.data);
+  },
+  referenceCheckFormUrl: (id: number) => `/api/onboarding/reference-checks/${id}/form`,
+  deleteReferenceCheckForm: (id: number) => api.delete(`/api/onboarding/reference-checks/${id}/form`).then((r) => r.data),
 };
 
 // ── Capability: Partners (Phase 6) ──
