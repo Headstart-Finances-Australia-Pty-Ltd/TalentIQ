@@ -27,7 +27,7 @@ kept unchanged).
   - Sales/BD CRM (leads, opportunities) — explicitly out of scope.
 """
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, ForeignKey, LargeBinary
 from sqlalchemy.orm import relationship
 
 from db.database import Base
@@ -59,6 +59,16 @@ class Requisition(Base):
     jd_record_id       = Column(Integer, ForeignKey("tiq_jd_records.id"), index=True, nullable=True)  # bridge into existing JD Creator/Management
 
     title              = Column(String(300), nullable=False)
+    # Job description document attached directly to this requisition — a
+    # recruiter can attach a JD (Text/Word/PDF) right when raising the
+    # requisition, without first creating a separate JD Management record.
+    # Independent of jd_record_id above: a requisition can have either,
+    # both, or neither. Resume Screening's "From Requisitions" JD source
+    # prefers this file when present (see routers/joblens.py), falling
+    # back to the linked jd_record_id's description otherwise.
+    jd_file_blob       = Column(LargeBinary)
+    jd_file_filename   = Column(String(300))
+    jd_file_mimetype   = Column(String(100))
     status             = Column(String(30), default="Draft")  # see REQUISITION_STATUSES
     priority           = Column(String(20), default="Normal")  # see REQUISITION_PRIORITIES
     vacancy_count      = Column(Integer, default=1)

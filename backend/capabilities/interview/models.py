@@ -106,7 +106,22 @@ class Interview(Base):
     owner_user_id    = Column(Integer, ForeignKey("tiq_users.id"), index=True, nullable=True)  # recruiter who scheduled it
     sequence_number  = Column(Integer)  # per-organisation display number, same pattern as elsewhere
 
-    candidate_id     = Column(Integer, ForeignKey("tiq_candidates.id"), index=True, nullable=False)
+    candidate_id     = Column(Integer, ForeignKey("tiq_candidates.id"), index=True, nullable=True)
+    # Alternative to candidate_id, for an interview logged against a
+    # candidate from the older, separate CandidateLens/JobLens system
+    # (tiq_joblens_candidates) rather than the Talent Pool Candidate
+    # table -- Video Interview's "Send Interview Invite" and Phone
+    # Interview's "Candidate reached by phone" both create a row here
+    # via that path (see routers/joblens.py's mark_contacted /
+    # mark_phone_contacted) so those actions show up in Interview
+    # Scheduling too, without requiring a JobLens candidate to already
+    # have a matching Talent Pool Candidate record. Exactly one of
+    # candidate_id / joblens_candidate_id is set, never both, never
+    # neither -- enforced in application code (create_interview requires
+    # candidate_id; the JobLens-originated creation path sets only
+    # joblens_candidate_id), not a DB constraint, to avoid a migration
+    # headache over rows that predate this column.
+    joblens_candidate_id = Column(Integer, ForeignKey("tiq_joblens_candidates.id"), index=True, nullable=True)
     # Optional — a candidate can be interviewed before a requisition is
     # formally open, or for a general talent-pool conversation not tied
     # to one specific role yet.

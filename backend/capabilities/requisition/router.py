@@ -7,11 +7,11 @@ useful; it just needs Phase 0 (Application FK target) which is already in
 place. Registered in main.py as: /api/requisitions/*
 """
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 import csv
 import io
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
@@ -96,6 +96,8 @@ def _fmt_batch(r: Requisition, client_name: str, jd_title: str, application_coun
         "client_name": client_name,
         "jd_record_id": r.jd_record_id,
         "jd_title": jd_title,
+        "has_jd_file": bool(r.jd_file_blob),
+        "jd_file_filename": r.jd_file_filename or "",
         "hiring_manager_contact_id": r.hiring_manager_contact_id,
         "hiring_manager_name": r.hiring_manager_name or "",
         "hiring_manager_email": r.hiring_manager_email or "",
@@ -338,6 +340,173 @@ async def update_requisition(req_id: int, payload: RequisitionUpdate, current_us
     await db.commit()
     await db.refresh(r)
     return await _fmt(db, r)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# JD DOCUMENT — Text / Word / PDF, attached directly to the requisition
+# ══════════════════════════════════════════════════════════════════════════
+
+@router.post("/requisitions/{req_id}/jd-file")
+async def upload_requisition_jd_file(
+    req_id: int, file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    org = await _org(db, current_user)
+    r = (await db.execute(select(Requisition).where(Requisition.id == req_id, Requisition.organisation_id == org.id))).scalar_one_or_none()
+    if not r:
+        raise HTTPException(404, "Requisition not found")
+    fname = (file.filename or "").lower()
+    if not fname.endswith((".txt", ".pdf", ".doc", ".docx")):
+        raise HTTPException(400, "JD file must be a .txt, .pdf, .doc, or .docx file.")
+    content = await file.read()
+    if not content:
+        raise HTTPException(400, "The uploaded file is empty.")
+    r.jd_file_blob = content
+    r.jd_file_filename = file.filename
+    r.jd_file_mimetype = file.content_type or "application/octet-stream"
+    r.updated_at = datetime.utcnow()
+    await db.commit()
+    await db.refresh(r)
+    return await _fmt(db, r)
+
+
+@router.get("/requisitions/{req_id}/jd-file")
+async def download_requisition_jd_file(
+    req_id: int, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    from fastapi.responses import Response
+    org = await _org(db, current_user)
+    r = (await db.execute(select(Requisition).where(Requisition.id == req_id, Requisition.organisation_id == org.id))).scalar_one_or_none()
+    if not r:
+        raise HTTPException(404, "Requisition not found")
+    if not r.jd_file_blob:
+        raise HTTPException(404, "No JD file attached to this requisition.")
+    return Response(
+        content=r.jd_file_blob,
+        media_type=r.jd_file_mimetype or "application/octet-stream",
+        headers={"Content-Disposition": f'inline; filename="{r.jd_file_filename or "jd"}"'},
+    )
+
+
+@router.delete("/requisitions/{req_id}/jd-file")
+async def delete_requisition_jd_file(
+    req_id: int, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    org = await _org(db, current_user)
+    r = (await db.execute(select(Requisition).where(Requisition.id == req_id, Requisition.organisation_id == org.id))).scalar_one_or_none()
+    if not r:
+        raise HTTPException(404, "Requisition not found")
+    r.jd_file_blob = None
+    r.jd_file_filename = None
+    r.jd_file_mimetype = None
+    r.updated_at = datetime.utcnow()
+    await db.commit()
+    return {"deleted": True}
+
+
+def _normalize_jd_name(name: str) -> str:
+    """Turns a filename (or a requisition title) into a comparable key:
+    strips the extension and a trailing 'JD'/'job description' marker,
+    replaces separators with spaces, lowercases, and collapses
+    whitespace — so 'Senior_Backend_Engineer_JD.docx',
+    'Senior Backend Engineer - JD.pdf', and the requisition title
+    'Senior Backend Engineer' all normalize to the same key."""
+    import re
+    stem = re.sub(r"\.(docx?|pdf|txt)$", "", name.strip(), flags=re.IGNORECASE)
+    stem = re.sub(r"[\s_\-]+(jd|job\s*description)$", "", stem.strip(), flags=re.IGNORECASE)
+    stem = re.sub(r"[_\-]+", " ", stem)
+    stem = re.sub(r"[^a-z0-9 ]", "", stem.lower())
+    stem = re.sub(r"\s+", " ", stem).strip()
+    return stem
+
+
+@router.post("/requisitions/jd-files/bulk")
+async def bulk_upload_requisition_jd_files(
+    files: List[UploadFile] = File(...),
+    # JSON object mapping a file's ORIGINAL filename -> requisition id, for
+    # files the automatic title match couldn't resolve (no match, or more
+    # than one requisition shares that title). Sent on a second call once
+    # the person has picked the right requisition for each leftover file
+    # in the review step — see the 'unmatched' list this endpoint returns.
+    overrides: Optional[str] = Form(None),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Bulk JD import: upload many Text/Word/PDF files at once and attach
+    each one to the requisition whose TITLE matches the file name (e.g.
+    'Senior_Backend_Engineer_JD.docx' -> requisition titled
+    'Senior Backend Engineer'). Files that can't be matched automatically
+    (no title matches, or several requisitions share that title) are
+    returned under 'unmatched' along with every requisition in the org, so
+    the caller can re-submit just those files with an explicit
+    filename -> requisition_id mapping in 'overrides'."""
+    import json as _json
+    org = await _org(db, current_user)
+
+    try:
+        override_map: dict = _json.loads(overrides) if overrides else {}
+    except _json.JSONDecodeError:
+        raise HTTPException(400, "overrides must be a valid JSON object mapping filename -> requisition_id")
+
+    all_reqs = (await db.execute(select(Requisition).where(Requisition.organisation_id == org.id))).scalars().all()
+    by_id = {r.id: r for r in all_reqs}
+    title_index: dict = {}
+    for r in all_reqs:
+        title_index.setdefault(_normalize_jd_name(r.title), []).append(r)
+
+    attached, skipped, unmatched = [], [], []
+
+    for f in files:
+        fname = f.filename or ""
+        if not fname.lower().endswith((".txt", ".pdf", ".doc", ".docx")):
+            skipped.append({"filename": fname, "reason": "Not a .txt, .pdf, .doc, or .docx file — skipped."})
+            continue
+        content = await f.read()
+        if not content:
+            skipped.append({"filename": fname, "reason": "File is empty — skipped."})
+            continue
+
+        target: Optional[Requisition] = None
+        if fname in override_map:
+            target = by_id.get(int(override_map[fname]))
+            if not target:
+                skipped.append({"filename": fname, "reason": "Selected requisition not found."})
+                continue
+        else:
+            matches = title_index.get(_normalize_jd_name(fname), [])
+            if len(matches) == 1:
+                target = matches[0]
+            elif len(matches) == 0:
+                unmatched.append({"filename": fname, "reason": f"No requisition titled like '{fname}' was found."})
+                continue
+            else:
+                unmatched.append({
+                    "filename": fname,
+                    "reason": f"{len(matches)} requisitions share that title — pick the right one.",
+                    "candidate_ids": [r.id for r in matches],
+                })
+                continue
+
+        target.jd_file_blob = content
+        target.jd_file_filename = fname
+        target.jd_file_mimetype = f.content_type or "application/octet-stream"
+        target.updated_at = datetime.utcnow()
+        attached.append({"filename": fname, "requisition_id": target.id, "title": target.title})
+
+    await db.commit()
+
+    return {
+        "attached": attached,
+        "unmatched": unmatched,
+        "skipped": skipped,
+        # Only sent back when there's something to resolve — lets the
+        # frontend render a "choose the requisition" dropdown per
+        # unmatched file without a separate round trip.
+        "requisition_options": (
+            [{"id": r.id, "title": r.title} for r in sorted(all_reqs, key=lambda r: r.title)]
+            if unmatched else []
+        ),
+    }
 
 
 async def _blocking_requisition_refs(db: AsyncSession, requisition_id: int) -> str:

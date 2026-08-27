@@ -78,6 +78,11 @@ async def create_placement_from_offer(db: AsyncSession, offer: Offer, guarantee_
     )
     db.add(placement)
     await db.flush()
+    # Onboarding checklist appears the moment the Placement does, not
+    # only once someone remembers to open the Onboarding tab for this
+    # hire — see capabilities/onboarding/service.py.
+    from capabilities.onboarding.service import seed_default_tasks
+    await seed_default_tasks(db, offer.organisation_id, placement.id)
     return placement
 
 

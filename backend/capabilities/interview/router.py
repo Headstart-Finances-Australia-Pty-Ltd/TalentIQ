@@ -38,9 +38,18 @@ async def _org(db: AsyncSession, user: User):
     return await acquisition_service.get_or_create_default_organisation(db, user)
 
 
-async def _candidate_name(db: AsyncSession, candidate_id: int) -> str:
-    c = (await db.execute(select(Candidate).where(Candidate.id == candidate_id))).scalar_one_or_none()
-    return c.full_name if c else ""
+async def _candidate_name(db: AsyncSession, candidate_id: Optional[int], joblens_candidate_id: Optional[int] = None) -> str:
+    if candidate_id:
+        c = (await db.execute(select(Candidate).where(Candidate.id == candidate_id))).scalar_one_or_none()
+        return c.full_name if c else ""
+    if joblens_candidate_id:
+        # JobLens-originated interview (Video Interview's "Send Interview
+        # Invite" / Phone Interview's "Candidate reached by phone") — see
+        # Interview.joblens_candidate_id's docstring.
+        from models.models import JobLensCandidate
+        jc = (await db.execute(select(JobLensCandidate).where(JobLensCandidate.id == joblens_candidate_id))).scalar_one_or_none()
+        return jc.name if jc else ""
+    return ""
 
 
 async def _requisition_title(db: AsyncSession, requisition_id: Optional[int]) -> str:
@@ -85,6 +94,7 @@ def _fmt_interview(
         "id": i.id,
         "sequence_number": i.sequence_number,
         "candidate_id": i.candidate_id,
+        "joblens_candidate_id": i.joblens_candidate_id,
         "candidate_name": candidate_name,
         "requisition_id": i.requisition_id,
         "requisition_title": requisition_title,
@@ -260,7 +270,8 @@ async def list_interviews(
     # instead of one query per row (see acquisition/requisition routers'
     # docstrings for why this matters at scale — same N+1 pattern, fixed
     # the same way from the start here).
-    candidate_ids = {i.candidate_id for i in rows}
+    candidate_ids = {i.candidate_id for i in rows if i.candidate_id}
+    joblens_candidate_ids = {i.joblens_candidate_id for i in rows if i.joblens_candidate_id}
     requisition_ids = {i.requisition_id for i in rows if i.requisition_id}
     interview_ids = [i.id for i in rows]
 
@@ -268,6 +279,17 @@ async def list_interviews(
     if candidate_ids:
         res = await db.execute(select(Candidate.id, Candidate.full_name).where(Candidate.id.in_(candidate_ids)))
         candidate_names = dict(res.all())
+
+    # JobLens-originated rows (see Interview.joblens_candidate_id) need
+    # their own batch lookup against a different table entirely — a
+    # candidate_id-only lookup silently left these blank, since None was
+    # never a key in candidate_names.
+    if joblens_candidate_ids:
+        from models.models import JobLensCandidate
+        res = await db.execute(select(JobLensCandidate.id, JobLensCandidate.name).where(JobLensCandidate.id.in_(joblens_candidate_ids)))
+        joblens_candidate_names = dict(res.all())
+    else:
+        joblens_candidate_names = {}
 
     requisition_titles = {}
     if requisition_ids:
@@ -285,7 +307,8 @@ async def list_interviews(
 
     out = []
     for i in rows:
-        d = _fmt_interview(i, candidate_names.get(i.candidate_id, ""), requisition_titles.get(i.requisition_id, "") if i.requisition_id else "")
+        name = candidate_names.get(i.candidate_id, "") if i.candidate_id else joblens_candidate_names.get(i.joblens_candidate_id, "")
+        d = _fmt_interview(i, name, requisition_titles.get(i.requisition_id, "") if i.requisition_id else "")
         d["scorecard_count"] = scorecard_counts.get(i.id, 0)
         d.pop("scorecards", None)
         out.append(d)
@@ -301,7 +324,7 @@ async def get_interview(interview_id: int, current_user: User = Depends(get_curr
     scorecards = (await db.execute(select(InterviewScorecard).where(InterviewScorecard.interview_id == i.id))).scalars().all()
     links = (await db.execute(select(InterviewFeedbackLink).where(InterviewFeedbackLink.interview_id == i.id))).scalars().all()
     return _fmt_interview(
-        i, await _candidate_name(db, i.candidate_id), await _requisition_title(db, i.requisition_id),
+        i, await _candidate_name(db, i.candidate_id, i.joblens_candidate_id), await _requisition_title(db, i.requisition_id),
         [_fmt_scorecard(s) for s in scorecards], links,
     )
 
@@ -346,7 +369,7 @@ async def approve_interview_inapp(interview_id: int, current_user: User = Depend
     i.updated_at = datetime.utcnow()
     await db.commit()
     await db.refresh(i)
-    return _fmt_interview(i, await _candidate_name(db, i.candidate_id), await _requisition_title(db, i.requisition_id))
+    return _fmt_interview(i, await _candidate_name(db, i.candidate_id, i.joblens_candidate_id), await _requisition_title(db, i.requisition_id))
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -381,7 +404,7 @@ async def set_decision(
     await db.refresh(i)
     await _apply_decision_side_effects(db, org.id, i, payload.decision, current_user.id)
     await db.refresh(i)
-    return _fmt_interview(i, await _candidate_name(db, i.candidate_id), await _requisition_title(db, i.requisition_id))
+    return _fmt_interview(i, await _candidate_name(db, i.candidate_id, i.joblens_candidate_id), await _requisition_title(db, i.requisition_id))
 
 
 @router.put("/interviews/{interview_id}")
@@ -413,7 +436,7 @@ async def update_interview(
     if new_interviewers is not None:
         await service.sync_feedback_links(db, i, new_interviewers)
         await db.commit()
-    return _fmt_interview(i, await _candidate_name(db, i.candidate_id), await _requisition_title(db, i.requisition_id))
+    return _fmt_interview(i, await _candidate_name(db, i.candidate_id, i.joblens_candidate_id), await _requisition_title(db, i.requisition_id))
 
 
 @router.post("/interviews/{interview_id}/status")
@@ -456,7 +479,7 @@ async def change_interview_status(
         )
         await db.commit()
 
-    return _fmt_interview(i, await _candidate_name(db, i.candidate_id), await _requisition_title(db, i.requisition_id))
+    return _fmt_interview(i, await _candidate_name(db, i.candidate_id, i.joblens_candidate_id), await _requisition_title(db, i.requisition_id))
 
 
 @router.delete("/interviews/{interview_id}")

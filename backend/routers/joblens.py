@@ -21,9 +21,9 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks, Request
 from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -59,6 +59,84 @@ async def list_jd_options(
             if client:
                 client_name = client.name
         out.append({"id": jd.id, "jd_title": jd.title, "client_name": client_name, "status": jd.status})
+    return out
+
+
+@router.get("/requisition-options")
+async def list_requisition_options(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Open Requisitions for the 'New Analysis' Requisition-selection
+    dropdown. Replaces the old JD Management-only source: once a
+    requisition is picked, its JD (own attached file first, else the
+    linked JD Management record) and its submitted candidates are pulled
+    from the database automatically — see /run and /requisition-candidates."""
+    from capabilities.requisition.models import Requisition
+    from capabilities.acquisition import service as acquisition_service
+    from models.models import Client as ClientModel
+    org = await acquisition_service.get_or_create_default_organisation(db, current_user)
+    r = await db.execute(
+        select(Requisition).where(Requisition.organisation_id == org.id, Requisition.status == "Open")
+        .order_by(Requisition.created_at.desc())
+    )
+    reqs = r.scalars().all()
+    out = []
+    for req in reqs:
+        client_name = ""
+        if req.client_id:
+            cr = await db.execute(select(ClientModel).where(ClientModel.id == req.client_id))
+            client = cr.scalar_one_or_none()
+            if client:
+                client_name = client.name
+        out.append({
+            "id": req.id,
+            "title": req.title,
+            "client_name": client_name,
+            "has_jd_file": bool(req.jd_file_blob),
+            "has_jd_record": bool(req.jd_record_id),
+            "has_jd": bool(req.jd_file_blob or req.jd_record_id),
+        })
+    return out
+
+
+@router.get("/requisition-candidates")
+async def list_requisition_candidates(
+    requisition_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Candidates actually SUBMITTED for this requisition — i.e. Application
+    rows (Candidate <-> Requisition), not the older Vendor Management /
+    JD Management TrackedCandidate flow. Resumes come from the Candidate
+    Master's own resume_blob (the same file used everywhere else that
+    candidate is referenced), so 'has_resume' below reflects what /run
+    will actually be able to score."""
+    from capabilities.requisition.models import Requisition
+    from capabilities.acquisition.models import Application, Candidate
+    from capabilities.acquisition import service as acquisition_service
+    org = await acquisition_service.get_or_create_default_organisation(db, current_user)
+    req = (await db.execute(
+        select(Requisition).where(Requisition.id == requisition_id, Requisition.organisation_id == org.id)
+    )).scalar_one_or_none()
+    if not req:
+        raise HTTPException(404, "Requisition not found")
+
+    r = await db.execute(
+        select(Application, Candidate)
+        .join(Candidate, Candidate.id == Application.candidate_id)
+        .where(Application.requisition_id == requisition_id, Application.organisation_id == org.id)
+        .order_by(Application.applied_at.desc())
+    )
+    out = []
+    for application, candidate in r.all():
+        out.append({
+            "id": application.id,
+            "name": candidate.full_name,
+            "email": candidate.email or "",
+            "status": application.stage,
+            "has_resume": bool(candidate.resume_blob),
+        })
     return out
 
 
@@ -910,6 +988,8 @@ async def run_joblens(
     cv_files: List[UploadFile] = File(default=[]),
     jd_record_id: Optional[int] = Form(None),          # NEW: pull JD from JD Management instead of text/file
     source_candidate_ids: str = Form(""),               # NEW: comma-separated TrackedCandidate ids from Vendor Management
+    requisition_id: Optional[int] = Form(None),          # NEW: pull JD + submitted candidates from a Requisition
+    source_application_ids: str = Form(""),              # NEW: comma-separated Application ids submitted for that requisition
     # ── Dual-track scoring: logistics constraints + dynamic weights ─────
     # If jd_record_id is set AND that JD Management record already has
     # logistics constraints saved, those take precedence (single source of
@@ -937,10 +1017,50 @@ async def run_joblens(
         raise HTTPException(400, "disqualifiers must be a valid JSON object")
     session_weights = merge_weights(weight_overrides)
     session_disqualifiers = merge_disqualifiers(disqualifier_overrides)
+
+    # ── Requisition source: resolves requisition_id into whichever of
+    # jd_record_id / a direct JD file it carries, so everything below
+    # (skills extraction, logistics constraints, candidate sourcing) can
+    # keep working off the existing jd_record_id-based plumbing without
+    # duplicating it. Requisition's OWN attached JD file (Text/Word/PDF)
+    # takes precedence over its linked JD Management record when both
+    # are present — it's the more specific, requisition-level document.
+    requisition_jd_text: Optional[str] = None
+    requisition = None
+    if requisition_id:
+        from capabilities.requisition.models import Requisition
+        from capabilities.acquisition import service as acquisition_service
+        org = await acquisition_service.get_or_create_default_organisation(db, current_user)
+        requisition = (await db.execute(
+            select(Requisition).where(Requisition.id == requisition_id, Requisition.organisation_id == org.id)
+        )).scalar_one_or_none()
+        if not requisition:
+            raise HTTPException(404, "Selected requisition not found.")
+        if requisition.jd_file_blob:
+            extracted = extract_text(requisition.jd_file_blob, requisition.jd_file_filename or "jd.txt")
+            if extracted.strip():
+                requisition_jd_text = extracted
+        if not requisition_jd_text and not requisition.jd_record_id:
+            raise HTTPException(400, "This requisition has no JD attached yet — attach one on the Requisitions page first.")
+        # Falls through to the jd_record_id branch below when this
+        # requisition has no own JD file but does have a linked JD
+        # Management record.
+        if not requisition_jd_text:
+            jd_record_id = requisition.jd_record_id
+
     # ── Extract JD — either from JD Management (new) or text/file upload (existing) ──
     final_jd = jd_text.strip()
     jd_client_name = ""
-    if jd_record_id:
+    jd_record = None
+    if requisition_jd_text:
+        final_jd = requisition_jd_text
+        if requisition.client_id:
+            from models.models import Client as ClientModel
+            cr = await db.execute(select(ClientModel).where(ClientModel.id == requisition.client_id))
+            client = cr.scalar_one_or_none()
+            if client:
+                jd_client_name = client.name
+    elif jd_record_id:
         from models.models import JDRecord, Client as ClientModel
         jr = await db.execute(select(JDRecord).where(JDRecord.id == jd_record_id, JDRecord.user_id == current_user.id))
         jd_record = jr.scalar_one_or_none()
@@ -961,7 +1081,8 @@ async def run_joblens(
             final_jd = extracted
 
     # ── Resolve candidate sources: uploaded files (existing) + Vendor
-    #    Management submissions (new) — both can be used together.
+    #    Management submissions (existing) + Applications submitted for a
+    #    Requisition (new) — all can be used together.
     from models.models import TrackedCandidate, Vendor as VendorModel
     source_candidates = []
     if source_candidate_ids.strip():
@@ -972,10 +1093,25 @@ async def run_joblens(
             )
             source_candidates = tcr.scalars().all()
 
+    # Candidates submitted for a Requisition — Application (Candidate <->
+    # Requisition), NOT TrackedCandidate. Resume comes from the Candidate
+    # Master's own resume_blob, same record used everywhere else.
+    from capabilities.acquisition.models import Application, Candidate
+    source_applications = []
+    if source_application_ids.strip():
+        ids = [int(x) for x in source_application_ids.split(",") if x.strip().isdigit()]
+        if ids:
+            acr = await db.execute(
+                select(Application, Candidate)
+                .join(Candidate, Candidate.id == Application.candidate_id)
+                .where(Application.id.in_(ids))
+            )
+            source_applications = acr.all()
+
     if not final_jd:
         raise HTTPException(400, "Job description is required.")
-    if not cv_files and not source_candidates:
-        raise HTTPException(400, "At least one CV is required (upload files, or select candidates from Vendor Management).")
+    if not cv_files and not source_candidates and not source_applications:
+        raise HTTPException(400, "At least one CV is required (upload files, or select candidates submitted for the requisition).")
 
     # ── Resolve logistics constraints: linked JD Management record wins
     # (single source of truth) if it has them set; otherwise use whatever
@@ -1070,7 +1206,7 @@ async def run_joblens(
             low_threshold=low_threshold,
             high_threshold=high_threshold,
             status="completed",
-            cv_count=len(cv_files) + len(source_candidates),
+            cv_count=len(cv_files) + len(source_candidates) + len(source_applications),
             created_at=datetime.utcnow(),
             salary_budget_min=session_salary_min,
             salary_budget_max=session_salary_max,
@@ -1119,6 +1255,7 @@ async def run_joblens(
     async def _score_and_build_candidate(
         content: bytes, filename: str,
         source_vendor_id=None, source_vendor_name=None, source_tracked_candidate_id=None,
+        source_application_id=None,
         call_groq_key=None, call_groq_model=None,
     ):
         # Falls back to the shared groq_key/groq_model if no per-candidate
@@ -1275,6 +1412,7 @@ async def run_joblens(
             source_vendor_id=source_vendor_id,
             source_vendor_name=source_vendor_name,
             source_tracked_candidate_id=source_tracked_candidate_id,
+            source_application_id=source_application_id,
             strengths_breakdown={
                 "essentialMatched": strengths_breakdown.get("essential_matched", []),
                 "technicalSkills": strengths_breakdown.get("technical_skills", []),
@@ -1397,6 +1535,34 @@ async def run_joblens(
                     })
         except Exception as e:
             print(f"Error processing vendor candidate {tc.id}: {e}")
+            continue
+
+    # ── Score candidates sourced from a Requisition's submitted Applications ──
+    for application, cand in source_applications:
+        try:
+            if not cand.resume_blob:
+                continue
+            candidate = await _score_and_build_candidate(
+                cand.resume_blob, cand.resume_filename or f"{cand.full_name}.pdf",
+                source_application_id=application.id,
+            )
+            if candidate:
+                # Prefer the Candidate Master's own contact details if the
+                # resume parse didn't find them.
+                candidate.name = cand.full_name or candidate.name
+                candidate.email = candidate.email or cand.email or ""
+                candidate.phone = candidate.phone or cand.phone or ""
+                db.add(candidate)
+                candidates.append(candidate)
+                sb = candidate.strengths_breakdown or {}
+                if sb.get("aiPowered"):
+                    await enrich_skill_taxonomy(db, {
+                        "technical": sb.get("technicalSkills", []),
+                        "business": sb.get("businessSkills", []),
+                        "soft": sb.get("softSkills", []),
+                    })
+        except Exception as e:
+            print(f"Error processing requisition candidate (application {application.id}): {e}")
             continue
 
     await db.commit()
@@ -1744,6 +1910,46 @@ async def send_invite(
     return {"sent": True}
 
 
+async def _log_joblens_interview(
+    db: AsyncSession, current_user: User, candidate: JobLensCandidate,
+    round_name: str, interview_type: str, notes: str = "",
+) -> None:
+    """Registers a row in Interview Scheduling for a JobLens/CandidateLens
+    action — Video Interview's 'Send Interview Invite' and Phone
+    Interview's 'Candidate reached by phone' both call this. JobLens
+    candidates live in tiq_joblens_candidates, not the Talent Pool's
+    tiq_candidates that Interview.candidate_id has always pointed at, so
+    this sets joblens_candidate_id instead (see that column's docstring
+    in capabilities/interview/models.py) and skips create_interview's
+    full endpoint — that path validates a Talent Pool candidate/
+    requisition, builds an interviewers list, and can fire a
+    self-schedule/approval flow, none of which applies here. This is
+    deliberately just "log that this happened", not a full scheduling
+    workflow.
+
+    Best-effort: never raises. A failure here shouldn't block the actual
+    invite/contact action it's just a side-effect record of.
+    """
+    try:
+        from capabilities.acquisition.service import get_or_create_default_organisation
+        from capabilities.interview.models import Interview
+        from capabilities.interview import service as interview_service
+
+        org = await get_or_create_default_organisation(db, current_user)
+        interview = Interview(
+            organisation_id=org.id, owner_user_id=current_user.id,
+            sequence_number=await interview_service.get_next_sequence(db, org.id),
+            candidate_id=None, joblens_candidate_id=candidate.id,
+            round_name=round_name, interview_type=interview_type,
+            status="Requested",
+            notes=notes,
+        )
+        db.add(interview)
+        await db.commit()
+    except Exception:
+        await db.rollback()
+
+
 @router.post("/candidates/{candidate_id}/mark-contacted")
 async def mark_contacted(
     candidate_id: int,
@@ -1760,6 +1966,8 @@ async def mark_contacted(
         raise HTTPException(404, "Candidate not found")
     c.contacted = True
     await db.commit()
+    await _log_joblens_interview(db, current_user, c, round_name="Video Interview", interview_type="Video Interview",
+                                  notes="Auto-logged: interview invite sent via Video Interview's Candidate Contact.")
     return {"contacted": True}
 
 
@@ -1783,8 +1991,44 @@ async def mark_phone_contacted(
     if c.phone_screening_status == "Not Started":
         c.phone_screening_status = "Contacted"
         c.phone_screening_at = datetime.utcnow()
-    await db.commit()
+        await db.commit()
+        await _log_joblens_interview(db, current_user, c, round_name="Phone Screening", interview_type="Phone Interview",
+                                      notes="Auto-logged: marked reached by phone in Phone Interview.")
+    else:
+        await db.commit()
     return {"phone_screening_status": c.phone_screening_status}
+
+
+CANDIDATE_STATUSES = ["Qualified", "Review", "Not Qualified"]
+
+
+class StatusUpdateRequest(BaseModel):
+    status: str
+
+
+@router.put("/candidates/{candidate_id}/status")
+async def update_candidate_status(
+    candidate_id: int,
+    payload: StatusUpdateRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Manual override of the AI-computed status — Resume Screening's
+    Status column is a dropdown, not just a read-only badge, since a
+    recruiter reading the actual resume can reasonably disagree with the
+    score (e.g. a borderline Review case they've decided is worth
+    treating as Qualified). Overwrites status directly rather than
+    touching ats_score/threshold — the score and its breakdown stay as
+    the AI computed them; only the recruiter's final call changes."""
+    if payload.status not in CANDIDATE_STATUSES:
+        raise HTTPException(400, f"status must be one of: {', '.join(CANDIDATE_STATUSES)}")
+    cr = await db.execute(select(JobLensCandidate).where(JobLensCandidate.id == candidate_id))
+    c = cr.scalar_one_or_none()
+    if not c:
+        raise HTTPException(404, "Candidate not found")
+    c.status = payload.status
+    await db.commit()
+    return {"status": c.status}
 
 
 class PhoneResultRequest(BaseModel):
@@ -1861,6 +2105,70 @@ async def get_morphcast_key(
     browser and the key is visible in that SDK's own network calls anyway."""
     key = await get_credential(db, current_user.id, "morphcast", "license_key")
     return {"license_key": key or ""}
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# INTERVIEW SETTINGS — answer time per question + TTS voice, configured
+# platform-wide by an admin (Settings > Admin Console), read by both the
+# recruiter-side interview modal and the candidate's public interview page.
+# ══════════════════════════════════════════════════════════════════════════
+
+DEFAULT_ANSWER_SECONDS = 30
+
+
+async def _resolve_interview_settings(db: AsyncSession, user_id: int) -> dict:
+    from utils.tts import DEFAULT_VOICE, DEFAULT_EDGE_VOICE
+    creds = await get_all_credentials(db, user_id, "interview")
+    try:
+        answer_seconds = int(creds.get("answer_seconds") or DEFAULT_ANSWER_SECONDS)
+    except (TypeError, ValueError):
+        answer_seconds = DEFAULT_ANSWER_SECONDS
+    answer_seconds = max(10, min(answer_seconds, 600))  # sane guardrails either side
+    tts_engine = creds.get("tts_engine") or "kokoro"  # "kokoro" | "edge" | "browser"
+    default_voice = DEFAULT_EDGE_VOICE if tts_engine == "edge" else DEFAULT_VOICE
+    tts_voice = creds.get("tts_voice") or default_voice
+    return {"answer_seconds": answer_seconds, "tts_voice": tts_voice, "tts_engine": tts_engine}
+
+
+@router.get("/interview-settings")
+async def get_interview_settings(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Answer time (seconds) + TTS voice for CandidateLens interviews.
+    Admin-configured platform-wide (Settings > Admin Console); every
+    recruiter/candidate reads the same values via get_all_credentials'
+    global fallback (service='interview' is in SHAREABLE_SERVICES)."""
+    settings = await _resolve_interview_settings(db, current_user.id)
+    from utils.tts import AVAILABLE_VOICES, EDGE_VOICES, kokoro_unavailable_reason
+    settings["kokoro_voices"] = AVAILABLE_VOICES
+    settings["edge_voices"] = EDGE_VOICES
+    settings["kokoro_error"] = kokoro_unavailable_reason()
+    return settings
+
+
+@router.post("/tts")
+async def synthesize_interview_question(
+    payload: dict,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Speaks interview question text using the admin-configured engine
+    (Kokoro-82M or Microsoft Edge neural voices) instead of the browser's
+    built-in, robotic SpeechSynthesis voice. Returns 503 if that engine
+    isn't available right now — the frontend falls back to the browser
+    voice on any non-200 response, so an interview never gets stuck."""
+    text = (payload or {}).get("text", "").strip()
+    if not text:
+        raise HTTPException(400, "text is required")
+    settings = await _resolve_interview_settings(db, current_user.id)
+    if settings["tts_engine"] == "browser":
+        raise HTTPException(503, "Server-side TTS is turned off — using the browser voice.")
+    from utils.tts import synthesize
+    audio, media_type = await synthesize(text, engine=settings["tts_engine"], voice=settings["tts_voice"])
+    if audio is None:
+        raise HTTPException(503, f"{settings['tts_engine']} TTS is not available right now — falling back to the browser voice.")
+    return Response(content=audio, media_type=media_type)
 
 
 class InterviewResult(BaseModel):
@@ -2068,6 +2376,9 @@ async def reanalyze_video(
     await db.commit()
     background_tasks.add_task(_run_video_analysis, candidate_id)
     return {"status": "queued"}
+
+
+@router.get("/candidates/{candidate_id}/video")
 async def download_interview_video(
     candidate_id: int,
     current_user: User = Depends(get_current_user),
@@ -2089,6 +2400,101 @@ async def download_interview_video(
     if not c.video_blob:
         raise HTTPException(404, "No video recorded for this candidate")
     return Response(content=c.video_blob, media_type=c.video_mimetype or "video/webm")
+
+
+@router.post("/candidates/{candidate_id}/video-view-token")
+async def create_video_view_token(
+    candidate_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Mints a short-lived (5 minute), video-scoped token so the browser's
+    native <video> element can stream this candidate's recording directly
+    from its `src` — with HTTP Range support for near-instant playback and
+    seeking — without needing to attach an Authorization header (which a
+    plain <video src> can't do). The one-time ownership/access check
+    happens HERE, not on the streaming endpoint itself; the token is what
+    proves that check already passed."""
+    from jose import jwt as _jwt
+    from utils.auth_utils import SECRET_KEY, ALGORITHM
+    cr = await db.execute(
+        select(JobLensCandidate, JobLensSession)
+        .join(JobLensSession, JobLensCandidate.session_id == JobLensSession.id)
+        .where(JobLensCandidate.id == candidate_id)
+    )
+    row = cr.first()
+    if not row:
+        raise HTTPException(404, "Candidate not found")
+    c, session = row
+    if session.user_id != current_user.id and current_user.role != "admin":
+        raise HTTPException(404, "Candidate not found")
+    if not c.video_blob:
+        raise HTTPException(404, "No video recorded for this candidate")
+    token = _jwt.encode(
+        {"vcid": candidate_id, "exp": datetime.utcnow() + timedelta(minutes=5)},
+        SECRET_KEY, algorithm=ALGORITHM,
+    )
+    return {"url": f"/api/joblens/candidates/{candidate_id}/video-stream?vt={token}"}
+
+
+@router.get("/candidates/{candidate_id}/video-stream")
+async def stream_interview_video(
+    candidate_id: int,
+    vt: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Range-aware video streaming for the popup player — the token from
+    /video-view-token stands in for a normal Authorization header (a plain
+    <video src="..."> can't send one), and IS the access check: it's
+    short-lived and bound to this exact candidate_id. Supporting Range
+    requests here is what makes the popup player start playing almost
+    immediately instead of waiting for the whole file, and lets the
+    scrubber seek without re-downloading everything before that point."""
+    from jose import jwt as _jwt, JWTError
+    from utils.auth_utils import SECRET_KEY, ALGORITHM
+    try:
+        payload = _jwt.decode(vt, SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        raise HTTPException(401, "This video link has expired — reopen the video to get a new one.")
+    if payload.get("vcid") != candidate_id:
+        raise HTTPException(403, "This link does not grant access to this video.")
+
+    cr = await db.execute(select(JobLensCandidate).where(JobLensCandidate.id == candidate_id))
+    c = cr.scalar_one_or_none()
+    if not c or not c.video_blob:
+        raise HTTPException(404, "No video recorded for this candidate")
+
+    data = c.video_blob
+    total = len(data)
+    media_type = c.video_mimetype or "video/webm"
+    range_header = request.headers.get("range")
+
+    if range_header:
+        try:
+            range_spec = range_header.strip().lower().replace("bytes=", "")
+            start_s, _, end_s = range_spec.partition("-")
+            start = int(start_s) if start_s else 0
+            end = int(end_s) if end_s else total - 1
+            end = min(end, total - 1)
+        except ValueError:
+            start, end = 0, total - 1
+        if start >= total or start > end:
+            raise HTTPException(416, "Requested range not satisfiable", headers={"Content-Range": f"bytes */{total}"})
+        chunk = data[start:end + 1]
+        return Response(
+            content=chunk, status_code=206, media_type=media_type,
+            headers={
+                "Content-Range": f"bytes {start}-{end}/{total}",
+                "Accept-Ranges": "bytes",
+                "Content-Length": str(len(chunk)),
+            },
+        )
+
+    return Response(
+        content=data, status_code=200, media_type=media_type,
+        headers={"Accept-Ranges": "bytes", "Content-Length": str(total)},
+    )
 
 
 @router.get("/candidates/{candidate_id}/resume-file")
@@ -2122,16 +2528,65 @@ async def download_resume_file(
 @router.get("/public/interview/{token}")
 async def public_get_interview(token: str, db: AsyncSession = Depends(get_db)):
     cr = await db.execute(
+        select(JobLensCandidate, JobLensSession)
+        .join(JobLensSession, JobLensCandidate.session_id == JobLensSession.id)
+        .where(JobLensCandidate.interview_token == token)
+    )
+    row = cr.first()
+    if not row:
+        raise HTTPException(404, "This interview link is invalid or has expired.")
+    c, session = row
+    settings = await _resolve_interview_settings(db, session.user_id)
+    return {
+        "candidate_name": c.name,
+        "questions": c.interview_questions or [],
+        "video_status": c.video_status,
+        "privacy_accepted": bool(c.privacy_accepted_at),
+        "answer_seconds": settings["answer_seconds"],
+    }
+
+
+@router.post("/public/interview/{token}/accept-privacy")
+async def public_accept_interview_privacy(token: str, db: AsyncSession = Depends(get_db)):
+    """The candidate ticking 'I understand and agree' on the pre-interview
+    notice (recording, storage, and review by decision-makers). Camera
+    access is never requested by the frontend before this succeeds."""
+    cr = await db.execute(
         select(JobLensCandidate).where(JobLensCandidate.interview_token == token)
     )
     c = cr.scalar_one_or_none()
     if not c:
         raise HTTPException(404, "This interview link is invalid or has expired.")
-    return {
-        "candidate_name": c.name,
-        "questions": c.interview_questions or [],
-        "video_status": c.video_status,
-    }
+    c.privacy_accepted_at = datetime.utcnow()
+    await db.commit()
+    return {"accepted": True, "accepted_at": c.privacy_accepted_at.isoformat()}
+
+
+@router.post("/public/interview/{token}/tts")
+async def public_synthesize_interview_question(token: str, payload: dict, db: AsyncSession = Depends(get_db)):
+    """Same TTS as the authenticated /tts endpoint, resolved via the
+    interview token (no login) — engine/voice settings belong to whichever
+    recruiter's account generated this candidate's interview."""
+    text = (payload or {}).get("text", "").strip()
+    if not text:
+        raise HTTPException(400, "text is required")
+    cr = await db.execute(
+        select(JobLensCandidate, JobLensSession)
+        .join(JobLensSession, JobLensCandidate.session_id == JobLensSession.id)
+        .where(JobLensCandidate.interview_token == token)
+    )
+    row = cr.first()
+    if not row:
+        raise HTTPException(404, "This interview link is invalid or has expired.")
+    _, session = row
+    settings = await _resolve_interview_settings(db, session.user_id)
+    if settings["tts_engine"] == "browser":
+        raise HTTPException(503, "Server-side TTS is turned off — using the browser voice.")
+    from utils.tts import synthesize
+    audio, media_type = await synthesize(text, engine=settings["tts_engine"], voice=settings["tts_voice"])
+    if audio is None:
+        raise HTTPException(503, f"{settings['tts_engine']} TTS is not available right now — falling back to the browser voice.")
+    return Response(content=audio, media_type=media_type)
 
 
 @router.get("/public/interview/{token}/morphcast-key")
@@ -2165,6 +2620,8 @@ async def public_save_interview_result(
     c = cr.scalar_one_or_none()
     if not c:
         raise HTTPException(404, "This interview link is invalid or has expired.")
+    if not c.privacy_accepted_at:
+        raise HTTPException(403, "The privacy notice must be accepted before submitting interview results.")
     c.emotion_happy    = result.happy
     c.emotion_neutral  = result.neutral
     c.emotion_sad      = result.sad
@@ -2194,6 +2651,8 @@ async def public_upload_interview_video(
     c = cr.scalar_one_or_none()
     if not c:
         raise HTTPException(404, "This interview link is invalid or has expired.")
+    if not c.privacy_accepted_at:
+        raise HTTPException(403, "The privacy notice must be accepted before submitting interview video.")
     content = await file.read()
     c.video_blob = content
     c.video_mimetype = file.content_type or "video/webm"

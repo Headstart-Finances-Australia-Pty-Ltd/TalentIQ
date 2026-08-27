@@ -509,6 +509,20 @@ MIGRATIONS = [
     "ALTER TABLE tiq_interviews ADD COLUMN IF NOT EXISTS cancelled_by VARCHAR(200)",
     "ALTER TABLE tiq_interviews ADD COLUMN IF NOT EXISTS artifacts JSON DEFAULT '[]'",
     "CREATE UNIQUE INDEX IF NOT EXISTS ix_tiq_interviews_approval_token ON tiq_interviews(approval_token)",
+
+    # Interview-scheduling integration with JobLens/CandidateLens (Resume
+    # Screening / Phone Interview / Video Interview) — those candidates
+    # live in tiq_joblens_candidates, a separate table from the Talent
+    # Pool's tiq_candidates that candidate_id has always pointed at.
+    # candidate_id must become nullable for a JobLens-originated
+    # interview row to be insertable at all (it has NO Talent Pool
+    # Candidate to reference), and joblens_candidate_id is the
+    # alternative reference for that case — see Interview.candidate_id's
+    # docstring in capabilities/interview/models.py for the "exactly one
+    # of the two is set" rule this enables.
+    "ALTER TABLE tiq_interviews ALTER COLUMN candidate_id DROP NOT NULL",
+    "ALTER TABLE tiq_interviews ADD COLUMN IF NOT EXISTS joblens_candidate_id INTEGER REFERENCES tiq_joblens_candidates(id)",
+
     # Interview Scheduling was simplified twice: first to a Resume
     # Screening -> Telephonic -> Video -> Panel sequence, then again to
     # exactly three classes (Phone Interview / Video Interview / Panel
@@ -559,6 +573,21 @@ MIGRATIONS = [
     "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS video_screening_recommendation VARCHAR(20)",
     "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS video_screening_notes TEXT",
     "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS video_screening_at TIMESTAMP",
+
+    # Requisition: JD document (Text/Word/PDF) attached directly on the
+    # requisition itself, next to Title — see Requisition's docstring.
+    "ALTER TABLE tiq_requisitions ADD COLUMN IF NOT EXISTS jd_file_blob BYTEA",
+    "ALTER TABLE tiq_requisitions ADD COLUMN IF NOT EXISTS jd_file_filename VARCHAR(300)",
+    "ALTER TABLE tiq_requisitions ADD COLUMN IF NOT EXISTS jd_file_mimetype VARCHAR(100)",
+
+    # CandidateLens: candidates sourced from a Requisition's submitted
+    # Applications (Candidate Acquisition capability), alongside the
+    # existing Vendor Management source_tracked_candidate_id.
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS source_application_id INTEGER",
+
+    # CandidateLens: timestamp of the candidate accepting the pre-interview
+    # recording/privacy notice — gates camera access on the public page.
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS privacy_accepted_at TIMESTAMP",
 ]
 
 async def run():

@@ -442,6 +442,12 @@ class JobLensCandidate(Base):
     interview_token     = Column(String(64), unique=True, index=True, nullable=True)
     contacted           = Column(Boolean, default=False)  # invite email sent
     video_status        = Column(String(50), default="Pending")
+    # Recorded the moment the candidate ticks "I understand and agree" on
+    # the pre-interview privacy notice (recording/storage/review consent) —
+    # camera access is never requested before this is set. Kept as a
+    # timestamp, not just a boolean, so there's a real audit trail of when
+    # consent was given for this specific interview.
+    privacy_accepted_at = Column(DateTime, nullable=True)
 
     # ── Phone Interview (split out of the original combined
     # CandidateLens workflow — see CandidateLensWeightsPanel/joblens.py
@@ -482,6 +488,11 @@ class JobLensCandidate(Base):
     source_vendor_id   = Column(Integer, ForeignKey("tiq_vendors.id"), index=True, nullable=True)
     source_vendor_name = Column(String(300))  # denormalized, for display without extra joins
     source_tracked_candidate_id = Column(Integer, ForeignKey("tiq_tracked_candidates.id"), index=True, nullable=True)
+    # If sourced from a Requisition's submitted-candidates list (Application
+    # <-> Candidate, Candidate Acquisition capability) rather than Vendor
+    # Management — same "point back to origin" pattern as the two fields
+    # above.
+    source_application_id = Column(Integer, ForeignKey("tiq_applications.id"), index=True, nullable=True)
 
     resume_file_blob     = Column(LargeBinary)
     resume_file_mimetype = Column(String(100))
