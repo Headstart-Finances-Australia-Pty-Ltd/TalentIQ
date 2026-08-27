@@ -530,11 +530,11 @@ function VideoInterviewModal({
     }
   };
 
-  // Speaks the question using Kokoro-82M (natural, human-sounding voice)
-  // when the backend has it configured/available; falls back to the
-  // browser's built-in SpeechSynthesis voice on any failure (not
-  // configured, model unavailable, network hiccup, etc.) so the interview
-  // is never blocked on TTS.
+  // Speaks the question using Microsoft Edge's neural voice (natural,
+  // human-sounding, via edge-tts) when the backend has it
+  // configured/available; falls back to the browser's built-in
+  // SpeechSynthesis voice on any failure (not configured, network hiccup,
+  // etc.) so the interview is never blocked on TTS.
   const speakQuestion = async (q: string) => {
     if (!q) { startRecording(); return; }
     setIsSpeaking(true);
@@ -547,7 +547,7 @@ function VideoInterviewModal({
       audio.onerror = () => { setIsSpeaking(false); URL.revokeObjectURL(url); startRecording(); };
       await audio.play();
       return;
-    } catch { /* Kokoro not available/enabled — fall back below */ }
+    } catch { /* Server-side TTS not available/enabled — fall back below */ }
 
     if (!("speechSynthesis" in window)) { setIsSpeaking(false); startRecording(); return; }
     const utter = new SpeechSynthesisUtterance(q);

@@ -48,27 +48,23 @@ export default function SettingsPage() {
   const [smtp, setSmtp] = useState({ host: "", port: "587", username: "", password: "", from_email: "" });
   const [ollama, setOllama] = useState({ base_url: "http://localhost:11434", model: "llama3" });
   const [morphcast, setMorphcast] = useState({ license_key: "" });
-  const [interviewSettings, setInterviewSettings] = useState({ answer_seconds: "30", tts_voice: "af_heart", tts_engine: "kokoro" });
+  const [interviewSettings, setInterviewSettings] = useState({ answer_seconds: "30", tts_voice: "en-US-JennyNeural", tts_engine: "edge" });
   const [keyMsg, setKeyMsg] = useState("");
 
   // ── Interview Settings (Admin Console) — answer time + TTS voice ────
   const { data: liveInterviewSettings } = useQuery({
     queryKey: ["interview-settings"], queryFn: candidateLensSettingsApi.get,
   });
-  const [kokoroVoices, setKokoroVoices] = useState<Record<string, string>>({});
   const [edgeVoices, setEdgeVoices] = useState<Record<string, string>>({});
-  const [kokoroError, setKokoroError] = useState<string | null>(null);
   const [interviewSettingsLoaded, setInterviewSettingsLoaded] = useState(false);
   useEffect(() => {
     if (liveInterviewSettings && !interviewSettingsLoaded) {
       setInterviewSettings({
         answer_seconds: String(liveInterviewSettings.answer_seconds ?? 30),
-        tts_voice: liveInterviewSettings.tts_voice || "af_heart",
-        tts_engine: liveInterviewSettings.tts_engine || "kokoro",
+        tts_voice: liveInterviewSettings.tts_voice || "en-US-JennyNeural",
+        tts_engine: liveInterviewSettings.tts_engine || "edge",
       });
-      setKokoroVoices(liveInterviewSettings.kokoro_voices || {});
       setEdgeVoices(liveInterviewSettings.edge_voices || {});
-      setKokoroError(liveInterviewSettings.kokoro_error || null);
       setInterviewSettingsLoaded(true);
     }
   }, [liveInterviewSettings, interviewSettingsLoaded]);
@@ -722,8 +718,9 @@ export default function SettingsPage() {
           {/* INTERVIEW SETTINGS — admin-only platform-wide controls for
               CandidateLens's phone/video interview experience: how long a
               candidate gets to answer each question, and which voice reads
-              questions aloud (Kokoro-82M natural voice, or the browser's
-              built-in — more mechanical — SpeechSynthesis voice). */}
+              questions aloud (Microsoft Edge natural voice — default/first
+              choice — or the browser's built-in — more mechanical —
+              SpeechSynthesis voice). */}
           {isAdmin ? (
             <div className="tiq-card tiq-mb-6">
               <div className="tiq-card-title">Interview Settings — Admin Console</div>
@@ -743,40 +740,14 @@ export default function SettingsPage() {
                   <select className="tiq-select" value={interviewSettings.tts_engine}
                     onChange={e => {
                       const engine = e.target.value;
-                      const defaultVoice = engine === "edge" ? "en-US-JennyNeural" : "af_heart";
+                      const defaultVoice = engine === "edge" ? "en-US-JennyNeural" : "";
                       setInterviewSettings(s => ({ ...s, tts_engine: engine, tts_voice: defaultVoice }));
                     }}>
-                    <option value="kokoro">Kokoro-82M — self-hosted, natural voice</option>
-                    <option value="edge">Microsoft Edge — online natural voice (no setup, needs internet)</option>
+                    <option value="edge">Microsoft Edge — online natural voice (default, no setup, needs internet)</option>
                     <option value="browser">Browser default (built-in, more mechanical)</option>
                   </select>
                 </div>
               </div>
-              {interviewSettings.tts_engine === "kokoro" && (
-                <div className="tiq-form-group">
-                  <label className="tiq-label">Kokoro voice</label>
-                  <select className="tiq-select" value={interviewSettings.tts_voice}
-                    onChange={e => setInterviewSettings(s => ({ ...s, tts_voice: e.target.value }))}>
-                    {Object.entries(
-                      Object.keys(kokoroVoices).length ? kokoroVoices : {
-                        af_heart: "Heart (US English, female) — warm, default",
-                        af_bella: "Bella (US English, female)",
-                        af_nicole: "Nicole (US English, female)",
-                        am_adam: "Adam (US English, male)",
-                        am_michael: "Michael (US English, male)",
-                        bf_emma: "Emma (British English, female)",
-                        bm_george: "George (British English, male)",
-                      }
-                    ).map(([id, label]) => <option key={id} value={id}>{label as string}</option>)}
-                  </select>
-                  {kokoroError && (
-                    <div style={{ fontSize: 11, color: "#f59e0b", marginTop: 6 }}>
-                      Kokoro isn't loaded yet on the server ({kokoroError}) — interviews will use the browser
-                      voice until model files finish downloading on first use, or switch to Microsoft Edge below.
-                    </div>
-                  )}
-                </div>
-              )}
               {interviewSettings.tts_engine === "edge" && (
                 <div className="tiq-form-group">
                   <label className="tiq-label">Microsoft Edge voice</label>

@@ -224,7 +224,7 @@ export default function PublicInterviewPage() {
       audio.onerror = () => { setIsSpeaking(false); URL.revokeObjectURL(url); startRecording(); };
       await audio.play();
       return;
-    } catch { /* Kokoro not available/enabled on the recruiter's account — fall back below */ }
+    } catch { /* Server-side TTS not available/enabled on the recruiter's account — fall back below */ }
 
     if (!("speechSynthesis" in window)) { setIsSpeaking(false); startRecording(); return; }
     const utter = new SpeechSynthesisUtterance(q);
