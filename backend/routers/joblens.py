@@ -2117,16 +2117,15 @@ DEFAULT_ANSWER_SECONDS = 30
 
 
 async def _resolve_interview_settings(db: AsyncSession, user_id: int) -> dict:
-    from utils.tts import DEFAULT_VOICE, DEFAULT_EDGE_VOICE
+    from utils.tts import DEFAULT_EDGE_VOICE
     creds = await get_all_credentials(db, user_id, "interview")
     try:
         answer_seconds = int(creds.get("answer_seconds") or DEFAULT_ANSWER_SECONDS)
     except (TypeError, ValueError):
         answer_seconds = DEFAULT_ANSWER_SECONDS
     answer_seconds = max(10, min(answer_seconds, 600))  # sane guardrails either side
-    tts_engine = creds.get("tts_engine") or "kokoro"  # "kokoro" | "edge" | "browser"
-    default_voice = DEFAULT_EDGE_VOICE if tts_engine == "edge" else DEFAULT_VOICE
-    tts_voice = creds.get("tts_voice") or default_voice
+    tts_engine = creds.get("tts_engine") or "edge"  # "edge" (default/first choice) | "browser"
+    tts_voice = creds.get("tts_voice") or DEFAULT_EDGE_VOICE
     return {"answer_seconds": answer_seconds, "tts_voice": tts_voice, "tts_engine": tts_engine}
 
 
@@ -2140,10 +2139,8 @@ async def get_interview_settings(
     recruiter/candidate reads the same values via get_all_credentials'
     global fallback (service='interview' is in SHAREABLE_SERVICES)."""
     settings = await _resolve_interview_settings(db, current_user.id)
-    from utils.tts import AVAILABLE_VOICES, EDGE_VOICES, kokoro_unavailable_reason
-    settings["kokoro_voices"] = AVAILABLE_VOICES
+    from utils.tts import EDGE_VOICES
     settings["edge_voices"] = EDGE_VOICES
-    settings["kokoro_error"] = kokoro_unavailable_reason()
     return settings
 
 
@@ -2154,8 +2151,8 @@ async def synthesize_interview_question(
     db: AsyncSession = Depends(get_db),
 ):
     """Speaks interview question text using the admin-configured engine
-    (Kokoro-82M or Microsoft Edge neural voices) instead of the browser's
-    built-in, robotic SpeechSynthesis voice. Returns 503 if that engine
+    (Microsoft Edge neural voices) instead of the browser's built-in,
+    robotic SpeechSynthesis voice. Returns 503 if that engine
     isn't available right now — the frontend falls back to the browser
     voice on any non-200 response, so an interview never gets stuck."""
     text = (payload or {}).get("text", "").strip()
