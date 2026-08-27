@@ -1,17 +1,25 @@
 import { useEffect, useState } from "react";
 import {
   Plus, X, Trash2, Link2, Copy, Check, Calendar, ClipboardList,
-  ChevronDown, Star, ExternalLink, Bot, RefreshCw,
+  ChevronDown, Star, ExternalLink, Bot, RefreshCw, ShieldCheck, Gavel,
 } from "lucide-react";
 import { interviewApi, acquisitionApi, requisitionApi, avatarInterviewApi } from "../lib/api";
 
 const STATUS_FLOW = ["Requested", "Scheduled", "Completed", "Cancelled", "No-Show", "Rescheduled"];
-const INTERVIEW_TYPES = ["HR Screening", "Telephonic Screening", "Video Interview (AI Avatar)", "Specialist", "Hiring Manager", "Panel"];
-const AVATAR_INTERVIEW_TYPE = "Video Interview (AI Avatar)";
-// Only "HR Screening" is ever self-schedulable — enforced server-side too
-// (see backend capabilities/interview/router.py), this mirrors that so
-// the UI doesn't offer an option the API will just reject.
-const SELF_SCHEDULABLE_TYPES = new Set(["HR Screening", "Telephonic Screening"]);
+// Exactly three round classes. Resume Screening now lives entirely in
+// its own capability (Screening -> Resume Screening / Phone Interview /
+// Video Interview — the CandidateLens split), so it's not one of these.
+// "Video Interview" covers every delivery mode — a live human video
+// call, CandidateLens's webcam+emotion-analysis flow, or an AI Avatar
+// session (Bot icon below) — chosen per round rather than a separate type.
+const INTERVIEW_TYPES = ["Phone Interview", "Video Interview", "Panel Interview"];
+const AVATAR_INTERVIEW_TYPE = "Video Interview";
+// Only "Phone Interview" is ever self-schedulable — enforced
+// server-side too (see backend capabilities/interview/router.py), this
+// mirrors that so the UI doesn't offer an option the API will just
+// reject. Video/Panel rounds involve other people's calendars a
+// recruiter needs to actually coordinate.
+const SELF_SCHEDULABLE_TYPES = new Set(["Phone Interview"]);
 const STATUS_COLORS: Record<string, { fg: string; bg: string }> = {
   Requested: { fg: "#64748b", bg: "rgba(100,116,139,.12)" },
   Scheduled: { fg: "#0d9488", bg: "rgba(13,148,136,.12)" },
@@ -19,6 +27,17 @@ const STATUS_COLORS: Record<string, { fg: string; bg: string }> = {
   Cancelled: { fg: "#ef4444", bg: "rgba(239,68,68,.12)" },
   "No-Show": { fg: "#f59e0b", bg: "rgba(245,158,11,.12)" },
   Rescheduled: { fg: "#8b5cf6", bg: "rgba(139,92,246,.12)" },
+};
+const DECISION_COLORS: Record<string, { fg: string; bg: string }> = {
+  Pending: { fg: "#64748b", bg: "rgba(100,116,139,.12)" },
+  Selected: { fg: "#10b981", bg: "rgba(16,185,129,.12)" },
+  Rejected: { fg: "#ef4444", bg: "rgba(239,68,68,.12)" },
+  Hold: { fg: "#f59e0b", bg: "rgba(245,158,11,.12)" },
+};
+const APPROVAL_COLORS: Record<string, { fg: string; bg: string }> = {
+  Pending: { fg: "#64748b", bg: "rgba(100,116,139,.12)" },
+  Approved: { fg: "#10b981", bg: "rgba(16,185,129,.12)" },
+  Cancelled: { fg: "#ef4444", bg: "rgba(239,68,68,.12)" },
 };
 const RECOMMENDATION_OPTIONS = ["Strong Yes", "Yes", "Neutral", "No", "Strong No"];
 const RECOMMENDATION_COLORS: Record<string, string> = {
@@ -30,13 +49,14 @@ const emptyForm = {
   candidate_id: "" as string | number,
   requisition_id: "" as string | number,
   round_name: "", round_number: 1,
-  interview_type: "HR Screening",
+  interview_type: "Phone Interview",
   interviewers: [{ name: "", email: "" }],
   duration_minutes: 60, location_or_link: "",
   scheduling_mode: "fixed" as "fixed" | "self_schedule",
   scheduled_at: "",
   proposed_slots: [""] as string[],
   notes: "",
+  approver_name: "", approver_email: "",
 };
 
 export default function InterviewsPage() {
@@ -63,6 +83,13 @@ export default function InterviewsPage() {
   const [linkCopied, setLinkCopied] = useState(false);
   const [calendlyConfigured, setCalendlyConfigured] = useState(false);
   const [generatingCalendly, setGeneratingCalendly] = useState(false);
+
+  const [decisionTarget, setDecisionTarget] = useState<any | null>(null);
+  const [decisionDetail, setDecisionDetail] = useState<any | null>(null);
+  const [loadingDecision, setLoadingDecision] = useState(false);
+  const [decisionActionError, setDecisionActionError] = useState("");
+  const [decisionActing, setDecisionActing] = useState(false);
+  const [copiedLinkToken, setCopiedLinkToken] = useState("");
 
   const [avatarModalInterview, setAvatarModalInterview] = useState<any | null>(null);
   const [avatarSession, setAvatarSession] = useState<any | null>(null);
@@ -101,13 +128,14 @@ export default function InterviewsPage() {
     setForm({
       candidate_id: i.candidate_id, requisition_id: i.requisition_id ?? "",
       round_name: i.round_name, round_number: i.round_number,
-      interview_type: i.interview_type || "HR Screening",
+      interview_type: i.interview_type || "Phone Interview",
       interviewers: i.interviewers?.length ? i.interviewers : [{ name: "", email: "" }],
       duration_minutes: i.duration_minutes, location_or_link: i.location_or_link,
       scheduling_mode: "fixed",
       scheduled_at: i.scheduled_at ? i.scheduled_at.slice(0, 16) : "",
       proposed_slots: i.proposed_slots?.length ? i.proposed_slots.map((s: string) => s.slice(0, 16)) : [""],
       notes: i.notes,
+      approver_name: i.approver_name || "", approver_email: i.approver_email || "",
     });
     setEditingId(i.id);
     setFormError("");
@@ -130,6 +158,7 @@ export default function InterviewsPage() {
           requisition_id: form.requisition_id === "" ? null : Number(form.requisition_id),
           scheduled_at: form.scheduling_mode === "fixed" && form.scheduled_at ? new Date(form.scheduled_at).toISOString() : undefined,
           notes: form.notes,
+          approver_name: form.approver_name, approver_email: form.approver_email,
         });
       } else {
         const payload: any = {
@@ -139,6 +168,7 @@ export default function InterviewsPage() {
           interview_type: form.interview_type,
           interviewers, duration_minutes: Number(form.duration_minutes),
           location_or_link: form.location_or_link, notes: form.notes,
+          approver_name: form.approver_name, approver_email: form.approver_email,
         };
         if (form.scheduling_mode === "fixed" && form.scheduled_at) {
           payload.scheduled_at = new Date(form.scheduled_at).toISOString();
@@ -242,6 +272,70 @@ export default function InterviewsPage() {
       setScorecards(list);
     }
     await load();
+  };
+
+  // ── Decision & Approval panel ─────────────────────────────────────
+  const openDecisionPanel = async (i: any) => {
+    setDecisionTarget(i);
+    setDecisionDetail(null);
+    setDecisionActionError("");
+    setLoadingDecision(true);
+    try {
+      const full = await interviewApi.get(i.id);
+      setDecisionDetail(full);
+    } finally {
+      setLoadingDecision(false);
+    }
+  };
+  const refreshDecisionDetail = async () => {
+    if (!decisionTarget) return;
+    const full = await interviewApi.get(decisionTarget.id);
+    setDecisionDetail(full);
+    await load();
+  };
+  const generateApprovalLink = async () => {
+    if (!decisionTarget) return;
+    setDecisionActing(true);
+    setDecisionActionError("");
+    try {
+      await interviewApi.regenerateApprovalLink(decisionTarget.id);
+      await refreshDecisionDetail();
+    } catch (e: any) {
+      setDecisionActionError(e?.response?.data?.detail || "Could not generate an approval link. Set an approver name or email first.");
+    } finally {
+      setDecisionActing(false);
+    }
+  };
+  const approveInApp = async () => {
+    if (!decisionTarget) return;
+    setDecisionActing(true);
+    setDecisionActionError("");
+    try {
+      await interviewApi.approveInApp(decisionTarget.id);
+      await refreshDecisionDetail();
+    } catch (e: any) {
+      setDecisionActionError(e?.response?.data?.detail || "Could not approve this interview.");
+    } finally {
+      setDecisionActing(false);
+    }
+  };
+  const setManualDecision = async (decision: string) => {
+    if (!decisionTarget) return;
+    setDecisionActing(true);
+    setDecisionActionError("");
+    try {
+      await interviewApi.setDecision(decisionTarget.id, decision);
+      await refreshDecisionDetail();
+    } catch (e: any) {
+      setDecisionActionError(e?.response?.data?.detail || "Could not record a decision.");
+    } finally {
+      setDecisionActing(false);
+    }
+  };
+  const copyFeedbackLink = (token: string, path: string) => {
+    navigator.clipboard.writeText(`${window.location.origin}${path}`);
+    setCopiedLinkToken(token);
+    setTimeout(() => setCopiedLinkToken(""), 2000);
   };
 
   // ── Self-schedule link generation ───────────────────────────────────
@@ -368,8 +462,9 @@ export default function InterviewsPage() {
                 <th>Interviewers</th>
                 <th>Location / Link</th>
                 <th>Status</th>
+                <th>Decision</th>
                 <th>Scorecards</th>
-                <th style={{ width: 160 }}>Actions</th>
+                <th style={{ width: 190 }}>Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -382,7 +477,7 @@ export default function InterviewsPage() {
                     <td style={{ fontSize: 12 }}>
                       {i.round_name} <span style={{ color: "var(--text-muted)" }}>#{i.round_number}</span>
                       <div>
-                        <span className="tiq-badge tiq-badge-slate" style={{ fontSize: 10 }}>{i.interview_type || "HR Screening"}</span>
+                        <span className="tiq-badge tiq-badge-slate" style={{ fontSize: 10 }}>{i.interview_type || "Phone Interview"}</span>
                       </div>
                     </td>
                     <td style={{ fontSize: 12 }}>{i.requisition_title || "—"}</td>
@@ -416,6 +511,24 @@ export default function InterviewsPage() {
                       </div>
                     </td>
                     <td>
+                      {(() => {
+                        const dc = DECISION_COLORS[i.decision] || DECISION_COLORS.Pending;
+                        return (
+                          <span style={{ fontSize: 11, fontWeight: 700, color: dc.fg, background: dc.bg, padding: "4px 10px", borderRadius: 999 }}>
+                            {i.decision || "Pending"}
+                          </span>
+                        );
+                      })()}
+                      {i.approval_status && i.approval_status !== "Pending" && (
+                        <div style={{ marginTop: 4 }}>
+                          {(() => {
+                            const ac = APPROVAL_COLORS[i.approval_status] || APPROVAL_COLORS.Pending;
+                            return <span style={{ fontSize: 9, fontWeight: 700, color: ac.fg }}>{i.approval_status === "Approved" ? "✓ Approved" : "✕ Cancelled"}</span>;
+                          })()}
+                        </div>
+                      )}
+                    </td>
+                    <td>
                       <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" onClick={() => openScorecards(i)}>
                         <ClipboardList size={12} /> {i.scorecard_count || 0}
                       </button>
@@ -423,7 +536,10 @@ export default function InterviewsPage() {
                     <td>
                       <div style={{ display: "flex", gap: 4 }}>
                         <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" title="Edit" onClick={() => openEdit(i)}>Edit</button>
-                        {SELF_SCHEDULABLE_TYPES.has(i.interview_type || "HR Screening") ? (
+                        <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" title="Decision & Approval" onClick={() => openDecisionPanel(i)}>
+                          <Gavel size={13} />
+                        </button>
+                        {SELF_SCHEDULABLE_TYPES.has(i.interview_type || "Phone Interview") ? (
                           <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" title="Self-schedule link" onClick={() => openLinkModal(i)}><Link2 size={13} /></button>
                         ) : (
                           <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" disabled style={{ opacity: 0.35, cursor: "not-allowed" }}
@@ -536,7 +652,7 @@ export default function InterviewsPage() {
                     I already know the time
                   </label>
                   <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: SELF_SCHEDULABLE_TYPES.has(form.interview_type) ? "pointer" : "not-allowed", opacity: SELF_SCHEDULABLE_TYPES.has(form.interview_type) ? 1 : 0.5 }}
-                         title={SELF_SCHEDULABLE_TYPES.has(form.interview_type) ? "" : "Only HR Screening and Telephonic Screening rounds can be self-scheduled"}>
+                         title={SELF_SCHEDULABLE_TYPES.has(form.interview_type) ? "" : "Only Phone Interview rounds can be self-scheduled"}>
                     <input type="radio" disabled={!SELF_SCHEDULABLE_TYPES.has(form.interview_type)}
                            checked={form.scheduling_mode === "self_schedule"} onChange={() => setForm({ ...form, scheduling_mode: "self_schedule" })} />
                     Let the candidate pick from options
@@ -572,6 +688,20 @@ export default function InterviewsPage() {
 
             <div className="tiq-form-group"><label className="tiq-label">Notes</label>
               <textarea className="tiq-input" rows={3} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} /></div>
+
+            <div className="tiq-form-group">
+              <label className="tiq-label"><ShieldCheck size={12} style={{ verticalAlign: "middle", marginRight: 4 }} />Approver (authority who signs off on this round)</label>
+              <div className="tiq-grid-2">
+                <input className="tiq-input" placeholder="Approver name" value={form.approver_name}
+                       onChange={(e) => setForm({ ...form, approver_name: e.target.value })} />
+                <input className="tiq-input" placeholder="Approver email" value={form.approver_email}
+                       onChange={(e) => setForm({ ...form, approver_email: e.target.value })} />
+              </div>
+              <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 4 }}>
+                Optional. Once set, an approval link can be generated from the <Gavel size={11} style={{ verticalAlign: "middle" }} /> icon on the interview row —
+                the approver can approve or cancel this round online, no login required.
+              </div>
+            </div>
 
             <div className="tiq-flex-end">
               <button className="tiq-btn tiq-btn-ghost" onClick={() => setShowForm(false)}>Cancel</button>
@@ -827,6 +957,140 @@ export default function InterviewsPage() {
                   <button className="tiq-btn tiq-btn-primary" disabled={savingScorecard} onClick={saveScorecard}>
                     {savingScorecard ? "Saving…" : "Save Scorecard"}
                   </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── Decision & Approval Modal ────────────────────────────── */}
+      {decisionTarget && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+          <div style={{ background: "#fff", color: "#111827", borderRadius: 14, padding: 24, maxWidth: 620, width: "94%", maxHeight: "90vh", overflowY: "auto" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+              <div style={{ fontWeight: 800, fontSize: 16, display: "flex", alignItems: "center", gap: 8 }}>
+                <Gavel size={18} /> Decision &amp; Approval
+              </div>
+              <button onClick={() => setDecisionTarget(null)} style={{ background: "none", border: "none", cursor: "pointer" }}><X size={18} /></button>
+            </div>
+            <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 16 }}>
+              {decisionTarget.candidate_name || candidateName(decisionTarget.candidate_id)} — {decisionTarget.round_name} ({decisionTarget.interview_type})
+            </div>
+
+            {loadingDecision || !decisionDetail ? (
+              <div style={{ textAlign: "center", padding: 24, color: "var(--text-muted)" }}>Loading…</div>
+            ) : (
+              <div>
+                {decisionActionError && <div className="tiq-alert tiq-alert-error" style={{ marginBottom: 14, fontSize: 12 }}>{decisionActionError}</div>}
+
+                {/* Round decision */}
+                <div className="tiq-card" style={{ padding: 14, marginBottom: 16 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                    <div style={{ fontWeight: 700, fontSize: 13 }}>Round Decision</div>
+                    {(() => {
+                      const dc = DECISION_COLORS[decisionDetail.decision] || DECISION_COLORS.Pending;
+                      return <span style={{ fontSize: 11, fontWeight: 700, color: dc.fg, background: dc.bg, padding: "4px 12px", borderRadius: 999 }}>{decisionDetail.decision}</span>;
+                    })()}
+                  </div>
+                  {(decisionDetail.interviewers?.length || 0) >= 2 ? (
+                    <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                      Determined by majority of the {decisionDetail.interviewers.length} assigned panel members' scorecards
+                      ({(decisionDetail.scorecards || []).length} submitted so far). Use the Scorecards panel to record each panelist's recommendation —
+                      the decision finalizes automatically once a majority is reached.
+                    </div>
+                  ) : decisionDetail.decision !== "Pending" ? (
+                    <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                      Decision recorded {decisionDetail.decision_finalized_at ? `on ${new Date(decisionDetail.decision_finalized_at).toLocaleString()}` : ""}.
+                    </div>
+                  ) : (
+                    <div>
+                      <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 8 }}>
+                        This round has {decisionDetail.interviewers?.length || 0} assigned interviewer(s) — a panel majority isn't meaningful here.
+                        Record the outcome directly:
+                      </div>
+                      <div style={{ display: "flex", gap: 8 }}>
+                        <button className="tiq-btn tiq-btn-outline tiq-btn-sm" style={{ color: "#10b981", borderColor: "#10b981" }}
+                                disabled={decisionActing} onClick={() => setManualDecision("Selected")}>Selected</button>
+                        <button className="tiq-btn tiq-btn-outline tiq-btn-sm" style={{ color: "#ef4444", borderColor: "#ef4444" }}
+                                disabled={decisionActing} onClick={() => setManualDecision("Rejected")}>Rejected</button>
+                        <button className="tiq-btn tiq-btn-outline tiq-btn-sm" style={{ color: "#f59e0b", borderColor: "#f59e0b" }}
+                                disabled={decisionActing} onClick={() => setManualDecision("Hold")}>Hold</button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Scheduling approval */}
+                <div className="tiq-card" style={{ padding: 14, marginBottom: 16 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                    <div style={{ fontWeight: 700, fontSize: 13 }}>Scheduling Approval</div>
+                    {(() => {
+                      const ac = APPROVAL_COLORS[decisionDetail.approval_status] || APPROVAL_COLORS.Pending;
+                      return <span style={{ fontSize: 11, fontWeight: 700, color: ac.fg, background: ac.bg, padding: "4px 12px", borderRadius: 999 }}>{decisionDetail.approval_status}</span>;
+                    })()}
+                  </div>
+                  {!decisionDetail.approver_name && !decisionDetail.approver_email ? (
+                    <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                      No approver set for this round — add one via Edit to enable online approval/cancellation.
+                    </div>
+                  ) : (
+                    <div>
+                      <div style={{ fontSize: 12, marginBottom: 8 }}>
+                        Authority: <b>{decisionDetail.approver_name || decisionDetail.approver_email}</b>
+                        {decisionDetail.approved_by && decisionDetail.approval_status === "Approved" && (
+                          <span style={{ color: "var(--text-muted)" }}> — approved by {decisionDetail.approved_by} on {new Date(decisionDetail.approved_at).toLocaleString()}</span>
+                        )}
+                        {decisionDetail.cancelled_by && decisionDetail.approval_status === "Cancelled" && (
+                          <span style={{ color: "var(--text-muted)" }}> — cancelled by {decisionDetail.cancelled_by} on {new Date(decisionDetail.cancelled_at).toLocaleString()}</span>
+                        )}
+                      </div>
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                        {decisionDetail.approval_url_path && (
+                          <button className="tiq-btn tiq-btn-outline tiq-btn-sm"
+                                  onClick={() => copyFeedbackLink(decisionDetail.approval_token, decisionDetail.approval_url_path)}>
+                            {copiedLinkToken === decisionDetail.approval_token ? <Check size={12} /> : <Copy size={12} />} Copy Approval Link
+                          </button>
+                        )}
+                        <button className="tiq-btn tiq-btn-outline tiq-btn-sm" disabled={decisionActing} onClick={generateApprovalLink}>
+                          <RefreshCw size={12} /> {decisionDetail.approval_token ? "Regenerate Link" : "Generate Link"}
+                        </button>
+                        {decisionDetail.approval_status === "Pending" && (
+                          <button className="tiq-btn tiq-btn-primary tiq-btn-sm" disabled={decisionActing} onClick={approveInApp}>
+                            Approve In-App
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Panel feedback links */}
+                <div className="tiq-card" style={{ padding: 14 }}>
+                  <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 8 }}>Panel Feedback Links</div>
+                  {(decisionDetail.feedback_links || []).length === 0 ? (
+                    <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                      No interviewers assigned yet — add them via Edit to generate individual online feedback links.
+                    </div>
+                  ) : (
+                    <div>
+                      {decisionDetail.feedback_links.map((l: any) => (
+                        <div key={l.token} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: "1px solid var(--border)" }}>
+                          <div>
+                            <div style={{ fontSize: 13, fontWeight: 600 }}>
+                              {l.interviewer_name} {l.is_internal && <span className="tiq-badge tiq-badge-slate" style={{ fontSize: 9, marginLeft: 4 }}>Internal</span>}
+                            </div>
+                            <div style={{ fontSize: 11, color: l.submitted ? "#10b981" : "var(--text-muted)" }}>
+                              {l.submitted ? "✓ Feedback submitted" : "Awaiting feedback"}
+                            </div>
+                          </div>
+                          <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" onClick={() => copyFeedbackLink(l.token, l.feedback_url_path)}>
+                            {copiedLinkToken === l.token ? <Check size={12} /> : <Copy size={12} />} {copiedLinkToken === l.token ? "Copied" : "Copy Link"}
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
             )}

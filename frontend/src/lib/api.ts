@@ -27,7 +27,7 @@ api.interceptors.response.use(
 export const acquisitionApi = {
   getOrganisation: () => api.get("/api/acquisition/organisation").then((r) => r.data),
 
-  listCandidates: (params?: { search?: string; status?: string; source?: string; pool_id?: number; tag?: string; has_files?: boolean }) =>
+  listCandidates: (params?: { search?: string; status?: string; source?: string; pool_id?: number; tag?: string; has_files?: boolean; unlinked_only?: boolean }) =>
     api.get("/api/acquisition/candidates", { params }).then((r) => r.data),
   getCandidate: (id: number) => api.get(`/api/acquisition/candidates/${id}`).then((r) => r.data),
   createCandidate: (data: any) => api.post("/api/acquisition/candidates", data).then((r) => r.data),
@@ -155,6 +155,30 @@ export const interviewApi = {
     api.put(`/api/interviews/scorecards/${scorecardId}`, data).then((r) => r.data),
   deleteScorecard: (scorecardId: number) =>
     api.delete(`/api/interviews/scorecards/${scorecardId}`).then((r) => r.data),
+
+  // Round decision — manual override for 0-1 interviewer rounds (e.g. Resume Screening)
+  setDecision: (id: number, decision: string) =>
+    api.post(`/api/interviews/interviews/${id}/decision`, { decision }).then((r) => r.data),
+
+  // Scheduling approval — a designated authority (internal or external)
+  regenerateApprovalLink: (id: number) =>
+    api.post(`/api/interviews/interviews/${id}/approval/regenerate-link`).then((r) => r.data),
+  approveInApp: (id: number) =>
+    api.post(`/api/interviews/interviews/${id}/approval/approve`).then((r) => r.data),
+};
+
+// ── Public: interview scheduling approval (designated authority, no login) ──
+export const publicInterviewApprovalApi = {
+  get: (token: string) => api.get(`/api/public/interviews/approval/${token}`).then((r) => r.data),
+  approve: (token: string) => api.post(`/api/public/interviews/approval/${token}/approve`).then((r) => r.data),
+  cancel: (token: string, reason: string) =>
+    api.post(`/api/public/interviews/approval/${token}/cancel`, { reason }).then((r) => r.data),
+};
+
+// ── Public: panel feedback (internal or external interviewer, no login) ──
+export const publicInterviewFeedbackApi = {
+  get: (token: string) => api.get(`/api/public/interviews/feedback/${token}`).then((r) => r.data),
+  submit: (token: string, data: any) => api.post(`/api/public/interviews/feedback/${token}`, data).then((r) => r.data),
 };
 
 // ── AI Avatar Interviews (extends Interviews + CandidateLens) ──

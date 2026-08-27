@@ -9,7 +9,10 @@ import JobHuntPage    from "./pages/JobHuntPage";
 import JobIntelPage   from "./pages/JobIntelPage";
 import LinkLensPage   from "./pages/LinkLensPage";
 import CVIntelPage    from "./pages/CVIntelPage";
-import JobLensPage    from "./pages/JobLensPage";
+import ResumeScreeningPage from "./pages/ResumeScreeningPage";
+import PhoneInterviewPage  from "./pages/PhoneInterviewPage";
+import VideoInterviewPage  from "./pages/VideoInterviewPage";
+import FinalDecisionPage   from "./pages/FinalDecisionPage";
 import JDCreatorPage  from "./pages/JDCreatorPage";
 import PublicInterviewPage from "./pages/PublicInterviewPage";
 import CareerApplyPage    from "./pages/CareerApplyPage";
@@ -26,10 +29,13 @@ import GovernancePage     from "./pages/GovernancePage";
 import PublicClientPortalPage from "./pages/PublicClientPortalPage";
 import PublicVendorPortalPage from "./pages/PublicVendorPortalPage";
 import PublicInterviewSchedulePage from "./pages/PublicInterviewSchedulePage";
+import PublicInterviewApprovalPage from "./pages/PublicInterviewApprovalPage";
+import PublicInterviewFeedbackPage from "./pages/PublicInterviewFeedbackPage";
 import ComingSoonPage     from "./pages/ComingSoonPage";
 import SettingsPage   from "./pages/SettingsPage";
 import AdminSetupPage from "./pages/AdminSetupPage";
 import FileManagerPage from "./pages/FileManagerPage";
+import AdminConsolePage from "./pages/AdminConsolePage";
 import AppLayout      from "./components/layout/AppLayout";
 
 const queryClient = new QueryClient({
@@ -64,6 +70,8 @@ export default function App() {
             <Route path="/my-profile/:token" element={<CandidatePortalPage />} />
             <Route path="/hm/:token" element={<HiringManagerViewPage />} />
             <Route path="/schedule-interview/:token" element={<PublicInterviewSchedulePage />} />
+            <Route path="/interview-approval/:token" element={<PublicInterviewApprovalPage />} />
+            <Route path="/interview-feedback/:token" element={<PublicInterviewFeedbackPage />} />
             <Route path="/client-portal/:token" element={<PublicClientPortalPage />} />
             <Route path="/vendor-portal/:token" element={<PublicVendorPortalPage />} />
             <Route path="/app" element={<PrivateRoute><AppLayout /></PrivateRoute>}>
@@ -73,7 +81,10 @@ export default function App() {
               <Route path="linklens"   element={<LinkLensPage />} />
               <Route path="cvintel"    element={<CVIntelPage />} />
               <Route path="jdcreator"  element={<JDCreatorPage />} />
-              <Route path="joblens"    element={<JobLensPage />} />
+              <Route path="resumescreening" element={<ResumeScreeningPage />} />
+              <Route path="phoneinterview"  element={<PhoneInterviewPage />} />
+              <Route path="videointerview"  element={<VideoInterviewPage />} />
+              <Route path="finaldecision"   element={<FinalDecisionPage />} />
               <Route path="acquisition" element={<AcquisitionPage />} />
               <Route path="requisitions"  element={<RequisitionsPage />} />
               <Route path="interviews"    element={<InterviewsPage />} />
@@ -83,8 +94,13 @@ export default function App() {
               <Route path="commercials"   element={<CommercialsPage />} />
               <Route path="reporting"     element={<GovernancePage />} />
               <Route path="settings"   element={<SettingsPage />} />
+              {/* admin-setup / file-manager kept as standalone routes for
+                  anyone with them bookmarked or deep-linked — the
+                  sidebar itself now points at admin-console instead,
+                  which has both as tabs alongside Modules Management. */}
               <Route path="admin-setup"  element={<AdminRoute><AdminSetupPage /></AdminRoute>} />
               <Route path="file-manager" element={<AdminRoute><FileManagerPage /></AdminRoute>} />
+              <Route path="admin-console" element={<AdminRoute><AdminConsolePage /></AdminRoute>} />
             </Route>
           </Routes>
         </BrowserRouter>

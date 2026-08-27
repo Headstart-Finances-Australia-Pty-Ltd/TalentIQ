@@ -16,7 +16,7 @@ const adminApi = {
   query: (sql: string) => api.post("/api/admin/query", { sql }).then(r => r.data),
 };
 
-export default function FileManagerPage() {
+export default function FileManagerPage({ embedded = false }: { embedded?: boolean } = {}) {
   const [activeTable, setActiveTable] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [editRow, setEditRow] = useState<any>(null);
@@ -83,12 +83,14 @@ export default function FileManagerPage() {
 
   return (
     <div>
-      <div className="tiq-page-header">
-        <h1 className="tiq-page-title" style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <Database size={22} color="var(--teal-500)" /> File & Database Manager
-        </h1>
-        <p className="tiq-page-sub">Browse, edit and manage all TalentIQ database tables</p>
-      </div>
+      {!embedded && (
+        <div className="tiq-page-header">
+          <h1 className="tiq-page-title" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <Database size={22} color="var(--teal-500)" /> File & Database Manager
+          </h1>
+          <p className="tiq-page-sub">Browse, edit and manage all TalentIQ database tables</p>
+        </div>
+      )}
 
       {msg && <div className="tiq-alert tiq-alert-success" style={{ marginBottom: 16 }}>{msg}</div>}
 

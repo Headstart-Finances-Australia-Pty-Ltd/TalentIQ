@@ -1,7 +1,7 @@
 import type { LucideIcon } from "lucide-react";
 import {
   UserPlus, Users, FileEdit, ClipboardList, Briefcase, BrainCircuit, BarChart2,
-  Video, Workflow, Building2, MessageSquare, Receipt, LineChart,
+  Video, Workflow, Building2, MessageSquare, Receipt, LineChart, Phone, CheckCircle,
 } from "lucide-react";
 
 export type CapabilityModule = {
@@ -38,16 +38,16 @@ export const CAPABILITIES: Capability[] = [
     summary: "A job doesn't exist until it's a structured, approved, owned object.",
     modules: [
       {
-        name: "JD Creator", route: "/app/jdcreator", icon: FileEdit, built: true,
-        tagline: "AI-generated job descriptions in seconds",
-        desc: "Enter a role title, required skills, experience, and education — get a formal, professionally-written Position Description, ready to download as Word.",
-        features: ["AI-written purpose & responsibilities", "Company branding from your profile", "One-click Word (.docx) download", "Saved JD history"],
-      },
-      {
         name: "Requisitions", route: "/app/requisitions", icon: ClipboardList, emoji: "📋", built: true,
         tagline: "Approval workflow for every open role",
         desc: "Turn a JD into an owned, approved requisition — headcount, budget, hiring manager, and priority tracked from Draft through to Filled.",
         features: ["Draft → Approved → Open → Filled workflow", "Recruiter & hiring-manager ownership", "Vacancy count & priority", "Intake checklist"],
+      },
+      {
+        name: "JD Creator", route: "/app/jdcreator", icon: FileEdit, built: true,
+        tagline: "AI-generated job descriptions in seconds",
+        desc: "Enter a role title, required skills, experience, and education — get a formal, professionally-written Position Description, ready to download as Word.",
+        features: ["AI-written purpose & responsibilities", "Company branding from your profile", "One-click Word (.docx) download", "Saved JD history"],
       },
     ],
   },
@@ -74,10 +74,28 @@ export const CAPABILITIES: Capability[] = [
     summary: "AI ranks, scores, and explains every candidate against every role.",
     modules: [
       {
-        name: "CandidateLens", route: "/app/joblens", icon: Briefcase, built: true,
-        tagline: "AI recruitment engine & video interviews",
-        desc: "Upload a JD and multiple CVs. AI ranks candidates by ATS score, generates interview questions, and runs video interviews.",
-        features: ["Multi-CV batch scoring", "AI interview question generation", "Webcam video interviews", "Emotion analysis & Excel export"],
+        name: "Resume Screening", route: "/app/resumescreening", icon: Briefcase, built: true,
+        tagline: "AI-ranked CVs against a job description",
+        desc: "Upload a JD and multiple CVs. AI ranks candidates by ATS score, explains matched vs missing skills, and shortlists who moves on to Phone Interview.",
+        features: ["Multi-CV batch scoring", "Matched vs missing skills", "Shortlisting & re-weighting", "Excel export"],
+      },
+      {
+        name: "Phone Interview", route: "/app/phoneinterview", icon: Phone, built: true,
+        tagline: "AI call questions, recruiter-logged outcomes",
+        desc: "For candidates shortlisted in Resume Screening: AI-generated phone screening questions, plus a simple recommendation and notes once the call happens.",
+        features: ["AI-generated screening questions", "Contacted / outcome tracking", "Proceed, Hold, or Reject recommendation", "Call notes"],
+      },
+      {
+        name: "Video Interview", route: "/app/videointerview", icon: Video, built: true,
+        tagline: "Webcam interviews with live emotion analysis",
+        desc: "Webcam-based AI video interviews with real-time emotion analysis, auto-scored transcripts, and full playback — for candidates who've passed Phone Interview.",
+        features: ["Webcam video interviews", "Live emotion analysis", "AI-scored transcript & Q&A", "Recording playback"],
+      },
+      {
+        name: "Final Decision", route: "/app/finaldecision", icon: CheckCircle, built: true,
+        tagline: "Resume, phone, and video scores — one final call",
+        desc: "Every candidate's Resume Screening, Phone Interview, and Video Interview scores side by side, with a single Shortlist column to record the final hire/no-hire decision.",
+        features: ["Resume Screening score", "Phone Interview outcome", "Video Interview score", "Final Shortlist decision"],
       },
       {
         name: "MarketIntel", route: "/app/jobintel", icon: BarChart2, built: true,
@@ -93,9 +111,9 @@ export const CAPABILITIES: Capability[] = [
     modules: [
       {
         name: "Interview Scheduling", route: "/app/interviews", icon: Video, built: true,
-        tagline: "Human interviews, scheduled and scored",
-        desc: "Calendar-synced scheduling, structured interview rounds, and interviewer scorecards — complementing the AI video interviews already built into CandidateLens.",
-        features: ["Self-scheduling links (TalentIQ or Calendly) & calendar sync", "Multi-round interview tracking", "Structured interviewer scorecards", "Auto-updates candidate stage"],
+        tagline: "Phone → Video → Panel, scored and decided",
+        desc: "A structured round sequence — Phone Interview, Video Interview, then Panel Interview — with interviewers, time/place/artifacts tracked per round, online approval by a designated authority, and panel decisions by majority vote.",
+        features: ["Phone → Video → Panel round classes", "Interviewers assigned per round", "Online approval/cancellation by a designated authority", "Majority-vote round decisions, auto-applied"],
       },
     ],
   },

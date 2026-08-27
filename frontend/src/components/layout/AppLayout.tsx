@@ -1,10 +1,12 @@
 import { useState } from "react";
 import { Outlet, NavLink, Link } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
 import {
   LayoutDashboard, Settings, LogOut, Shield, Database, Home,
   ChevronDown, ChevronRight, Zap,
 } from "lucide-react";
 import { useAuth } from "../../hooks/useAuth";
+import { api } from "../../lib/api";
 import { CAPABILITIES, CORE_PIPELINE_CAPABILITIES, SUPPORTING_CAPABILITIES, JOBSEEKER_MODULES } from "../../lib/capabilities";
 
 // Matches .tiq-nav-item's own font exactly (14px / 500 / rgba(255,255,255,.6))
@@ -14,8 +16,17 @@ const CAPABILITY_LABEL_STYLE: React.CSSProperties = {
   fontSize: 14, fontWeight: 500, color: "rgba(255,255,255,.68)", lineHeight: "20px",
 };
 
-function CapabilityGroup({ capability }: { capability: (typeof CAPABILITIES)[0] }) {
-  const [open, setOpen] = useState(false);
+function CapabilityGroup({ capability, moduleToggles }: { capability: (typeof CAPABILITIES)[0]; moduleToggles: Record<string, boolean> }) {
+  // Expanded by default — a collapsed-by-default sidebar was hiding
+  // modules (Pipeline & Offers under "Placements" in particular) well
+  // enough that they read as missing rather than just one click away.
+  // Still collapsible per-group for anyone who wants to tidy it up.
+  const [open, setOpen] = useState(true);
+  // A missing entry means enabled — see Admin Console > Modules
+  // Management and routers/admin.py's get_module_toggles, which only
+  // ever stores rows for modules an admin has actually turned off.
+  const visibleModules = capability.modules.filter((m) => moduleToggles[m.route] !== false);
+  if (visibleModules.length === 0) return null;
   return (
     <div>
       <button
@@ -40,7 +51,7 @@ function CapabilityGroup({ capability }: { capability: (typeof CAPABILITIES)[0] 
           {open ? <ChevronDown size={13} color="rgba(255,255,255,.4)" /> : <ChevronRight size={13} color="rgba(255,255,255,.4)" />}
         </span>
       </button>
-      {open && capability.modules.map(({ route, name, icon: Icon, built }) => (
+      {open && visibleModules.map(({ route, name, icon: Icon, built }) => (
         <NavLink key={route} to={route}
           className={({ isActive }) => `tiq-nav-item${isActive ? " active" : ""}`}
           style={{ padding: "6px 12px 6px 34px", fontSize: 12 }}>
@@ -64,6 +75,14 @@ function CapabilityGroup({ capability }: { capability: (typeof CAPABILITIES)[0] 
 export default function AppLayout() {
   const { user, logout } = useAuth();
   const isAdmin = user?.role === "admin";
+  // Loaded once for the whole sidebar — every CapabilityGroup reads from
+  // this same map rather than each fetching its own copy. Defaults to
+  // {} (nothing hidden) while loading, so the sidebar renders fully
+  // populated immediately rather than flashing empty first.
+  const { data: moduleToggles = {} } = useQuery({
+    queryKey: ["module-toggles"],
+    queryFn: () => api.get("/api/admin/module-toggles").then(r => r.data as Record<string, boolean>),
+  });
 
   return (
     <div className="tiq-app-shell">
@@ -84,10 +103,10 @@ export default function AppLayout() {
           </NavLink>
 
           <div className="tiq-nav-section">Recruitment Capabilities</div>
-          {CORE_PIPELINE_CAPABILITIES.map((capability) => <CapabilityGroup key={capability.name} capability={capability} />)}
+          {CORE_PIPELINE_CAPABILITIES.map((capability) => <CapabilityGroup key={capability.name} capability={capability} moduleToggles={moduleToggles} />)}
 
           <div className="tiq-nav-section">Supporting Capabilities</div>
-          {SUPPORTING_CAPABILITIES.map((capability) => <CapabilityGroup key={capability.name} capability={capability} />)}
+          {SUPPORTING_CAPABILITIES.map((capability) => <CapabilityGroup key={capability.name} capability={capability} moduleToggles={moduleToggles} />)}
 
           <div className="tiq-nav-section">Job Seeker Tools</div>
           {JOBSEEKER_MODULES.map(({ route, name, icon: Icon, emoji }) => (
@@ -107,13 +126,9 @@ export default function AppLayout() {
           {isAdmin && (
             <>
               <div className="tiq-nav-section">Admin</div>
-              <NavLink to="/app/admin-setup"
+              <NavLink to="/app/admin-console"
                 className={({ isActive }) => `tiq-nav-item${isActive ? " active" : ""}`}>
-                <Shield size={16} />User Management
-              </NavLink>
-              <NavLink to="/app/file-manager"
-                className={({ isActive }) => `tiq-nav-item${isActive ? " active" : ""}`}>
-                <Database size={16} />File Manager
+                <Shield size={16} />Admin Console
               </NavLink>
             </>
           )}

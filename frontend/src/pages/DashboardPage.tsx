@@ -1,23 +1,10 @@
 import { useState, useEffect } from "react";
-import { useNavigate, Link } from "react-router-dom";
+import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { Building2, UserCheck, Video, DollarSign, TrendingUp, CheckCircle2, ChevronDown, ChevronRight, X } from "lucide-react";
 import { governanceApi } from "../lib/api";
-import { CAPABILITIES } from "../lib/capabilities";
 import RecruitmentWorkflow from "../components/RecruitmentWorkflow";
-
-// Built modules across the recruitment-platform capabilities, in capability
-// order — this is what Quick Actions is generated from, so a newly-built
-// module (or Talent Pool, which the hardcoded version below was missing)
-// shows up automatically instead of the grid silently drifting from the
-// rest of the app's navigation.
-const QUICK_ACTIONS = CAPABILITIES.flatMap((cap) =>
-  cap.modules.filter((m) => m.built).map((m) => ({
-    to: m.route, icon: m.icon, title: m.tagline, desc: m.desc,
-    color: cap.color, bg: cap.bg, emoji: cap.emoji, name: m.name,
-  }))
-);
 
 // A colored pill used across every dashboard table for status-style counts.
 function Pill({ value, color }: { value: number | string; color: string }) {
@@ -99,6 +86,30 @@ function TileDetailModal({ title, color, rows, valueLabel, onClose }: {
   );
 }
 
+// Generic large modal shell for a tile's drill-down — same overlay/card
+// pattern as TileDetailModal, but takes arbitrary children instead of a
+// fixed client/role/value table, for tiles whose drill-down is a richer
+// multi-table view (e.g. Clients, Roles Tracked below).
+function TileDrilldownModal({ title, color, icon, onClose, children }: {
+  title: string; color: string; icon: ReactNode; onClose: () => void; children: ReactNode;
+}) {
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}
+         onClick={onClose}>
+      <div style={{ background: "#fff", color: "#111827", borderRadius: 14, padding: 24, maxWidth: 860, width: "100%", maxHeight: "86vh", overflowY: "auto" }}
+           onClick={(e) => e.stopPropagation()}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 800, fontSize: 16, color }}>
+            {icon} {title}
+          </div>
+          <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)" }}><X size={18} /></button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
 // Shared card shell (colored header band + icon + title) used by every
 // module's dashboard table, so all four modules look consistent.
 function TableCard({ icon: Icon, color, title, children }: { icon: any; color: string; title: string; children: ReactNode }) {
@@ -123,33 +134,34 @@ function EmptyRow({ colSpan, icon: Icon, text }: { colSpan: number; icon: any; t
 }
 
 export default function DashboardPage() {
-  const navigate = useNavigate();
   const [clientFilter, setClientFilter] = useState<string>("");
-  const [rolesByRoleOpen, setRolesByRoleOpen] = useState(false);
-  const [rolesByClientOpen, setRolesByClientOpen] = useState(false);
   const [workflowOpen, setWorkflowOpen] = useState(false);
-  const [orgs, setOrgs] = useState<any[]>([]);
   const [activeOrgId, setActiveOrgId] = useState<number | undefined>(undefined);
   const [openTile, setOpenTile] = useState<string | null>(null);
 
+  // Was a strict waterfall: wait for the org list to fully round-trip,
+  // THEN start the (separate) overview request once activeOrgId was set
+  // from it — two sequential network calls for what's almost always a
+  // single-org user. Now both fire in parallel: the overview query
+  // starts immediately with org_id=undefined (the backend already
+  // defaults that to the user's own org — see _resolve_org_context), and
+  // only refetches with a different org_id if the org list comes back
+  // showing they were invited into a DIFFERENT org than their own,
+  // which is the less common case.
+  const { data: orgs = [] } = useQuery<any[]>({
+    queryKey: ["governance-my-organisations"],
+    queryFn: governanceApi.listMyOrganisations,
+  });
   useEffect(() => {
-    governanceApi.listMyOrganisations().then((list) => {
-      setOrgs(list);
-      // Same default as Governance's own org switcher: prefer an org you
-      // were INVITED into over the empty one every account owns by
-      // default — see GovernancePage.tsx for the live-reproduced bug
-      // this fixes (a team member's dashboard silently showing their
-      // own, unrelated, empty org instead of the team they actually
-      // work in).
-      const invited = list.find((o: any) => o.role !== "Owner");
-      setActiveOrgId(invited ? invited.organisation_id : list[0]?.organisation_id);
-    });
-  }, []);
+    if (orgs.length === 0) return;
+    const invited = orgs.find((o: any) => o.role !== "Owner");
+    const preferredOrgId = invited ? invited.organisation_id : orgs[0]?.organisation_id;
+    if (preferredOrgId !== undefined) setActiveOrgId(preferredOrgId);
+  }, [orgs]);
 
   const { data: overview, isLoading: overviewLoading, error: overviewError } = useQuery({
     queryKey: ["dashboard-requisitions-overview", activeOrgId],
     queryFn: () => governanceApi.getRequisitionsOverview(activeOrgId),
-    enabled: activeOrgId !== undefined,
     refetchInterval: 30_000,
   });
   const filteredRequisitions = overview ? (clientFilter ? overview.by_requisition.filter((r: any) => r.client_name === clientFilter) : overview.by_requisition) : [];
@@ -166,29 +178,6 @@ export default function DashboardPage() {
         <div style={{ fontSize: 13, color: "var(--text-muted)", fontWeight: 600, alignSelf: "flex-end" }}>
           {today}
         </div>
-      </div>
-
-      {/* RECRUITMENT WORKFLOW — collapsed by default (same dropdown-style
-          shrink/expand pattern as the per-role table below), mirroring
-          the same diagram shown on the landing page. */}
-      <div className="tiq-card tiq-mb-6" style={{ padding: 0, overflow: "hidden" }}>
-        <button
-          onClick={() => setWorkflowOpen((v) => !v)}
-          style={{
-            width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8,
-            padding: "16px 24px", background: "none", border: "none", cursor: "pointer", textAlign: "left",
-          }}
-        >
-          <span style={{ fontSize: 12, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: ".06em" }}>
-            Recruitment Workflow · How Your Hiring Flows Through TalentIQ
-          </span>
-          {workflowOpen ? <ChevronDown size={16} color="var(--text-muted)" /> : <ChevronRight size={16} color="var(--text-muted)" />}
-        </button>
-        {workflowOpen && (
-          <div style={{ padding: "0 24px 24px" }}>
-            <RecruitmentWorkflow compact />
-          </div>
-        )}
       </div>
 
       {/* BUSINESS OVERVIEW — open/closed roles by client, vendor sourcing
@@ -227,25 +216,48 @@ export default function DashboardPage() {
           </div>
         ) : (
           <>
-            {/* Summary stat row — all 6 in one line; each is clickable
-                and opens a Client/Role breakdown built from
-                overview.by_requisition (already fetched, no extra call). */}
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(6, minmax(0, 1fr))", gap: 12, marginBottom: 20 }}>
-              <DashStat icon={<Building2 size={14} />} label="Open Roles" value={overview.summary.open_count} color="#10b981"
-                        onClick={() => setOpenTile("open")} />
-              <DashStat icon={<Building2 size={14} />} label="Closed Roles" value={overview.summary.closed_count} color="#64748b"
-                        onClick={() => setOpenTile("closed")} />
-              <DashStat icon={<Building2 size={14} />} label="Pending" value={overview.summary.pending_count} color="#f59e0b"
-                        onClick={() => setOpenTile("pending")} />
-              <DashStat icon={<Video size={14} />} label="Avg Interviews / Role" value={overview.summary.avg_interviews_per_role} color="#8b5cf6"
-                        onClick={() => setOpenTile("interviews")} />
-              <DashStat icon={<DollarSign size={14} />} label="Total Offers" value={overview.summary.total_offers} color="#3b82f6"
-                        onClick={() => setOpenTile("offers")} />
-              <DashStat icon={<CheckCircle2 size={14} />} label="Offers Accepted" value={overview.summary.offers_by_status?.Accepted || 0} color="#10b981"
-                        onClick={() => setOpenTile("accepted")} />
+            {/* Summary stat tiles — all clickable, each opens a drill-down
+                (Client/Role breakdown, or a richer multi-table view for
+                Clients/Roles Tracked below) built from overview data
+                already fetched, no extra calls. Flex-wrap + centered so
+                the row wraps onto a second row instead of squeezing
+                tiles down as more are added. */}
+            <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "center", gap: 12, marginBottom: 20 }}>
+              <div style={{ flex: "1 1 150px", maxWidth: 200 }}>
+                <DashStat icon={<Building2 size={14} />} label="Open Roles" value={overview.summary.open_count} color="#10b981"
+                          onClick={() => setOpenTile("open")} />
+              </div>
+              <div style={{ flex: "1 1 150px", maxWidth: 200 }}>
+                <DashStat icon={<Building2 size={14} />} label="Closed Roles" value={overview.summary.closed_count} color="#64748b"
+                          onClick={() => setOpenTile("closed")} />
+              </div>
+              <div style={{ flex: "1 1 150px", maxWidth: 200 }}>
+                <DashStat icon={<Building2 size={14} />} label="Pending" value={overview.summary.pending_count} color="#f59e0b"
+                          onClick={() => setOpenTile("pending")} />
+              </div>
+              <div style={{ flex: "1 1 150px", maxWidth: 200 }}>
+                <DashStat icon={<Video size={14} />} label="Avg Interviews / Role" value={overview.summary.avg_interviews_per_role} color="#8b5cf6"
+                          onClick={() => setOpenTile("interviews")} />
+              </div>
+              <div style={{ flex: "1 1 150px", maxWidth: 200 }}>
+                <DashStat icon={<DollarSign size={14} />} label="Total Offers" value={overview.summary.total_offers} color="#3b82f6"
+                          onClick={() => setOpenTile("offers")} />
+              </div>
+              <div style={{ flex: "1 1 150px", maxWidth: 200 }}>
+                <DashStat icon={<CheckCircle2 size={14} />} label="Offers Accepted" value={overview.summary.offers_by_status?.Accepted || 0} color="#10b981"
+                          onClick={() => setOpenTile("accepted")} />
+              </div>
+              <div style={{ flex: "1 1 150px", maxWidth: 200 }}>
+                <DashStat icon={<Building2 size={14} />} label="Clients" value={overview.by_client.length} color="#64748b"
+                          onClick={() => setOpenTile("clients")} />
+              </div>
+              <div style={{ flex: "1 1 150px", maxWidth: 200 }}>
+                <DashStat icon={<TrendingUp size={14} />} label="Roles Tracked" value={overview.by_requisition.length} color="#f43f5e"
+                          onClick={() => setOpenTile("roles")} />
+              </div>
             </div>
 
-            {openTile && (() => {
+            {openTile && openTile !== "clients" && openTile !== "roles" && (() => {
               const configs: Record<string, { title: string; color: string; valueLabel: string; rows: { client: string; role: string; value: number | string }[] }> = {
                 open: {
                   title: "Open Roles", color: "#10b981", valueLabel: "Status",
@@ -282,101 +294,71 @@ export default function DashboardPage() {
               return <TileDetailModal title={cfg.title} color={cfg.color} valueLabel={cfg.valueLabel} rows={cfg.rows} onClose={() => setOpenTile(null)} />;
             })()}
 
-            <div style={{ marginTop: 20, border: "1px solid var(--border)", borderRadius: 12, overflow: "hidden" }}>
-              <button
-                onClick={() => setRolesByClientOpen((v) => !v)}
-                style={{
-                  width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8,
-                  padding: "12px 16px", background: "linear-gradient(135deg, #64748b14, #64748b03)",
-                  border: "none", cursor: "pointer", textAlign: "left",
-                }}
-              >
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <Building2 size={14} color="#64748b" />
-                  <span style={{ fontSize: 12, fontWeight: 700, color: "var(--text-primary)", textTransform: "uppercase", letterSpacing: ".03em" }}>
-                    Roles &amp; Offers by Client
-                  </span>
-                </div>
-                {rolesByClientOpen ? <ChevronDown size={16} color="var(--text-muted)" /> : <ChevronRight size={16} color="var(--text-muted)" />}
-              </button>
-              {rolesByClientOpen && (
-                <div style={{ padding: 20 }}>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
-                    {/* By client */}
-                    <TableCard icon={Building2} color="#64748b" title="Roles &amp; Offers by Client">
-                      <div style={{ padding: "10px 16px 0" }}>
-                        <select className="tiq-select" style={{ width: "100%", fontSize: 12 }} value={clientFilter} onChange={(e) => setClientFilter(e.target.value)}>
-                          <option value="">All Clients</option>
-                          {overview.by_client.map((c: any) => <option key={c.client_name} value={c.client_name}>{c.client_name}</option>)}
-                        </select>
-                      </div>
-                      <table className="tiq-table" style={{ fontSize: 12, width: "100%" }}>
-                        <thead>
-                          <tr>
-                            <th>Client</th>
-                            <th style={{ textAlign: "center" }}>Open</th>
-                            <th style={{ textAlign: "center" }}>Closed</th>
-                            <th style={{ textAlign: "center" }}>Pending</th>
-                            <th style={{ textAlign: "center" }}>Offers</th>
+            {openTile === "clients" && (
+              <TileDrilldownModal title="Roles & Offers by Client" color="#64748b" icon={<Building2 size={18} />} onClose={() => setOpenTile(null)}>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
+                  {/* By client */}
+                  <TableCard icon={Building2} color="#64748b" title="Roles &amp; Offers by Client">
+                    <div style={{ padding: "10px 16px 0" }}>
+                      <select className="tiq-select" style={{ width: "100%", fontSize: 12 }} value={clientFilter} onChange={(e) => setClientFilter(e.target.value)}>
+                        <option value="">All Clients</option>
+                        {overview.by_client.map((c: any) => <option key={c.client_name} value={c.client_name}>{c.client_name}</option>)}
+                      </select>
+                    </div>
+                    <table className="tiq-table" style={{ fontSize: 12, width: "100%" }}>
+                      <thead>
+                        <tr>
+                          <th>Client</th>
+                          <th style={{ textAlign: "center" }}>Open</th>
+                          <th style={{ textAlign: "center" }}>Closed</th>
+                          <th style={{ textAlign: "center" }}>Pending</th>
+                          <th style={{ textAlign: "center" }}>Offers</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(clientFilter ? overview.by_client.filter((c: any) => c.client_name === clientFilter) : overview.by_client).map((c: any) => (
+                          <tr key={c.client_name}>
+                            <td style={{ fontWeight: 600 }}>{c.client_name}</td>
+                            <td style={{ textAlign: "center" }}><Pill value={c.open} color="#10b981" /></td>
+                            <td style={{ textAlign: "center" }}><Pill value={c.closed} color="#64748b" /></td>
+                            <td style={{ textAlign: "center" }}><Pill value={c.pending} color="#f59e0b" /></td>
+                            <td style={{ textAlign: "center", fontWeight: 700 }}>{c.offer_count}</td>
                           </tr>
-                        </thead>
-                        <tbody>
-                          {(clientFilter ? overview.by_client.filter((c: any) => c.client_name === clientFilter) : overview.by_client).map((c: any) => (
-                            <tr key={c.client_name}>
-                              <td style={{ fontWeight: 600 }}>{c.client_name}</td>
-                              <td style={{ textAlign: "center" }}><Pill value={c.open} color="#10b981" /></td>
-                              <td style={{ textAlign: "center" }}><Pill value={c.closed} color="#64748b" /></td>
-                              <td style={{ textAlign: "center" }}><Pill value={c.pending} color="#f59e0b" /></td>
-                              <td style={{ textAlign: "center", fontWeight: 700 }}>{c.offer_count}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </TableCard>
+                        ))}
+                      </tbody>
+                    </table>
+                  </TableCard>
 
-                    {/* Offer acceptance status, org-wide */}
-                    <TableCard icon={UserCheck} color="#3b82f6" title="Offer Acceptance Status">
-                      {Object.keys(overview.summary.offers_by_status || {}).length === 0 ? (
-                        <EmptyRow colSpan={1} icon={UserCheck} text="No offers made yet" />
-                      ) : (
-                        <div style={{ padding: 16 }}>
-                          {Object.entries(overview.summary.offers_by_status).map(([status, count]: [string, any]) => (
-                            <div key={status} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 4px", borderBottom: "1px solid var(--border)" }}>
-                              <span style={{ fontSize: 12 }}>{status}</span>
-                              <Pill value={count} color={status === "Accepted" ? "#10b981" : status === "Rejected" ? "#ef4444" : status === "Sent" ? "#3b82f6" : "#64748b"} />
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </TableCard>
-                  </div>
+                  {/* Offer acceptance status, org-wide */}
+                  <TableCard icon={UserCheck} color="#3b82f6" title="Offer Acceptance Status">
+                    {Object.keys(overview.summary.offers_by_status || {}).length === 0 ? (
+                      <EmptyRow colSpan={1} icon={UserCheck} text="No offers made yet" />
+                    ) : (
+                      <div style={{ padding: 16 }}>
+                        {Object.entries(overview.summary.offers_by_status).map(([status, count]: [string, any]) => (
+                          <div key={status} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 4px", borderBottom: "1px solid var(--border)" }}>
+                            <span style={{ fontSize: 12 }}>{status}</span>
+                            <Pill value={count} color={status === "Accepted" ? "#10b981" : status === "Rejected" ? "#ef4444" : status === "Sent" ? "#3b82f6" : "#64748b"} />
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </TableCard>
                 </div>
-              )}
-            </div>
+              </TileDrilldownModal>
+            )}
 
-            {/* Per-role detail: vendor sourcing + screening + interviews +
-                offers — collapsed by default (this table has one row per
-                role, so it can get long fast) and expanded via the
-                dropdown-style header below. */}
-            <div style={{ marginTop: 20, border: "1px solid var(--border)", borderRadius: 12, overflow: "hidden" }}>
-              <button
-                onClick={() => setRolesByRoleOpen((v) => !v)}
-                style={{
-                  width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8,
-                  padding: "12px 16px", background: "linear-gradient(135deg, #f43f5e14, #f43f5e03)",
-                  border: "none", cursor: "pointer", textAlign: "left",
-                }}
+            {openTile === "roles" && (
+              <TileDrilldownModal
+                title="Sourcing, Screening & Interviews by Role" color="#f43f5e" icon={<TrendingUp size={18} />}
+                onClose={() => setOpenTile(null)}
               >
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <TrendingUp size={14} color="#f43f5e" />
-                  <span style={{ fontSize: 12, fontWeight: 700, color: "var(--text-primary)", textTransform: "uppercase", letterSpacing: ".03em" }}>
-                    Sourcing, Screening &amp; Interviews by Role
-                  </span>
-                  <span className="tiq-badge tiq-badge-slate" style={{ fontSize: 10 }}>{filteredRequisitions.length}</span>
+                <div style={{ marginBottom: 12 }}>
+                  <select className="tiq-select" style={{ width: 220, fontSize: 12 }} value={clientFilter} onChange={(e) => setClientFilter(e.target.value)}>
+                    <option value="">All Clients</option>
+                    {overview.by_client.map((c: any) => <option key={c.client_name} value={c.client_name}>{c.client_name}</option>)}
+                  </select>
                 </div>
-                {rolesByRoleOpen ? <ChevronDown size={16} color="var(--text-muted)" /> : <ChevronRight size={16} color="var(--text-muted)" />}
-              </button>
-              {rolesByRoleOpen && (
                 <div style={{ overflowX: "auto" }}>
                   <table className="tiq-table" style={{ fontSize: 12, width: "100%" }}>
                     <thead>
@@ -421,30 +403,35 @@ export default function DashboardPage() {
                     </tbody>
                   </table>
                 </div>
-              )}
-            </div>
+              </TileDrilldownModal>
+            )}
           </>
         )}
       </div>
 
-      {/* QUICK ACTIONS — a compact dropdown instead of a full card grid;
-          still derived from the same capability config as the sidebar/
-          landing page, so it can never silently drift out of sync. */}
-      <div className="tiq-card tiq-mb-6" style={{ padding: 20 }}>
-        <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 12 }}>
-          Quick Actions
-        </div>
-        <select
-          className="tiq-select"
-          style={{ width: "100%", maxWidth: 420 }}
-          defaultValue=""
-          onChange={(e) => { if (e.target.value) navigate(e.target.value); }}
+      {/* RECRUITMENT WORKFLOW — moved below Business Overview so the
+          numbers come first and the explanatory diagram follows. Still
+          collapsed by default (same dropdown-style shrink/expand pattern
+          as the per-role table above), mirroring the same diagram shown
+          on the landing page. */}
+      <div className="tiq-card tiq-mb-6" style={{ padding: 0, overflow: "hidden" }}>
+        <button
+          onClick={() => setWorkflowOpen((v) => !v)}
+          style={{
+            width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8,
+            padding: "16px 24px", background: "none", border: "none", cursor: "pointer", textAlign: "left",
+          }}
         >
-          <option value="" disabled>Jump to a module…</option>
-          {QUICK_ACTIONS.map((item) => (
-            <option key={item.to} value={item.to}>{item.emoji} {item.name} — {item.title}</option>
-          ))}
-        </select>
+          <span style={{ fontSize: 12, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: ".06em" }}>
+            Recruitment Workflow · How Your Hiring Flows Through TalentIQ
+          </span>
+          {workflowOpen ? <ChevronDown size={16} color="var(--text-muted)" /> : <ChevronRight size={16} color="var(--text-muted)" />}
+        </button>
+        {workflowOpen && (
+          <div style={{ padding: "0 24px 24px" }}>
+            <RecruitmentWorkflow compact />
+          </div>
+        )}
       </div>
     </div>
   );

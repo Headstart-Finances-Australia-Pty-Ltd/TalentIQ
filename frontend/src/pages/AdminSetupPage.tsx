@@ -16,7 +16,7 @@ function Badge({ val }: { val: string }) {
   return <span className={`tiq-badge ${colors[val] || "tiq-badge-slate"}`}>{val}</span>;
 }
 
-export default function AdminSetupPage() {
+export default function AdminSetupPage({ embedded = false }: { embedded?: boolean } = {}) {
   const qc = useQueryClient();
   const [editing, setEditing] = useState<any>(null);
   const [newPw, setNewPw] = useState("");
@@ -45,12 +45,17 @@ export default function AdminSetupPage() {
 
   return (
     <div>
-      <div className="tiq-page-header">
-        <h1 className="tiq-page-title" style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <Shield size={22} color="var(--violet-500)" /> User Management
-        </h1>
-        <p className="tiq-page-sub">View, edit and manage all registered users</p>
-      </div>
+      {/* Own header suppressed when embedded as an Admin Console tab —
+          the console's own title + tab bar already says what this is,
+          a second page-sized heading right under it was redundant. */}
+      {!embedded && (
+        <div className="tiq-page-header">
+          <h1 className="tiq-page-title" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <Shield size={22} color="var(--violet-500)" /> User Management
+          </h1>
+          <p className="tiq-page-sub">View, edit and manage all registered users</p>
+        </div>
+      )}
 
       {msg && <div className="tiq-alert tiq-alert-success">{msg}</div>}
 

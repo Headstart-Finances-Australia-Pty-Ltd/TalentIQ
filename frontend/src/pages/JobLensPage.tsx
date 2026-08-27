@@ -1,11 +1,12 @@
-import { } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { useState, useRef, useEffect } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ResizableFilterHeader } from "../components/ResizableFilterHeader";
 import { useLatestMutation } from "../hooks/useLatestMutation";
 import {
   Users, Upload, FileText, Play, Download, ChevronDown, ChevronUp,
   CheckCircle, Clock, XCircle, Star, Video, RefreshCw, Sparkles, BarChart2,
-  Trash2, Mail, Building2, AlertTriangle } from "lucide-react";
+  Trash2, Mail, Building2, AlertTriangle, Phone } from "lucide-react";
 import { api } from "../lib/api";
 import { useAuth } from "../hooks/useAuth";
 import JDManagementTab from "../components/candidatetrack/JDManagementTab";
@@ -171,8 +172,8 @@ const jobLensApi = {
   }).then(r => r.data),
   sessions: () => api.get("/api/joblens/sessions").then(r => r.data),
   session: (id: number) => api.get(`/api/joblens/sessions/${id}`).then(r => r.data),
-  generateQuestions: (sid: number, cid: number) =>
-    api.post(`/api/joblens/sessions/${sid}/candidates/${cid}/questions`).then(r => r.data),
+  generateQuestions: (sid: number, cid: number, regenerate = false) =>
+    api.post(`/api/joblens/sessions/${sid}/candidates/${cid}/questions`, null, { params: regenerate ? { regenerate: true } : {} }).then(r => r.data),
   toggleShortlist: (cid: number) =>
     api.put(`/api/joblens/candidates/${cid}/shortlist`).then(r => r.data),
   saveInterviewResult: (cid: number, result: any) =>
@@ -185,6 +186,12 @@ const jobLensApi = {
     api.get(`/api/joblens/morphcast-key`).then(r => r.data),
   markContacted: (cid: number) =>
     api.post(`/api/joblens/candidates/${cid}/mark-contacted`).then(r => r.data),
+  markPhoneContacted: (cid: number) =>
+    api.post(`/api/joblens/candidates/${cid}/phone-contacted`).then(r => r.data),
+  savePhoneResult: (cid: number, data: { recommendation: string; notes: string }) =>
+    api.post(`/api/joblens/candidates/${cid}/phone-result`, data).then(r => r.data),
+  saveVideoResult: (cid: number, data: { recommendation: string; notes: string }) =>
+    api.post(`/api/joblens/candidates/${cid}/video-result`, data).then(r => r.data),
   uploadVideo: (cid: number, blob: Blob) => {
     const form = new FormData();
     form.append("file", blob, "interview.webm");
@@ -212,6 +219,14 @@ function StatusBadge({ status }: { status: string }) {
   return <span className={`tiq-badge ${map[status] || "tiq-badge-slate"}`}>{status}</span>;
 }
 
+// Small pill for a Proceed/Hold/Reject recommendation — used by both the
+// Phone Score column (Video Interview page) and the Telephonic/Video
+// Interview columns (Final Decision page) to show a prior stage's outcome.
+function RecommendationBadge({ value }: { value: string }) {
+  const map: Record<string, string> = { Proceed: "tiq-badge-teal", Hold: "tiq-badge-amber", Reject: "tiq-badge-rose" };
+  return <span className={`tiq-badge ${map[value] || "tiq-badge-slate"}`}>{value}</span>;
+}
+
 function ScoreCell({ score, low, high }: { score: number; low: number; high: number }) {
   const color = score >= high ? "#10b981" : score >= low ? "#f59e0b" : "#ef4444";
   return (
@@ -234,8 +249,8 @@ function ProgressBar({ value, color = "var(--teal-500)" }: { value: number; colo
 // whatever triggered it (a "+N more" link, a resume-summary snippet, etc.)
 // and closes on outside click. No dimmed background, no centering.
 function AnchoredPopover({
-  x, y, onClose, width = 300, children
-}: { x: number; y: number; onClose: () => void; width?: number; children: React.ReactNode }) {
+  x, y, onClose, width = 300, openAbove = false, children
+}: { x: number; y: number; onClose: () => void; width?: number; openAbove?: boolean; children: React.ReactNode }) {
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -260,6 +275,12 @@ function AnchoredPopover({
       background: "#ffffff", color: "#111827",
       border: "1px solid #e5e7eb", borderRadius: 10, padding: 12,
       boxShadow: "0 8px 28px rgba(0,0,0,.16)",
+      // openAbove flips the card so its BOTTOM edge sits at `y` (the
+      // row's top) instead of its top edge — this is what actually
+      // makes it render "on top of" the clicked row rather than below
+      // it, without needing to know the popover's rendered height
+      // ahead of time.
+      transform: openAbove ? "translateY(-100%)" : undefined,
     }}>
       {children}
     </div>
@@ -660,14 +681,87 @@ HR Team`
   );
 }
 
+// ─── SCORE DETAILS MODAL ────────────────────────────────────────────────────
+// Backs the Resume Screening table's "Details" column — a centered popup
+// with the candidate's full score breakdown (ScoreBreakdownGrid),
+// categorized strengths, profile summary, and the Shortlist toggle, so
+// none of that needs a permanently-expanded row anymore.
+function ScoreDetailsModal({
+  c, shortlisted, onToggleShortlist, onClose,
+}: { c: any; shortlisted: boolean; onToggleShortlist: () => void; onClose: () => void }) {
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center" }}
+      onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div style={{ background: "#ffffff", color: "#111827", borderRadius: 14, padding: 24, maxWidth: 620, width: "94%", maxHeight: "88vh", overflowY: "auto", boxShadow: "0 25px 60px rgba(0,0,0,.4)" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+          <div style={{ fontWeight: 800, fontSize: 16 }}>
+            Score Details — {c.name}
+          </div>
+          <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 20, color: "#6b7280" }}>×</button>
+        </div>
+
+        {c.summary && (
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", color: "#6b7280", marginBottom: 6 }}>Profile Summary</div>
+            <div style={{ fontSize: 13, color: "#374151", lineHeight: 1.6 }}>{c.summary}</div>
+          </div>
+        )}
+
+        {c.strengths_breakdown?.scoreBreakdown && (
+          <ScoreBreakdownGrid breakdown={c.strengths_breakdown.scoreBreakdown} />
+        )}
+
+        {c.strengths_breakdown && (
+          <div style={{ marginTop: 4, marginBottom: 16 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", color: "#6b7280", marginBottom: 8 }}>Strengths Breakdown</div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 12 }}>
+              {[
+                ["Essential Matched", c.strengths_breakdown.essentialMatched, "#10b981"],
+                ["Technical Skills", c.strengths_breakdown.technicalSkills, "#3b82f6"],
+                ["Business Skills", c.strengths_breakdown.businessSkills, "#8b5cf6"],
+                ["Soft Skills", c.strengths_breakdown.softSkills, "#ec4899"],
+                ["Significant Experience", c.strengths_breakdown.significantExperience, "#f59e0b"],
+                ["Certifications & Degrees", c.strengths_breakdown.certificationsDegrees, "#06b6d4"],
+              ].map(([label, items, color]: any) => items?.length > 0 && (
+                <div key={label}>
+                  <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", color, marginBottom: 4 }}>{label}</div>
+                  <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+                    {items.map((s: string, i: number) => (
+                      <li key={i} style={{ fontSize: 12, color: "#374151", marginBottom: 3 }}>• {s}</li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {c.bonus > 0 && (
+          <div style={{ marginBottom: 16, fontSize: 12, color: "#f59e0b" }}>
+            🎯 Bonus: +{c.bonus} pts — {c.bonus_reasons}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── CANDIDATE ROW ─────────────────────────────────────────────────────────
-type PopoverKind = "resume" | "matched" | "missing";
-type PopoverState = { kind: PopoverKind; x: number; y: number; width: number } | null;
+type PopoverKind = "resume" | "matched" | "missing" | "questions" | "videoAnalysis" | "scoreBreakdown";
+type PopoverState = { kind: PopoverKind; x: number; y: number; width: number; anchor: HTMLElement; openAbove: boolean } | null;
 
 function CandidateRow({
-  c, rank, sessionId, lowT, highT, onRefresh, theadRef, jdEssential, jdGoodToHave, jdOptional
-}: { c: any; rank: number; sessionId: number; lowT: number; highT: number; onRefresh: () => void; theadRef: React.RefObject<HTMLTableSectionElement>; jdEssential: string[]; jdGoodToHave: string[]; jdOptional: string[] }) {
-  const [expanded, setExpanded] = useState(false);
+  c, rank, sessionId, lowT, highT, onRefresh, theadRef, jdEssential, jdGoodToHave, jdOptional, mode = "resume", focusCandidateId,
+}: { c: any; rank: number; sessionId: number; lowT: number; highT: number; onRefresh: () => void; theadRef: React.RefObject<HTMLTableSectionElement>; jdEssential: string[]; jdGoodToHave: string[]; jdOptional: string[]; mode?: "resume" | "phone" | "video" | "final"; focusCandidateId?: number | null }) {
+  const isFocused = focusCandidateId === c.id;
+  const rowRef = useRef<HTMLTableRowElement>(null);
+  const navigate = useNavigate();
+  useEffect(() => {
+    if (isFocused && rowRef.current) {
+      rowRef.current.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Categorize matched/missing skills by JD tier (Essential/Preferred/
   // Optional) and, for matched skills, also by type (Technical/Business)
@@ -707,6 +801,7 @@ function CandidateRow({
   const [preparingInvite, setPreparingInvite] = useState(false);
   const [popover, setPopover] = useState<PopoverState>(null);
   const [showTranscript, setShowTranscript] = useState(false);
+  const [showDetailsModal, setShowDetailsModal] = useState(false);
 
   // Local, instantly-updated shortlist state — decoupled from the parent
   // session refetch so the checkbox never waits on a network round trip.
@@ -726,10 +821,38 @@ function CandidateRow({
     onSuccess: () => { onRefresh(); },
   });
 
-  const genQuestions = async () => {
+  // ── Phone Interview stage (mode === "phone") ──────────────────────
+  const [phoneRecommendation, setPhoneRecommendation] = useState(c.phone_screening_recommendation || "Proceed");
+  const [phoneNotes, setPhoneNotes] = useState(c.phone_screening_notes || "");
+  const phoneContactMut = useMutation({
+    mutationFn: () => jobLensApi.markPhoneContacted(c.id),
+    onSuccess: () => { onRefresh(); },
+  });
+  const phoneResultMut = useMutation({
+    mutationFn: (payload?: { recommendation?: string; notes?: string }) =>
+      jobLensApi.savePhoneResult(c.id, {
+        recommendation: payload?.recommendation ?? phoneRecommendation,
+        notes: payload?.notes ?? phoneNotes,
+      }),
+    onSuccess: () => { onRefresh(); },
+  });
+
+  // ── Video Interview stage — Decision & Comments (mode === "video") ────
+  const [videoRecommendation, setVideoRecommendation] = useState(c.video_screening_recommendation || "Proceed");
+  const [videoNotes, setVideoNotes] = useState(c.video_screening_notes || "");
+  const videoResultMut = useMutation({
+    mutationFn: (payload?: { recommendation?: string; notes?: string }) =>
+      jobLensApi.saveVideoResult(c.id, {
+        recommendation: payload?.recommendation ?? videoRecommendation,
+        notes: payload?.notes ?? videoNotes,
+      }),
+    onSuccess: () => { onRefresh(); },
+  });
+
+  const genQuestions = async (regenerate = false) => {
     setGenLoading(true);
     try {
-      const r = await jobLensApi.generateQuestions(sessionId, c.id);
+      const r = await jobLensApi.generateQuestions(sessionId, c.id, regenerate);
       setQuestions(r.questions || []);
     } finally {
       setGenLoading(false);
@@ -760,18 +883,47 @@ function CandidateRow({
     }
   };
 
+  // Anchored to the actual row (not just a one-time x/y snapshot), and
+  // recomputed on scroll — see the effect below. Previously this stored
+  // fixed viewport coordinates measured once at click time, which meant
+  // scrolling the page afterward left the popover glued to that same
+  // spot on screen while the row it belonged to scrolled away underneath
+  // it, looking completely detached from what it was actually showing.
+  const positionPopoverAbove = (kind: PopoverKind, anchor: HTMLElement) => {
+    const cellRect = anchor.getBoundingClientRect();
+    const headerBottom = theadRef.current?.getBoundingClientRect().bottom ?? 0;
+    // Opens ON TOP of the row it was clicked from: anchored so its
+    // bottom edge sits just above the row's top edge (translateY(-100%)
+    // in the render below does the actual flip, since we don't know the
+    // popover's own height in advance). Falls back to opening below when
+    // there isn't room above — e.g. the row is right under the sticky
+    // header already — so it's never rendered off-screen or under the
+    // header either way.
+    const roomAbove = cellRect.top - headerBottom;
+    const openAbove = roomAbove > 160;
+    const y = openAbove ? cellRect.top - 6 : Math.min(Math.max(cellRect.bottom + 6, headerBottom + 6), window.innerHeight - 60);
+    setPopover({ kind, x: cellRect.left, y, width: cellRect.width, anchor, openAbove });
+  };
+
   const openPopover = (kind: PopoverKind) => (e: React.MouseEvent) => {
     const cell = (e.currentTarget as HTMLElement).closest("td");
-    const cellRect = cell?.getBoundingClientRect();
-    const headerBottom = theadRef.current?.getBoundingClientRect().bottom;
-    if (!cellRect) return;
-    setPopover({
-      kind,
-      x: cellRect.left,
-      y: headerBottom ?? cellRect.bottom + 6,
-      width: cellRect.width,
-    });
+    if (!cell) return;
+    positionPopoverAbove(kind, cell);
   };
+
+  // Keep the popover glued to its row while the page scrolls, instead of
+  // sitting still in the viewport while the row moves out from under it.
+  useEffect(() => {
+    if (!popover) return;
+    const reposition = () => positionPopoverAbove(popover.kind, popover.anchor);
+    window.addEventListener("scroll", reposition, true);
+    window.addEventListener("resize", reposition);
+    return () => {
+      window.removeEventListener("scroll", reposition, true);
+      window.removeEventListener("resize", reposition);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [popover?.kind, popover?.anchor]);
 
   const resumeSummary: { experience?: string[]; skills?: string[]; education?: string[]; achievements?: string[]; availability_work_rights?: string[] } = c.resume_summary || {};
   const resumeSummaryFlat: string[] = [
@@ -784,37 +936,48 @@ function CandidateRow({
 
   return (
     <>
-      <tr style={{ background: shortlisted ? "rgba(0,199,183,.05)" : undefined }}>
+      <tr ref={rowRef} style={{ background: isFocused ? "rgba(139,92,246,.10)" : shortlisted ? "rgba(0,199,183,.05)" : undefined }}>
         <td style={{ fontWeight: 700, color: "var(--text-muted)", fontSize: 12 }}>#{rank}</td>
+
+        {/* Candidate */}
         <td>
           <div style={{ fontWeight: 600 }}>{c.name}</div>
-          <div style={{ fontSize: 11, color: "var(--text-muted)" }}>{c.filename}</div>
+          {mode === "resume" && <div style={{ fontSize: 11, color: "var(--text-muted)" }}>{c.filename}</div>}
         </td>
-        <td style={{ fontSize: 12 }}>{c.email}</td>
+
+        {mode === "resume" && <td style={{ fontSize: 12 }}>{c.email}</td>}
+
+        {/* Phone — common to every stage */}
         <td style={{ fontSize: 12 }}>{c.phone}</td>
-        <td style={{ fontSize: 12 }}>{c.source_vendor_name || "—"}</td>
+
+        {mode === "resume" && <td style={{ fontSize: 12 }}>{c.source_vendor_name || "—"}</td>}
 
         {/* Resume Summary — top experience bullet + skills preview, click for the full categorized breakdown */}
-        <td style={{ fontSize: 11, minWidth: 200 }}>
-          {resumeSummaryFlat.length > 0 ? (
-            <>
-              <ul style={{ margin: 0, paddingLeft: 14 }}>
-                {(resumeSummary.experience || []).slice(0, 1).map((s, i) => <li key={`e${i}`} style={{ marginBottom: 2 }}>{s}</li>)}
-                {(resumeSummary.skills || []).slice(0, 1).map((s, i) => <li key={`s${i}`} style={{ marginBottom: 2 }}>{s}</li>)}
-              </ul>
-              <button onClick={openPopover("resume")}
-                style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", paddingLeft: 14, fontSize: 10, textDecoration: "underline" }}>
-                View full summary
-              </button>
-            </>
-          ) : (
-            <span style={{ color: "var(--text-muted)" }}>
-              {c.experience_years || "No resume summary available"}
-            </span>
-          )}
-        </td>
+        {mode === "resume" && (
+          <td style={{ fontSize: 11, minWidth: 200 }}>
+            {resumeSummaryFlat.length > 0 ? (
+              <>
+                <ul style={{ margin: 0, paddingLeft: 14 }}>
+                  {(resumeSummary.experience || []).slice(0, 1).map((s, i) => <li key={`e${i}`} style={{ marginBottom: 2 }}>{s}</li>)}
+                  {(resumeSummary.skills || []).slice(0, 1).map((s, i) => <li key={`s${i}`} style={{ marginBottom: 2 }}>{s}</li>)}
+                </ul>
+                <button onClick={openPopover("resume")}
+                  style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", paddingLeft: 14, fontSize: 10, textDecoration: "underline" }}>
+                  View full summary
+                </button>
+              </>
+            ) : (
+              <span style={{ color: "var(--text-muted)" }}>
+                {c.experience_years || "No resume summary available"}
+              </span>
+            )}
+          </td>
+        )}
 
-        <td>
+        {/* ATS / Resume Screening Score — every stage carries this forward. Click to see the full score breakdown. */}
+        <td onClick={c.strengths_breakdown?.scoreBreakdown ? openPopover("scoreBreakdown") : undefined}
+          style={{ cursor: c.strengths_breakdown?.scoreBreakdown ? "pointer" : undefined }}
+          title={c.strengths_breakdown?.scoreBreakdown ? "Click for full score breakdown" : undefined}>
           <div><ScoreCell score={c.ats_score} low={lowT} high={highT} /></div>
           <ProgressBar value={c.ats_score}
             color={c.ats_score >= highT ? "#10b981" : c.ats_score >= lowT ? "#f59e0b" : "#ef4444"} />
@@ -826,317 +989,358 @@ function CandidateRow({
           )}
         </td>
 
-        {/* Key Strength — categorized by JD tier (Essential/Preferred) and skill type (Technical/Business) */}
-        <td style={{ fontSize: 10, minWidth: 170, color: "var(--teal-500)" }}>
-          {(["Essential", "Preferred", "Technical", "Business"] as const).map(cat => matchedByCategory[cat].length > 0 && (
-            <div key={cat} style={{ marginBottom: 3 }}>
-              <span style={{ fontWeight: 700, fontSize: 9, textTransform: "uppercase" }}>{cat}: </span>
-              <span>{matchedByCategory[cat].slice(0, 3).join(", ")}{matchedByCategory[cat].length > 3 ? "…" : ""}</span>
-            </div>
-          ))}
-          {Object.values(matchedByCategory).every(v => v.length === 0) && (c.matched_skills || []).length === 0 && (
-            <span style={{ color: "var(--text-muted)" }}>—</span>
-          )}
-          {(c.matched_skills || []).length > 0 && (
-            <button onClick={openPopover("matched")}
-              style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", fontSize: 9, textDecoration: "underline", padding: 0 }}>
-              View all ({c.matched_skills.length})
-            </button>
-          )}
-        </td>
+        {/* Key Strength — categorized by JD tier (Essential/Preferred) and skill type (Technical/Business). Click anywhere in the cell for the full strengths breakdown. */}
+        {mode === "resume" && (
+          <td style={{ fontSize: 10, minWidth: 170, color: "var(--teal-500)", cursor: (c.matched_skills || []).length > 0 ? "pointer" : undefined }}
+            onClick={(c.matched_skills || []).length > 0 ? openPopover("matched") : undefined}
+            title={(c.matched_skills || []).length > 0 ? "Click for full strengths breakdown" : undefined}>
+            {(["Essential", "Preferred", "Technical", "Business"] as const).map(cat => matchedByCategory[cat].length > 0 && (
+              <div key={cat} style={{ marginBottom: 3 }}>
+                <span style={{ fontWeight: 700, fontSize: 9, textTransform: "uppercase" }}>{cat}: </span>
+                <span>{matchedByCategory[cat].slice(0, 3).join(", ")}{matchedByCategory[cat].length > 3 ? "…" : ""}</span>
+              </div>
+            ))}
+            {Object.values(matchedByCategory).every(v => v.length === 0) && (c.matched_skills || []).length === 0 && (
+              <span style={{ color: "var(--text-muted)" }}>—</span>
+            )}
+            {(c.matched_skills || []).length > 0 && (
+              <button onClick={openPopover("matched")}
+                style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", fontSize: 9, textDecoration: "underline", padding: 0 }}>
+                View all ({c.matched_skills.length})
+              </button>
+            )}
+          </td>
+        )}
 
         {/* Considerations — categorized by JD tier (Essential/Preferred/Optional) */}
-        <td style={{ fontSize: 10, minWidth: 170, color: "var(--rose-500)" }}>
-          {(["Essential", "Preferred", "Optional"] as const).map(cat => missingByCategory[cat].length > 0 && (
-            <div key={cat} style={{ marginBottom: 3 }}>
-              <span style={{ fontWeight: 700, fontSize: 9, textTransform: "uppercase" }}>{cat}: </span>
-              <span>{missingByCategory[cat].slice(0, 3).join(", ")}{missingByCategory[cat].length > 3 ? "…" : ""}</span>
-            </div>
-          ))}
-          {(c.missing_skills || []).length === 0 && <span style={{ color: "var(--text-muted)" }}>—</span>}
-          {(c.missing_skills || []).length > 0 && (
-            <button onClick={openPopover("missing")}
-              style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", fontSize: 9, textDecoration: "underline", padding: 0 }}>
-              View all ({c.missing_skills.length})
-            </button>
-          )}
-        </td>
-
-        <td>
-          <StatusBadge status={c.status} />
-          {c.status === "Not Qualified" && c.hard_disqualified && c.disqualify_reason && (
-            <div style={{ fontSize: 10, color: "#ef4444", marginTop: 4, maxWidth: 160, lineHeight: 1.4 }}>
-              ({c.disqualify_reason})
-            </div>
-          )}
-        </td>
-
-        <td>
-          <button className="tiq-btn tiq-btn-outline tiq-btn-sm"
-            onClick={() => setExpanded(e => !e)}>
-            {expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-          </button>
-        </td>
-      </tr>
-
-      {expanded && (
-        <tr>
-          <td colSpan={11} style={{ padding: "14px 20px", background: "var(--bg-secondary)" }}>
-            {c.summary && (
-              <div style={{ marginBottom: 16, paddingBottom: 14, borderBottom: "1px solid var(--border)" }}>
-                <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", color: "var(--text-muted)", marginBottom: 6 }}>Profile Summary</div>
-                <div style={{ fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.6 }}>{c.summary}</div>
+        {mode === "resume" && (
+          <td style={{ fontSize: 10, minWidth: 170, color: "var(--rose-500)" }}>
+            {(["Essential", "Preferred", "Optional"] as const).map(cat => missingByCategory[cat].length > 0 && (
+              <div key={cat} style={{ marginBottom: 3 }}>
+                <span style={{ fontWeight: 700, fontSize: 9, textTransform: "uppercase" }}>{cat}: </span>
+                <span>{missingByCategory[cat].slice(0, 3).join(", ")}{missingByCategory[cat].length > 3 ? "…" : ""}</span>
               </div>
+            ))}
+            {(c.missing_skills || []).length === 0 && <span style={{ color: "var(--text-muted)" }}>—</span>}
+            {(c.missing_skills || []).length > 0 && (
+              <button onClick={openPopover("missing")}
+                style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", fontSize: 9, textDecoration: "underline", padding: 0 }}>
+                View all ({c.missing_skills.length})
+              </button>
             )}
+          </td>
+        )}
 
-            {c.strengths_breakdown?.scoreBreakdown && (
-              <div style={{ marginBottom: 16, paddingBottom: 14, borderBottom: "1px solid var(--border)" }}>
-                <ScoreBreakdownGrid breakdown={c.strengths_breakdown.scoreBreakdown} />
-              </div>
-            )}
-
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16, marginBottom: 16 }}>
-              {/* Video Interview */}
-              <div>
-                <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", color: "var(--text-muted)", marginBottom: 6 }}>Video Interview</div>
-                <button className="tiq-btn tiq-btn-primary tiq-btn-sm"
-                  onClick={() => { if (!questions.length) genQuestions(); setInterviewOpen(true); }}>
-                  <Video size={12} /> {c.video_status === "Completed" ? "Re-run" : "Start"}
-                </button>
-                <div style={{ marginTop: 6 }}><StatusBadge status={c.video_status} /></div>
-                <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 4 }}>
-                  {c.has_video && (
-                    <button type="button" onClick={() => openBlobInNewTab(`/api/joblens/candidates/${c.id}/video`, "video/webm")}
-                      style={{ background: "none", border: "none", padding: 0, textAlign: "left", cursor: "pointer", fontSize: 11, color: "var(--teal-500)" }}>
-                      ▶ View recorded video
-                    </button>
-                  )}
-                  {c.has_resume_file && (
-                    <button type="button" onClick={() => openBlobInNewTab(`/api/joblens/candidates/${c.id}/resume-file`)}
-                      style={{ background: "none", border: "none", padding: 0, textAlign: "left", cursor: "pointer", fontSize: 11, color: "var(--teal-500)" }}>
-                      📄 View original resume
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              {/* Video Review */}
-              <div>
-                <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", color: "var(--text-muted)", marginBottom: 6 }}>Video Review</div>
-                <div style={{ fontSize: 11, lineHeight: 1.7 }}>
-                  <div>😊 Happy: <strong>{c.emotion_happy ?? 0}%</strong></div>
-                  <div>😐 Neutral: <strong>{c.emotion_neutral ?? 0}%</strong></div>
-                  <div>😢 Sad: <strong>{c.emotion_sad ?? 0}%</strong></div>
-                  <div>😡 Angry: <strong>{c.emotion_angry ?? 0}%</strong></div>
-                  <div style={{ color: "var(--violet-500)" }}>Dominant: <strong>{c.dominant_emotion || "—"}</strong></div>
-                </div>
-              </div>
-
-              {/* Candidate Contact — checked once the invite has actually been sent */}
-              <div>
-                <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", color: "var(--text-muted)", marginBottom: 6 }}>Candidate Contact</div>
-                <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 12 }}>
-                  <input
-                    type="checkbox"
-                    checked={contacted}
-                    disabled={preparingInvite}
-                    onClick={e => e.preventDefault()}
-                    onChange={handleContactClick}
-                  />
-                  {preparingInvite ? "Preparing…" : contacted ? "Invite sent" : "Send interview invite"}
-                </label>
-              </div>
-
-              {/* Shortlist */}
-              <div>
-                <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", color: "var(--text-muted)", marginBottom: 6 }}>Shortlist</div>
-                <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 12 }}>
-                  <input type="checkbox" checked={shortlisted} onChange={() => shortlistMut.mutate()} />
-                  Shortlisted
-                </label>
-              </div>
-            </div>
-
-            {/* AI Video Interview Analysis — auto-generated after the video uploads */}
-            {c.has_video && (
-              <div style={{ marginBottom: 16, paddingBottom: 14, borderBottom: "1px solid var(--border)" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-                  <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", color: "var(--text-muted)" }}>
-                    AI Video Interview Analysis
-                  </div>
-                  <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" style={{ fontSize: 10 }}
-                    disabled={c.video_analysis_status === "Pending" || c.video_analysis_status === "Processing" || reanalyzeMut.isPending}
-                    onClick={() => reanalyzeMut.mutate()}>
-                    <RefreshCw size={10} /> {reanalyzeMut.isPending ? "Queuing…" : "Re-run Video Analysis"}
-                  </button>
-                </div>
-                {(c.video_analysis_status === "Pending" || c.video_analysis_status === "Processing") && (
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "var(--text-muted)" }}>
-                    <span className="tiq-spinner" style={{ width: 14, height: 14, borderWidth: 2 }} />
-                    {c.video_analysis_status === "Processing" ? "Transcribing and analysing…" : "Queued for analysis…"}
-                  </div>
-                )}
-                {c.video_analysis_status === "Failed" && (
-                  <div style={{ fontSize: 12, color: "var(--rose-500)" }}>
-                    Analysis failed{c.video_analysis?.error ? `: ${c.video_analysis.error}` : "."}
-                  </div>
-                )}
-                {c.video_analysis_status === "Completed" && c.video_analysis && (
-                  <div>
-                    <div style={{ display: "flex", gap: 16, marginBottom: 10, flexWrap: "wrap" }}>
-                      {[
-                        ["Overall", c.video_analysis.overall_score, "var(--violet-500)"],
-                        ["Communication", c.video_analysis.communication_score, "#0d9488"],
-                        ["Relevance", c.video_analysis.relevance_score, "#0d9488"],
-                        ["Confidence", c.video_analysis.confidence_score, "#0d9488"],
-                      ].map(([label, val, color]: any) => (
-                        <div key={label} style={{ textAlign: "center" }}>
-                          <div style={{ fontSize: 18, fontWeight: 800, color }}>{val ?? "—"}</div>
-                          <div style={{ fontSize: 10, color: "var(--text-muted)" }}>{label}</div>
-                        </div>
-                      ))}
-                    </div>
-                    {c.video_analysis.summary && (
-                      <p style={{ fontSize: 12, color: "var(--text-secondary)", marginBottom: 10, lineHeight: 1.6 }}>
-                        {c.video_analysis.summary}
-                      </p>
-                    )}
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                      {c.video_analysis.strengths?.length > 0 && (
-                        <div>
-                          <div style={{ fontSize: 10, fontWeight: 700, color: "var(--teal-500)", marginBottom: 4 }}>STRENGTHS</div>
-                          <ul style={{ margin: 0, paddingLeft: 14, fontSize: 12 }}>
-                            {c.video_analysis.strengths.map((s: string, i: number) => <li key={i}>{s}</li>)}
-                          </ul>
-                        </div>
-                      )}
-                      {c.video_analysis.concerns?.length > 0 && (
-                        <div>
-                          <div style={{ fontSize: 10, fontWeight: 700, color: "var(--rose-500)", marginBottom: 4 }}>CONCERNS</div>
-                          <ul style={{ margin: 0, paddingLeft: 14, fontSize: 12 }}>
-                            {c.video_analysis.concerns.map((s: string, i: number) => <li key={i}>{s}</li>)}
-                          </ul>
-                        </div>
-                      )}
-                    </div>
-                    {c.video_transcript && (
-                      <button type="button" onClick={() => setShowTranscript(t => !t)}
-                        style={{ marginTop: 10, background: "none", border: "none", padding: 0, cursor: "pointer", fontSize: 11, color: "var(--teal-500)" }}>
-                        {showTranscript ? "Hide full transcript ▲" : "View full transcript ▼"}
-                      </button>
-                    )}
-                    {showTranscript && c.video_transcript && (
-                      <div style={{ marginTop: 8, padding: 10, background: "var(--bg-secondary)", borderRadius: 8, fontSize: 12, lineHeight: 1.6, maxHeight: 240, overflowY: "auto", whiteSpace: "pre-wrap" }}>
-                        {c.video_transcript}
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {/* AI Avatar Interview Q&A evaluation — set alongside the
-                    video/emotion analysis above, never replacing it (see
-                    capabilities/avatarinterview's write-back). Only shows
-                    up once an avatar interview linked to this candidate
-                    has actually completed. */}
-                {c.qa_evaluation && (
-                  <div style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid var(--border)" }}>
-                    <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 10 }}>
-                      AI Avatar Interview — Question &amp; Answer Evaluation
-                    </div>
-                    <div style={{ display: "flex", gap: 16, marginBottom: 10, flexWrap: "wrap" }}>
-                      {[
-                        ["Overall", c.qa_evaluation.overall_score, "var(--violet-500)"],
-                        ["Context", c.qa_evaluation.context_score, "#0d9488"],
-                        ["Semantic", c.qa_evaluation.semantic_score, "#0d9488"],
-                        ["Key Points", c.qa_evaluation.keypoints_score, "#0d9488"],
-                      ].map(([label, val, color]: any) => (
-                        <div key={label} style={{ textAlign: "center" }}>
-                          <div style={{ fontSize: 18, fontWeight: 800, color }}>{val ?? "—"}</div>
-                          <div style={{ fontSize: 10, color: "var(--text-muted)" }}>{label}</div>
-                        </div>
-                      ))}
-                    </div>
-                    {c.qa_evaluation.questions?.length > 0 && (
-                      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                        {c.qa_evaluation.questions.map((q: any, i: number) => (
-                          <div key={i} style={{ padding: 10, background: "var(--bg-secondary)", borderRadius: 8, fontSize: 12 }}>
-                            <div style={{ fontWeight: 600, marginBottom: 4 }}>{i + 1}. {q.question}</div>
-                            {q.candidate_answer ? (
-                              <>
-                                <div style={{ color: "var(--text-secondary)", marginBottom: 4 }}>{q.candidate_answer}</div>
-                                <div style={{ display: "flex", gap: 6, flexWrap: "wrap", fontSize: 10 }}>
-                                  <span className="tiq-badge tiq-badge-teal">Overall: {q.overall_score}</span>
-                                  <span className="tiq-badge tiq-badge-slate">Context: {q.context_score}</span>
-                                  <span className="tiq-badge tiq-badge-slate">Semantic: {q.semantic_score}</span>
-                                  <span className="tiq-badge tiq-badge-slate">Key Points: {q.keypoints_score}</span>
-                                </div>
-                              </>
-                            ) : (
-                              <div style={{ color: "var(--text-muted)", fontStyle: "italic" }}>No answer recorded.</div>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Categorized Strengths — Essential Matched, Technical, Business,
-                Soft Skills, Significant Experience, Certifications & Degrees */}
-            {c.strengths_breakdown && (
-              <div style={{ marginBottom: 16, paddingBottom: 14, borderBottom: "1px solid var(--border)" }}>
-                <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", color: "var(--text-muted)", marginBottom: 8 }}>
-                  Strengths Breakdown
-                </div>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
-                  {[
-                    ["Essential Matched", c.strengths_breakdown.essentialMatched, "#10b981"],
-                    ["Technical Skills", c.strengths_breakdown.technicalSkills, "#3b82f6"],
-                    ["Business Skills", c.strengths_breakdown.businessSkills, "#8b5cf6"],
-                    ["Soft Skills", c.strengths_breakdown.softSkills, "#ec4899"],
-                    ["Significant Experience", c.strengths_breakdown.significantExperience, "#f59e0b"],
-                    ["Certifications & Degrees", c.strengths_breakdown.certificationsDegrees, "#06b6d4"],
-                  ].map(([label, items, color]: any) => items?.length > 0 && (
-                    <div key={label}>
-                      <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", color, marginBottom: 4 }}>{label}</div>
-                      <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-                        {items.map((s: string, i: number) => (
-                          <li key={i} style={{ fontSize: 12, color: "var(--text-secondary)", marginBottom: 3 }}>• {s}</li>
-                        ))}
-                      </ul>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            <div>
-              <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", color: "var(--text-muted)", marginBottom: 6 }}>
-                Interview Questions
-                <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" style={{ marginLeft: 8, fontSize: 10 }}
-                  onClick={genQuestions} disabled={genLoading}>
-                  <Sparkles size={10} /> {genLoading ? "Generating…" : "Generate"}
-                </button>
-              </div>
-              {questions.length > 0 ? (
-                <ol style={{ paddingLeft: 16, margin: 0, fontSize: 12 }}>
-                  {questions.map((q, i) => <li key={i} style={{ marginBottom: 4 }}>{q}</li>)}
-                </ol>
-              ) : (
-                <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Click Generate to create questions</div>
-              )}
-            </div>
-
-            {c.bonus > 0 && (
-              <div style={{ marginTop: 10, fontSize: 12, color: "#f59e0b" }}>
-                🎯 Bonus: +{c.bonus} pts — {c.bonus_reasons}
+        {mode === "resume" && (
+          <td>
+            <StatusBadge status={c.status} />
+            {c.status === "Not Qualified" && c.hard_disqualified && c.disqualify_reason && (
+              <div style={{ fontSize: 10, color: "#ef4444", marginTop: 4, maxWidth: 160, lineHeight: 1.4 }}>
+                ({c.disqualify_reason})
               </div>
             )}
           </td>
-        </tr>
+        )}
+
+        {/* Interview Questions — shared field, generated for either the phone call or the video round */}
+        {(mode === "phone" || mode === "video") && (
+          <td style={{ minWidth: 200 }}>
+            <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" style={{ fontSize: 10, marginBottom: 4 }}
+              onClick={() => genQuestions(true)} disabled={genLoading}
+              title="Generated from both the Job Description and this candidate's own resume">
+              <Sparkles size={10} /> {genLoading ? "Generating…" : questions.length ? "Regenerate" : "Generate"}
+            </button>
+            {questions.length > 0 ? (
+              <>
+                <ol style={{ margin: 0, paddingLeft: 14, fontSize: 11 }}>
+                  {questions.slice(0, 2).map((q, i) => <li key={i} style={{ marginBottom: 2 }}>{q}</li>)}
+                </ol>
+                {questions.length > 2 && (
+                  <button onClick={openPopover("questions")}
+                    style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", fontSize: 10, textDecoration: "underline", padding: 0 }}>
+                    View all ({questions.length})
+                  </button>
+                )}
+              </>
+            ) : (
+              <div style={{ fontSize: 11, color: "var(--text-muted)" }}>No questions yet</div>
+            )}
+          </td>
+        )}
+
+        {/* Video Interview — start/re-run the webcam round, view the original
+            resume alongside it, and see the emotion-analysis review once
+            the recording's been processed, all in the one place the
+            recruiter is actually working from during this stage. */}
+        {mode === "video" && (
+          <td style={{ minWidth: 190 }}>
+            <button className="tiq-btn tiq-btn-primary tiq-btn-sm"
+              onClick={() => { if (!questions.length) genQuestions(); setInterviewOpen(true); }}>
+              <Video size={12} /> {c.video_status === "Completed" ? "Re-run" : "Start"}
+            </button>
+            <div style={{ marginTop: 6 }}><StatusBadge status={c.video_status} /></div>
+
+            {c.has_resume_file && (
+              <button type="button" onClick={() => openBlobInNewTab(`/api/joblens/candidates/${c.id}/resume-file`)}
+                style={{ background: "none", border: "none", padding: 0, textAlign: "left", cursor: "pointer", fontSize: 10, color: "var(--text-muted)", marginTop: 6, display: "block" }}>
+                📄 View original resume
+              </button>
+            )}
+            {c.has_video && (
+              <button type="button" onClick={() => openBlobInNewTab(`/api/joblens/candidates/${c.id}/video`, "video/webm")}
+                style={{ background: "none", border: "none", padding: 0, textAlign: "left", cursor: "pointer", fontSize: 10, color: "var(--teal-500)", marginTop: 4, display: "block" }}>
+                ▶ View recorded video
+              </button>
+            )}
+
+            {/* Only show the analysis spinner once there's actually a video
+                to analyse — video_analysis_status defaults to "Pending"
+                for every candidate from the moment they're created, long
+                before anyone's done a video round at all. Without the
+                has_video check here, this showed "Queued…" permanently
+                for candidates who'd never even started their video
+                interview, which is what looked like it was "stuck". */}
+            {c.has_video && (c.video_analysis_status === "Pending" || c.video_analysis_status === "Processing") && (
+              <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "var(--text-muted)", marginTop: 6 }}>
+                <span className="tiq-spinner" style={{ width: 12, height: 12, borderWidth: 2 }} />
+                {c.video_analysis_status === "Processing" ? "Analysing…" : "Queued…"}
+              </div>
+            )}
+            {c.has_video && c.video_analysis_status === "Failed" && <div style={{ fontSize: 11, color: "var(--rose-500)", marginTop: 6 }}>Analysis failed</div>}
+
+            {(c.dominant_emotion || c.emotion_happy != null) && (
+              <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid var(--border)" }}>
+                <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", color: "var(--text-muted)", marginBottom: 4 }}>Video Review</div>
+                <div style={{ fontSize: 11, lineHeight: 1.7 }}>
+                  <div>😊 Happy: {Math.round(c.emotion_happy ?? 0)}%</div>
+                  <div>😐 Neutral: {Math.round(c.emotion_neutral ?? 0)}%</div>
+                  <div>😢 Sad: {Math.round(c.emotion_sad ?? 0)}%</div>
+                  <div>😡 Angry: {Math.round(c.emotion_angry ?? 0)}%</div>
+                </div>
+                <div style={{ fontSize: 10.5, color: "var(--text-muted)", marginTop: 2 }}>Dominant: {c.dominant_emotion || "—"}</div>
+              </div>
+            )}
+            {c.video_analysis_status === "Completed" && c.video_analysis && (
+              <button onClick={openPopover("videoAnalysis")}
+                style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", fontSize: 10, textDecoration: "underline", padding: 0, marginTop: 6, display: "block" }}>
+                View full AI analysis ({c.video_analysis.overall_score ?? "—"})
+              </button>
+            )}
+          </td>
+        )}
+
+        {/* Telephonic Screening — carried into Final Decision */}
+        {mode === "final" && (
+          <td>
+            {c.phone_screening_recommendation ? (
+              <RecommendationBadge value={c.phone_screening_recommendation} />
+            ) : <span style={{ color: "var(--text-muted)", fontSize: 12 }}>—</span>}
+          </td>
+        )}
+
+        {/* Video Interview score — carried into Final Decision */}
+        {mode === "final" && (
+          <td>
+            {c.video_analysis?.overall_score != null ? (
+              <div style={{ fontWeight: 700, color: "var(--violet-500)" }}>{c.video_analysis.overall_score}</div>
+            ) : <span style={{ color: "var(--text-muted)", fontSize: 12 }}>—</span>}
+            {c.video_screening_recommendation && (
+              <div style={{ marginTop: 4 }}><RecommendationBadge value={c.video_screening_recommendation} /></div>
+            )}
+          </td>
+        )}
+
+        {/* Next Steps — jumps straight into the next stage for this exact
+            candidate (auto-selects this session and scrolls to them
+            there), instead of leaving the recruiter to navigate over and
+            find them again manually. What's offered depends on which
+            stage this row is already on: Resume Screening can jump
+            anywhere (gated on Qualified/shortlisted, since nothing's
+            confirmed yet at that point); Phone/Video Interview are
+            already past that gate just by being visible on their own
+            page, so their next steps are offered unconditionally. */}
+        {mode === "resume" && (
+          <td style={{ minWidth: 160 }}>
+            {(shortlisted || c.status === "Qualified") ? (
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <button className="tiq-btn tiq-btn-outline tiq-btn-sm"
+                        onClick={() => navigate(`/app/phoneinterview?session=${sessionId}&candidate=${c.id}`)}>
+                  <Phone size={12} /> Telephone Interview
+                </button>
+                <button className="tiq-btn tiq-btn-outline tiq-btn-sm"
+                        onClick={() => navigate(`/app/videointerview?session=${sessionId}&candidate=${c.id}`)}>
+                  <Video size={12} /> Video Interview
+                </button>
+                <button className="tiq-btn tiq-btn-outline tiq-btn-sm"
+                        onClick={() => navigate(`/app/finaldecision?session=${sessionId}&candidate=${c.id}`)}>
+                  <CheckCircle size={12} /> Final Decision
+                </button>
+              </div>
+            ) : (
+              <div style={{ fontSize: 11, color: "var(--text-muted)" }}>Shortlist or mark Qualified first</div>
+            )}
+          </td>
+        )}
+
+        {/* Phone Screening — consolidated status + contacted-tracking +
+            outcome + notes, all in one place, matching how a recruiter
+            actually works through a call: confirm you reached them, then
+            record what came of it. phoneContactMut existed before this but
+            had no UI trigger anywhere, so a candidate's status could never
+            move off "Not Started" — this checkbox is that missing trigger. */}
+        {mode === "phone" && (
+          <td style={{ minWidth: 220 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, marginBottom: 6, color: c.phone_screening_status === "Completed" ? "#10b981" : "var(--text-muted)" }}>
+              {c.phone_screening_status || "Not Started"}
+            </div>
+            <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, marginBottom: 8, cursor: c.phone_screening_status && c.phone_screening_status !== "Not Started" ? "default" : "pointer" }}>
+              <input type="checkbox"
+                checked={!!c.phone_screening_status && c.phone_screening_status !== "Not Started"}
+                disabled={phoneContactMut.isPending || (!!c.phone_screening_status && c.phone_screening_status !== "Not Started")}
+                onChange={() => phoneContactMut.mutate()} />
+              Candidate reached by phone
+            </label>
+            <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 8 }}>
+              {["Proceed", "Hold", "Reject"].map((r) => (
+                <button key={r} type="button"
+                  onClick={() => { setPhoneRecommendation(r); phoneResultMut.mutate({ recommendation: r }); }}
+                  style={{
+                    padding: "4px 9px", borderRadius: 999, fontSize: 10, fontWeight: 700, cursor: "pointer",
+                    border: phoneRecommendation === r ? "1.5px solid var(--violet-500)" : "1px solid var(--border)",
+                    color: phoneRecommendation === r ? "var(--violet-500)" : "var(--text-muted)",
+                    background: phoneRecommendation === r ? "rgba(139,92,246,.08)" : "transparent",
+                  }}>
+                  {r}
+                </button>
+              ))}
+            </div>
+            <textarea className="tiq-input" rows={2} style={{ fontSize: 11 }}
+              placeholder="Notes…" value={phoneNotes} onChange={(e) => setPhoneNotes(e.target.value)} />
+            <button className="tiq-btn tiq-btn-outline tiq-btn-sm" style={{ marginTop: 4, fontSize: 10 }}
+              onClick={() => phoneResultMut.mutate({})} disabled={phoneResultMut.isPending}>
+              {phoneResultMut.isPending ? "Saving…" : "Save"}
+            </button>
+            {c.phone_screening_at && (
+              <div style={{ fontSize: 9.5, color: "var(--text-muted)", marginTop: 4 }}>
+                {new Date(c.phone_screening_at).toLocaleDateString()}
+              </div>
+            )}
+          </td>
+        )}
+
+        {/* Next Steps — Phone Interview's own version of the same
+            jump-straight-there pattern as Resume Screening's. Already
+            past the Qualified/shortlisted gate just by being on this
+            page, so offered unconditionally. */}
+        {mode === "phone" && (
+          <td style={{ minWidth: 150 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <button className="tiq-btn tiq-btn-outline tiq-btn-sm"
+                      onClick={() => navigate(`/app/videointerview?session=${sessionId}&candidate=${c.id}`)}>
+                <Video size={12} /> Video Interview
+              </button>
+              <button className="tiq-btn tiq-btn-outline tiq-btn-sm"
+                      onClick={() => navigate(`/app/finaldecision?session=${sessionId}&candidate=${c.id}`)}>
+                <CheckCircle size={12} /> Final Decision
+              </button>
+            </div>
+          </td>
+        )}
+
+        {/* Decision — Video Interview's recruiter-logged outcome */}
+        {mode === "video" && (
+          <td style={{ minWidth: 150 }}>
+            <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+              {["Proceed", "Hold", "Reject"].map((r) => (
+                <button key={r} type="button"
+                  onClick={() => { setVideoRecommendation(r); videoResultMut.mutate({ recommendation: r }); }}
+                  style={{
+                    padding: "4px 9px", borderRadius: 999, fontSize: 10, fontWeight: 700, cursor: "pointer",
+                    border: videoRecommendation === r ? "1.5px solid var(--violet-500)" : "1px solid var(--border)",
+                    color: videoRecommendation === r ? "var(--violet-500)" : "var(--text-muted)",
+                    background: videoRecommendation === r ? "rgba(139,92,246,.08)" : "transparent",
+                  }}>
+                  {r}
+                </button>
+              ))}
+            </div>
+            {videoResultMut.isPending && (
+              <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 4 }}>Saving…</div>
+            )}
+            {c.video_screening_at && (
+              <div style={{ fontSize: 9.5, color: "var(--text-muted)", marginTop: 4 }}>
+                {new Date(c.video_screening_at).toLocaleDateString()}
+              </div>
+            )}
+          </td>
+        )}
+
+        {/* Comments — Video Interview's recruiter-logged notes */}
+        {mode === "video" && (
+          <td style={{ minWidth: 180 }}>
+            <textarea className="tiq-input" rows={2} style={{ fontSize: 11 }}
+              placeholder="Comments…" value={videoNotes} onChange={(e) => setVideoNotes(e.target.value)} />
+            <button className="tiq-btn tiq-btn-outline tiq-btn-sm" style={{ marginTop: 4, fontSize: 10 }}
+              onClick={() => videoResultMut.mutate({})} disabled={videoResultMut.isPending}>
+              {videoResultMut.isPending ? "Saving…" : "Save"}
+            </button>
+          </td>
+        )}
+
+        {/* Candidate Contact — sends the candidate their video-interview
+            invite (a real email, composed here and handed off to the
+            recruiter's own mail client via mailto:, through ContactModal
+            below). This was already fully built — handleContactClick,
+            ContactModal, the backend send-invite endpoint — just never
+            had a button anywhere calling it. */}
+        {mode === "video" && (
+          <td style={{ minWidth: 170 }}>
+            <button className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={handleContactClick} disabled={preparingInvite}>
+              <Mail size={12} /> {preparingInvite ? "Preparing…" : "Send Interview Invite"}
+            </button>
+            {contacted && (
+              <div style={{ fontSize: 10.5, color: "#10b981", marginTop: 4 }}>✓ Invite sent</div>
+            )}
+          </td>
+        )}
+
+        {/* Next Steps — Video Interview's own version; only Final
+            Decision makes sense from here, there's nothing further
+            after it in the pipeline. */}
+        {mode === "video" && (
+          <td style={{ minWidth: 140 }}>
+            <button className="tiq-btn tiq-btn-outline tiq-btn-sm"
+                    onClick={() => navigate(`/app/finaldecision?session=${sessionId}&candidate=${c.id}`)}>
+              <CheckCircle size={12} /> Final Decision
+            </button>
+          </td>
+        )}
+        {/* Details — full score breakdown, in a popup */}
+        {mode === "resume" && (
+          <td>
+            <button className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={() => setShowDetailsModal(true)}>
+              View
+            </button>
+          </td>
+        )}
+
+        {/* Shortlist — the final hire/no-hire call, made here after all three stages */}
+        {mode === "final" && (
+          <td style={{ textAlign: "center" }}>
+            <input type="checkbox" checked={shortlisted} onChange={() => shortlistMut.mutate()} />
+          </td>
+        )}
+      </tr>
+
+      {showDetailsModal && (
+        <ScoreDetailsModal
+          c={c}
+          shortlisted={shortlisted}
+          onToggleShortlist={() => shortlistMut.mutate()}
+          onClose={() => setShowDetailsModal(false)}
+        />
       )}
+
 
       {interviewOpen && questions.length > 0 && (
         <VideoInterviewModal
@@ -1158,7 +1362,7 @@ function CandidateRow({
       )}
 
       {popover?.kind === "resume" && (
-        <AnchoredPopover x={popover.x} y={popover.y} width={Math.max(popover.width, 320)} onClose={() => setPopover(null)}>
+        <AnchoredPopover x={popover.x} y={popover.y} width={Math.max(popover.width, 320)} openAbove={popover.openAbove} onClose={() => setPopover(null)}>
           <div style={{ fontWeight: 700, fontSize: 12, marginBottom: 10 }}>Full Resume Summary</div>
           {([
             ["Experience", resumeSummary.experience, "#f59e0b"],
@@ -1178,7 +1382,7 @@ function CandidateRow({
       )}
 
       {popover?.kind === "matched" && (
-        <AnchoredPopover x={popover.x} y={popover.y} width={Math.max(popover.width, 300)} onClose={() => setPopover(null)}>
+        <AnchoredPopover x={popover.x} y={popover.y} width={Math.max(popover.width, 300)} openAbove={popover.openAbove} onClose={() => setPopover(null)}>
           <div style={{ fontWeight: 700, fontSize: 12, marginBottom: 10 }}>All Key Strengths</div>
           {(["Essential", "Preferred", "Technical", "Business"] as const).map(cat => matchedByCategory[cat].length > 0 && (
             <div key={cat} style={{ marginBottom: 10 }}>
@@ -1194,7 +1398,7 @@ function CandidateRow({
       )}
 
       {popover?.kind === "missing" && (
-        <AnchoredPopover x={popover.x} y={popover.y} width={Math.max(popover.width, 300)} onClose={() => setPopover(null)}>
+        <AnchoredPopover x={popover.x} y={popover.y} width={Math.max(popover.width, 300)} openAbove={popover.openAbove} onClose={() => setPopover(null)}>
           <div style={{ fontWeight: 700, fontSize: 12, marginBottom: 10 }}>All Considerations</div>
           {(["Essential", "Preferred", "Optional"] as const).map(cat => missingByCategory[cat].length > 0 && (
             <div key={cat} style={{ marginBottom: 10 }}>
@@ -1208,12 +1412,81 @@ function CandidateRow({
           ))}
         </AnchoredPopover>
       )}
+
+      {popover?.kind === "scoreBreakdown" && c.strengths_breakdown?.scoreBreakdown && (
+        <AnchoredPopover x={popover.x} y={popover.y} width={Math.max(popover.width, 360)} openAbove={popover.openAbove} onClose={() => setPopover(null)}>
+          <div style={{ fontWeight: 700, fontSize: 12, marginBottom: 10 }}>Full Score Breakdown</div>
+          <ScoreBreakdownGrid breakdown={c.strengths_breakdown.scoreBreakdown} />
+        </AnchoredPopover>
+      )}
+
+      {popover?.kind === "questions" && (
+        <AnchoredPopover x={popover.x} y={popover.y} width={Math.max(popover.width, 320)} openAbove={popover.openAbove} onClose={() => setPopover(null)}>
+          <div style={{ fontWeight: 700, fontSize: 12, marginBottom: 10 }}>
+            {mode === "video" ? "All Video Interview Questions" : "All Interview Questions"}
+          </div>
+          <ol style={{ margin: 0, paddingLeft: 16, fontSize: 12, lineHeight: 1.6 }}>
+            {questions.map((q, i) => <li key={i} style={{ marginBottom: 6 }}>{q}</li>)}
+          </ol>
+        </AnchoredPopover>
+      )}
+
+      {popover?.kind === "videoAnalysis" && c.video_analysis && (
+        <AnchoredPopover x={popover.x} y={popover.y} width={Math.max(popover.width, 340)} openAbove={popover.openAbove} onClose={() => setPopover(null)}>
+          <div style={{ fontWeight: 700, fontSize: 12, marginBottom: 10 }}>AI Video Interview Analysis</div>
+          <div style={{ display: "flex", gap: 14, marginBottom: 10, flexWrap: "wrap" }}>
+            {[
+              ["Overall", c.video_analysis.overall_score, "#8b5cf6"],
+              ["Communication", c.video_analysis.communication_score, "#0d9488"],
+              ["Relevance", c.video_analysis.relevance_score, "#0d9488"],
+              ["Confidence", c.video_analysis.confidence_score, "#0d9488"],
+            ].map(([label, val, color]: any) => (
+              <div key={label} style={{ textAlign: "center" }}>
+                <div style={{ fontSize: 16, fontWeight: 800, color }}>{val ?? "—"}</div>
+                <div style={{ fontSize: 9.5, color: "#6b7280" }}>{label}</div>
+              </div>
+            ))}
+          </div>
+          {c.video_analysis.summary && (
+            <p style={{ fontSize: 11.5, color: "#374151", marginBottom: 10, lineHeight: 1.6 }}>{c.video_analysis.summary}</p>
+          )}
+          {c.video_analysis.strengths?.length > 0 && (
+            <div style={{ marginBottom: 8 }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: "#0d9488", marginBottom: 4 }}>STRENGTHS</div>
+              <ul style={{ margin: 0, paddingLeft: 14, fontSize: 11.5 }}>
+                {c.video_analysis.strengths.map((s: string, i: number) => <li key={i}>{s}</li>)}
+              </ul>
+            </div>
+          )}
+          {c.video_analysis.concerns?.length > 0 && (
+            <div style={{ marginBottom: 8 }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: "#e11d48", marginBottom: 4 }}>CONCERNS</div>
+              <ul style={{ margin: 0, paddingLeft: 14, fontSize: 11.5 }}>
+                {c.video_analysis.concerns.map((s: string, i: number) => <li key={i}>{s}</li>)}
+              </ul>
+            </div>
+          )}
+          {c.video_transcript && (
+            <>
+              <button type="button" onClick={() => setShowTranscript(t => !t)}
+                style={{ marginTop: 4, background: "none", border: "none", padding: 0, cursor: "pointer", fontSize: 11, color: "#0d9488" }}>
+                {showTranscript ? "Hide full transcript ▲" : "View full transcript ▼"}
+              </button>
+              {showTranscript && (
+                <div style={{ marginTop: 8, padding: 10, background: "#f8fafc", borderRadius: 8, fontSize: 11.5, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>
+                  {c.video_transcript}
+                </div>
+              )}
+            </>
+          )}
+        </AnchoredPopover>
+      )}
     </>
   );
 }
 
 // ─── MAIN PAGE ─────────────────────────────────────────────────────────────
-export default function JobLensPage() {
+export default function JobLensWorkspace({ mode = "resume" }: { mode?: "resume" | "phone" | "video" | "final" }) {
     const { user } = useAuth();
     const isAdmin = user?.role === "admin";
     const qc = useQueryClient();
@@ -1273,8 +1546,23 @@ export default function JobLensPage() {
       if (activeSessionId) qc.invalidateQueries({ queryKey: ["joblens-session", activeSessionId] });
     },
   });
-  const [activeSessionId, setActiveSessionId] = useState<number | null>(null);
-  const [tab, setTab] = useState<"new"|"history"|"management">("new");
+  const [searchParams] = useSearchParams();
+  const [activeSessionId, setActiveSessionId] = useState<number | null>(() => {
+    const fromUrl = searchParams.get("session");
+    return fromUrl ? Number(fromUrl) : null;
+  });
+  const [tab, setTab] = useState<"new"|"history">(
+    mode === "resume" && !searchParams.get("session") ? "new" : "history"
+  );
+  // Set once from the URL on first load — a candidate arriving here via
+  // "Start Phone Interview" / "Start Video Interview" from Resume
+  // Screening should land with that exact person already expanded and
+  // scrolled to, not just dropped on a session list to go find them
+  // again themselves.
+  const [focusCandidateId] = useState<number | null>(() => {
+    const fromUrl = searchParams.get("candidate");
+    return fromUrl ? Number(fromUrl) : null;
+  });
   const [managementView, setManagementView] = useState<"tracking"|"clients"|"jds"|"vendors">("tracking");
   const jdFileRef = useRef<HTMLInputElement>(null);
   const cvFileRef = useRef<HTMLInputElement>(null);
@@ -1293,6 +1581,40 @@ export default function JobLensPage() {
     queryFn: jobLensApi.sessions,
   });
 
+  // Auto-load the latest session on arrival — previously Phone/Video
+  // Interview (and Resume Screening's Results tab, landed on directly)
+  // required manually opening the session dropdown every time, even
+  // though in practice there's usually just the one active session a
+  // recruiter is working through right now. Only kicks in when nothing
+  // else has already claimed a session: not the URL's own ?session= (a
+  // deliberate deep link from "Start Phone/Video Interview" takes
+  // priority), and not a session the person already picked by hand in
+  // this same visit.
+  const [userPickedSession, setUserPickedSession] = useState(false);
+
+  // Column widths for the main candidate table — same resizable-column
+  // pattern as Requisitions/Talent Pool, just without per-column
+  // dropdown filtering (this table's columns are mostly free text/
+  // actions, not the kind of categorical data a filter dropdown suits).
+  // A single shared key set works across all four modes since exactly
+  // one of resume/phone/video/final's column sets is ever visible at a
+  // time — no key collisions in practice.
+  const [colWidths, setColWidths] = useState<Record<string, number>>({
+    rank: 50, candidate: 170, email: 190, phone: 130, vendor: 130, resumeSummary: 220,
+    atsScore: 130, keyStrength: 180, considerations: 170, status: 110, interviewQuestions: 220,
+    videoInterview: 200, phoneScreeningDecision: 150, videoInterviewScore: 150, nextSteps: 170,
+    phoneScreening: 230, decision: 160, comments: 190, candidateContact: 180, details: 90, shortlist: 100,
+  });
+  const setColWidth = (key: string, w: number) => setColWidths((prev) => ({ ...prev, [key]: w }));
+  useEffect(() => {
+    if (activeSessionId || userPickedSession || searchParams.get("session")) return;
+    if (sessions.length > 0) {
+      setActiveSessionId(sessions[0].id);
+      setTab("history");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessions]);
+
   const { data: activeSession, refetch: refetchSession } = useQuery({
     queryKey: ["joblens-session", activeSessionId],
     queryFn: () => jobLensApi.session(activeSessionId!),
@@ -1302,8 +1624,15 @@ export default function JobLensPage() {
     // up without the user needing to manually hit Refresh.
     refetchInterval: (query) => {
       const candidates = (query.state.data as any)?.candidates || [];
+      // has_video check matters here even more than in the cell display:
+      // without it, ANY session containing a candidate who simply hasn't
+      // done their video round yet (the default, normal state for most
+      // candidates most of the time) polls the backend every 5 seconds
+      // forever, since video_analysis_status defaults to "Pending" from
+      // creation — not just a cosmetic "stuck spinner" bug but ongoing,
+      // pointless load on the server for as long as that session stays open.
       const stillWorking = candidates.some((c: any) =>
-        c.video_analysis_status === "Pending" || c.video_analysis_status === "Processing"
+        c.has_video && (c.video_analysis_status === "Pending" || c.video_analysis_status === "Processing")
       );
       return stillWorking ? 5000 : false;
     },
@@ -1384,42 +1713,69 @@ export default function JobLensPage() {
     },
   });
 
-  const candidates: any[] = activeSession?.candidates || [];
+  const allCandidates: any[] = activeSession?.candidates || [];
+  // Phone/Video pages act on anyone who's cleared Resume Screening —
+  // either the AI scored them Qualified, or a recruiter manually
+  // shortlisted them (e.g. a "Review" candidate worth a call anyway).
+  // Previously this ONLY checked the manual shortlist flag, which meant
+  // Qualified candidates the recruiter hadn't separately ticked a
+  // checkbox for were invisible here — Phone/Video Interview looked
+  // empty even with a session full of Qualified candidates sitting one
+  // page away.
+  const candidates: any[] = mode === "resume" ? allCandidates : allCandidates.filter(c => c.shortlisted || c.status === "Qualified");
   const qualified  = candidates.filter(c => c.status === "Qualified").length;
   const review     = candidates.filter(c => c.status === "Review").length;
   const shortlisted = candidates.filter(c => c.shortlisted).length;
+  const phoneContacted = candidates.filter(c => c.phone_screening_status && c.phone_screening_status !== "Not Started").length;
+  const phoneCompleted = candidates.filter(c => c.phone_screening_status === "Completed").length;
+  const videoCompleted = candidates.filter(c => c.video_status === "Completed").length;
+  const videoPending   = candidates.filter(c => c.video_status !== "Completed").length;
+  const finalShortlisted = candidates.filter(c => c.shortlisted).length;
+  const finalPending     = candidates.length - finalShortlisted;
+
+  const MODE_META = {
+    resume: { title: "Resume Screening", sub: "AI-ranked CVs — score, shortlist, and export candidates against a JD.", icon: Users },
+    phone:  { title: "Phone Interview",  sub: "AI-generated call questions and logged outcomes for Qualified/shortlisted candidates.", icon: Users },
+    video:  { title: "Video Interview",  sub: "Webcam interviews with live emotion analysis and AI-scored transcripts, for Qualified/shortlisted candidates.", icon: Video },
+    final:  { title: "Final Decision",   sub: "Resume, phone, and video interview scores side by side — make the final shortlist call.", icon: CheckCircle },
+  } as const;
+  const meta = MODE_META[mode];
 
   return (
     <div>
       <div className="tiq-page-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 8 }}>
         <h1 className="tiq-page-title" style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <Users size={22} color="var(--violet-500)" /> CandidateLens
+          <meta.icon size={22} color="var(--violet-500)" /> {meta.title}
         </h1>
-        <p className="tiq-page-sub">AI recruitment engine — rank CVs, score candidates, run video interviews</p>
+        <p className="tiq-page-sub">{meta.sub}</p>
       </div>
 
       {/* Tabs row — session dropdown sits left-aligned on its own row below */}
       <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
         <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 12 }}>
-          <div className="tiq-tabs">
-            <button className={`tiq-tab${tab === "management" ? " active" : ""}`} onClick={() => setTab("management")}>
-              <Building2 size={12} style={{ display: "inline", marginRight: 6 }} /> Management
-            </button>
-            <button className={`tiq-tab${tab === "new" ? " active" : ""}`} onClick={() => setTab("new")}>
-              <Play size={12} style={{ display: "inline", marginRight: 6 }} /> New Analysis
-            </button>
-            <button className={`tiq-tab${tab === "history" ? " active" : ""}`} onClick={() => setTab("history")}>
-              <BarChart2 size={12} style={{ display: "inline", marginRight: 6 }} /> Results
-              {sessions.length > 0 && <span className="tiq-badge tiq-badge-slate" style={{ marginLeft: 8, fontSize: 10 }}>{sessions.length}</span>}
-            </button>
-          </div>
+          {mode === "resume" && (
+            <div className="tiq-tabs">
+              <button className={`tiq-tab${tab === "new" ? " active" : ""}`} onClick={() => setTab("new")}>
+                <Play size={12} style={{ display: "inline", marginRight: 6 }} /> New Analysis
+              </button>
+              <button className={`tiq-tab${tab === "history" ? " active" : ""}`} onClick={() => setTab("history")}>
+                <BarChart2 size={12} style={{ display: "inline", marginRight: 6 }} /> Results
+                {sessions.length > 0 && <span className="tiq-badge tiq-badge-slate" style={{ marginLeft: 8, fontSize: 10 }}>{sessions.length}</span>}
+              </button>
+            </div>
+          )}
         </div>
+        {mode !== "resume" && (
+          <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 4 }}>
+            Showing candidates who scored Qualified or were manually shortlisted in Resume Screening. Manage the candidate pool and run new scoring there.
+          </div>
+        )}
 
-        {tab === "history" && sessions.length > 0 && (
+        {(tab === "history" || mode !== "resume") && sessions.length > 0 && (
           <div style={{ display: "flex", alignItems: "center", gap: 8, maxWidth: 380, width: "100%" }}>
             <HistoryDropdown
               value={activeSessionId}
-              onChange={id => setActiveSessionId(id as number | null)}
+              onChange={id => { setActiveSessionId(id as number | null); setUserPickedSession(true); }}
               options={sessions.map((s: any) => ({
                 id: s.id,
                 label: `Session #${s.sequence_number || s.id} · ${s.cv_count} CVs · ${new Date(s.created_at).toLocaleDateString()}`,
@@ -1430,30 +1786,7 @@ export default function JobLensPage() {
             />
           </div>
         )}
-
-        {tab === "management" && (
-          <div>
-            <select className="tiq-input" style={{ maxWidth: 260 }}
-              value={managementView}
-              onChange={e => setManagementView(e.target.value as typeof managementView)}>
-              <option value="tracking">Candidates</option>
-              <option value="clients">Clients</option>
-              <option value="jds">Job Descriptions</option>
-              <option value="vendors">Vendors</option>
-            </select>
-            {managementView !== "tracking" && (
-              <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 4 }}>
-                Reference data for Candidates — set these up first, then track candidates against them.
-              </div>
-            )}
-          </div>
-        )}
       </div>
-
-      {tab === "management" && managementView === "clients" && <ClientManagementTab />}
-      {tab === "management" && managementView === "jds" && <JDManagementTab />}
-      {tab === "management" && managementView === "vendors" && <VendorManagementTab />}
-      {tab === "management" && managementView === "tracking" && <CandidateTrackingTab onSendToNewAnalysis={handleSendToNewAnalysis} />}
 
       {tab === "new" && (
         <div style={{ maxWidth: 900 }}>
@@ -1665,22 +1998,41 @@ export default function JobLensPage() {
         </div>
       )}
 
-      {tab === "history" && (
+      {(tab === "history" || mode !== "resume") && (
         <div>
           {activeSession ? (
             <div>
-              {/* Summary */}
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 12, marginBottom: 20 }}>
-                {[
+              {/* Summary — tiles are mode-specific: Resume Screening
+                  tracks scoring outcomes; Phone/Video Interview track
+                  how far each candidate's gotten through that specific
+                  stage, since "Qualified" alone doesn't say whether
+                  anyone's actually been called or recorded yet. */}
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 12, marginBottom: 12 }}>
+                {(mode === "resume" ? [
                   { label: "Total Candidates", value: candidates.length, color: "var(--text-primary)", icon: Users },
                   { label: "Qualified", value: qualified, color: "#10b981", icon: CheckCircle },
                   { label: "Review", value: review, color: "#f59e0b", icon: Clock },
                   { label: "Shortlisted", value: shortlisted, color: "var(--violet-500)", icon: Star },
-                ].map(({ label, value, color, icon: Icon }) => (
-                  <div key={label} className="tiq-card" style={{ textAlign: "center", padding: "16px 12px" }}>
-                    <Icon size={18} color={color} style={{ margin: "0 auto 6px" }} />
-                    <div style={{ fontSize: 28, fontWeight: 900, color }}>{value}</div>
-                    <div style={{ fontSize: 11, color: "var(--text-muted)" }}>{label}</div>
+                ] : mode === "phone" ? [
+                  { label: "Ready for Phone Interview", value: candidates.length, color: "var(--text-primary)", icon: Users },
+                  { label: "Qualified", value: qualified, color: "#10b981", icon: CheckCircle },
+                  { label: "Contacted", value: phoneContacted, color: "#3b82f6", icon: Clock },
+                  { label: "Completed", value: phoneCompleted, color: "var(--violet-500)", icon: Star },
+                ] : mode === "video" ? [
+                  { label: "Ready for Video Interview", value: candidates.length, color: "var(--text-primary)", icon: Users },
+                  { label: "Qualified", value: qualified, color: "#10b981", icon: CheckCircle },
+                  { label: "Completed", value: videoCompleted, color: "var(--violet-500)", icon: Star },
+                  { label: "Pending", value: videoPending, color: "#f59e0b", icon: Clock },
+                ] : [
+                  { label: "Total Candidates", value: candidates.length, color: "var(--text-primary)", icon: Users },
+                  { label: "Qualified", value: qualified, color: "#10b981", icon: CheckCircle },
+                  { label: "Shortlisted", value: finalShortlisted, color: "var(--violet-500)", icon: Star },
+                  { label: "Awaiting Decision", value: finalPending, color: "#f59e0b", icon: Clock },
+                ]).map(({ label, value, color, icon: Icon }) => (
+                  <div key={label} className="tiq-card" style={{ textAlign: "center", padding: "8px 12px" }}>
+                    <Icon size={16} color={color} style={{ margin: "0 auto 3px" }} />
+                    <div style={{ fontSize: 22, fontWeight: 900, color, lineHeight: 1.2 }}>{value}</div>
+                    <div style={{ fontSize: 10, color: "var(--text-muted)" }}>{label}</div>
                   </div>
                 ))}
               </div>
@@ -1696,28 +2048,43 @@ export default function JobLensPage() {
                   guessed from raw text client-side. */}
               {activeSession.jd_text && (activeSession.jd_role || activeSession.jd_location || activeSession.jd_company || (activeSession.jd_skills || []).length > 0) && (
                 <div className="tiq-card tiq-mb-4" style={{ borderLeft: "4px solid var(--violet-500)" }}>
-                  <div className="tiq-card-title" style={{ fontSize: 12, marginBottom: 12 }}>Job Description Summary</div>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {/* Heading only makes sense where the skills breakdown
+                      below it actually exists (Resume Screening) — on
+                      Phone/Video/Final, this card is just a compact
+                      title/location/client reminder, not a "summary" of
+                      anything else on the page. */}
+                  {mode === "resume" && (
+                    <div className="tiq-card-title" style={{ fontSize: 12, marginBottom: 12 }}>Job Description Summary</div>
+                  )}
+                  <div style={{ display: "flex", flexWrap: "wrap", alignItems: "baseline", gap: "6px 40px" }}>
                     {activeSession.jd_role && (
-                      <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
-                        <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", width: 90, flexShrink: 0 }}>JD TITLE</span>
-                        <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>{activeSession.jd_role}</span>
-                      </div>
+                      <span style={{ fontSize: 13 }}>
+                        <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", marginRight: 6 }}>JD TITLE:</span>
+                        <span style={{ fontWeight: 600, color: "var(--text-primary)" }}>{activeSession.jd_role}</span>
+                      </span>
                     )}
                     {activeSession.jd_location && (
-                      <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
-                        <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", width: 90, flexShrink: 0 }}>LOCATION</span>
-                        <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>{activeSession.jd_location}</span>
-                      </div>
+                      <span style={{ fontSize: 13 }}>
+                        <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", marginRight: 6 }}>LOCATION:</span>
+                        <span style={{ color: "var(--text-secondary)" }}>{activeSession.jd_location}</span>
+                      </span>
                     )}
                     {(activeSession.jd_client_name || activeSession.jd_company) && (
-                      <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
-                        <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", width: 90, flexShrink: 0 }}>CLIENT NAME</span>
-                        <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>{activeSession.jd_client_name || activeSession.jd_company}</span>
-                      </div>
+                      <span style={{ fontSize: 13 }}>
+                        <span style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", marginRight: 6 }}>CLIENT NAME:</span>
+                        <span style={{ color: "var(--text-secondary)" }}>{activeSession.jd_client_name || activeSession.jd_company}</span>
+                      </span>
                     )}
-
-                    {(activeSession.jd_essential_skills?.length > 0 || activeSession.jd_good_to_have_skills?.length > 0 || activeSession.jd_optional_skills?.length > 0) ? (
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: mode === "resume" ? 8 : 0 }}>
+                    {/* Skills breakdown — Resume Screening only. Phone/Video
+                        Interview just need title/location/client as a
+                        quick reminder of which role this is; the full
+                        essential/good-to-have skill list is what's being
+                        SCORED against, which matters during screening,
+                        not while conducting a call or recording a video
+                        round. */}
+                    {mode === "resume" && ((activeSession.jd_essential_skills?.length > 0 || activeSession.jd_good_to_have_skills?.length > 0 || activeSession.jd_optional_skills?.length > 0) ? (
                       <>
                         {activeSession.jd_essential_skills?.length > 0 && (
                           <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
@@ -1759,7 +2126,7 @@ export default function JobLensPage() {
                           ))}
                         </div>
                       </div>
-                    )}
+                    ))}
                   </div>
                 </div>
               )}
@@ -1811,20 +2178,32 @@ export default function JobLensPage() {
                   </div>
                 )}
                 <div style={{ overflowX: "auto" }}>
-                  <table className="tiq-table" style={{ minWidth: 1100, width: "100%" }}>
+                  <table className="tiq-table" style={{ minWidth: mode === "resume" ? 1200 : mode === "video" ? 1150 : mode === "phone" ? 900 : 850, width: "100%", tableLayout: "fixed" }}>
                     <thead ref={theadRef}>
                       <tr>
-                        <th>#</th>
-                        <th>Candidate</th>
-                        <th>Email</th>
-                        <th>Phone</th>
-                        <th>Vendor</th>
-                        <th>Resume Summary</th>
-                        <th>ATS Score</th>
-                        <th>Key Strength</th>
-                        <th>Considerations</th>
-                        <th>Status</th>
-                        <th>Actions</th>
+                        <ResizableFilterHeader label="#" filterable={false} width={colWidths.rank} onWidthChange={(w) => setColWidth("rank", w)} align="center" />
+                        <ResizableFilterHeader label="Candidate" filterable={false} width={colWidths.candidate} onWidthChange={(w) => setColWidth("candidate", w)} />
+                        {mode === "resume" && <ResizableFilterHeader label="Email" filterable={false} width={colWidths.email} onWidthChange={(w) => setColWidth("email", w)} />}
+                        <ResizableFilterHeader label="Phone" filterable={false} width={colWidths.phone} onWidthChange={(w) => setColWidth("phone", w)} />
+                        {mode === "resume" && <ResizableFilterHeader label="Vendor" filterable={false} width={colWidths.vendor} onWidthChange={(w) => setColWidth("vendor", w)} />}
+                        {mode === "resume" && <ResizableFilterHeader label="Resume Summary" filterable={false} width={colWidths.resumeSummary} onWidthChange={(w) => setColWidth("resumeSummary", w)} />}
+                        <ResizableFilterHeader label={mode === "final" ? "Resume Screening Score" : "ATS Score"} filterable={false} width={colWidths.atsScore} onWidthChange={(w) => setColWidth("atsScore", w)} />
+                        {mode === "resume" && <ResizableFilterHeader label="Key Strength" filterable={false} width={colWidths.keyStrength} onWidthChange={(w) => setColWidth("keyStrength", w)} />}
+                        {mode === "resume" && <ResizableFilterHeader label="Considerations" filterable={false} width={colWidths.considerations} onWidthChange={(w) => setColWidth("considerations", w)} />}
+                        {mode === "resume" && <ResizableFilterHeader label="Status" filterable={false} width={colWidths.status} onWidthChange={(w) => setColWidth("status", w)} />}
+                        {(mode === "phone" || mode === "video") && <ResizableFilterHeader label="Interview Questions" filterable={false} width={colWidths.interviewQuestions} onWidthChange={(w) => setColWidth("interviewQuestions", w)} />}
+                        {mode === "video" && <ResizableFilterHeader label="Video Interview" filterable={false} width={colWidths.videoInterview} onWidthChange={(w) => setColWidth("videoInterview", w)} />}
+                        {mode === "final" && <ResizableFilterHeader label="Phone Screening Decision" filterable={false} width={colWidths.phoneScreeningDecision} onWidthChange={(w) => setColWidth("phoneScreeningDecision", w)} />}
+                        {mode === "final" && <ResizableFilterHeader label="Video Interview Score" filterable={false} width={colWidths.videoInterviewScore} onWidthChange={(w) => setColWidth("videoInterviewScore", w)} />}
+                        {mode === "resume" && <ResizableFilterHeader label="Next Steps" filterable={false} width={colWidths.nextSteps} onWidthChange={(w) => setColWidth("nextSteps", w)} />}
+                        {mode === "phone" && <ResizableFilterHeader label="Manual Phone Screening" filterable={false} width={colWidths.phoneScreening} onWidthChange={(w) => setColWidth("phoneScreening", w)} />}
+                        {mode === "phone" && <ResizableFilterHeader label="Next Steps" filterable={false} width={colWidths.nextSteps} onWidthChange={(w) => setColWidth("nextSteps", w)} />}
+                        {mode === "video" && <ResizableFilterHeader label="Decision" filterable={false} width={colWidths.decision} onWidthChange={(w) => setColWidth("decision", w)} />}
+                        {mode === "video" && <ResizableFilterHeader label="Comments" filterable={false} width={colWidths.comments} onWidthChange={(w) => setColWidth("comments", w)} />}
+                        {mode === "video" && <ResizableFilterHeader label="Candidate Contact" filterable={false} width={colWidths.candidateContact} onWidthChange={(w) => setColWidth("candidateContact", w)} />}
+                        {mode === "video" && <ResizableFilterHeader label="Next Steps" filterable={false} width={colWidths.nextSteps} onWidthChange={(w) => setColWidth("nextSteps", w)} />}
+                        {mode === "resume" && <ResizableFilterHeader label="Details" filterable={false} width={colWidths.details} onWidthChange={(w) => setColWidth("details", w)} />}
+                        {mode === "final" && <ResizableFilterHeader label="Shortlist" filterable={false} width={colWidths.shortlist} onWidthChange={(w) => setColWidth("shortlist", w)} />}
                       </tr>
                     </thead>
                     <tbody>
@@ -1841,6 +2220,8 @@ export default function JobLensPage() {
                           jdEssential={activeSession.jd_essential_skills || []}
                           jdGoodToHave={activeSession.jd_good_to_have_skills || []}
                           jdOptional={activeSession.jd_optional_skills || []}
+                          mode={mode}
+                          focusCandidateId={focusCandidateId}
                         />
                       ))}
                     </tbody>

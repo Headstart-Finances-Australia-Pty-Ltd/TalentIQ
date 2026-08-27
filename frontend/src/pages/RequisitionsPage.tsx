@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import {
   ClipboardList, Plus, X, Check, Link2, ChevronRight,
-  AlertTriangle, Copy, Upload, Trash2, Building2,
+  AlertTriangle, Copy, Upload, Trash2, Building2, UserPlus,
 } from "lucide-react";
-import { requisitionApi, candidateTrackApi } from "../lib/api";
+import { requisitionApi, candidateTrackApi, pipelineApi, acquisitionApi } from "../lib/api";
+import { ResizableFilterHeader } from "../components/ResizableFilterHeader";
 import CsvImportModal from "../components/candidatetrack/CsvImportModal";
 
 const STATUS_FLOW = ["Draft", "Approved", "Open", "On Hold", "Filled", "Cancelled"];
@@ -28,6 +29,14 @@ const PRIORITY_COLORS: Record<string, string> = { Critical: "#ef4444", High: "#f
 const REASONS = ["New Position", "Replacement", "Backfill", "Growth"];
 const EMPLOYMENT_TYPES = ["Full-time", "Part-time", "Contract", "Temporary"];
 
+// Default column widths (px) — resizable per-column via the drag handle
+// in ResizableFilterHeader; these are just the starting point.
+const DEFAULT_COL_WIDTHS: Record<string, number> = {
+  sequence_number: 80, title: 190, client: 150, priority: 110, vacancy_count: 100, reason_for_hire: 150,
+  employment_type: 150, location: 140, salary_range: 150, target_hire_date: 140,
+  status: 130, checklist: 120, hiring_manager: 160, application_count: 200,
+};
+
 const emptyForm = {
   title: "", client_id: "" as string | number, jd_record_id: "" as string | number,
   priority: "Normal", vacancy_count: 1, reason_for_hire: "", employment_type: "",
@@ -42,7 +51,98 @@ export default function RequisitionsPage() {
   const [jds, setJds] = useState<any[]>([]);
   const [contacts, setContacts] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
-  const [statusFilter, setStatusFilter] = useState("");
+  // One filter value per column, keyed by column id — replaces the old
+  // status-only server-side filter with the same client-side pattern
+  // used for every other column now that they all filter the same way.
+  const [colFilters, setColFilters] = useState<Record<string, string>>({});
+  const setColFilter = (key: string, value: string) => setColFilters((f) => ({ ...f, [key]: value }));
+  const [colWidths, setColWidths] = useState<Record<string, number>>(DEFAULT_COL_WIDTHS);
+  const setColWidth = (key: string, w: number) => setColWidths((prev) => ({ ...prev, [key]: w }));
+
+  // ── Applicants popup — who's actually applied to this role ─────────
+  const [applicantsReqId, setApplicantsReqId] = useState<number | null>(null);
+  const [applicants, setApplicants] = useState<any[] | null>(null);
+  const [loadingApplicants, setLoadingApplicants] = useState(false);
+  const openApplicants = async (reqId: number) => {
+    setApplicantsReqId(reqId);
+    setApplicants(null);
+    setLoadingApplicants(true);
+    try {
+      const entries = await pipelineApi.listEntries({ requisition_id: reqId });
+      const withCandidates = await Promise.all(
+        entries.map(async (e: any) => {
+          try {
+            const c = await acquisitionApi.getCandidate(e.candidate_id);
+            return { ...e, candidate: c };
+          } catch {
+            return { ...e, candidate: null };
+          }
+        })
+      );
+      setApplicants(withCandidates);
+    } finally {
+      setLoadingApplicants(false);
+    }
+  };
+
+  // ── Match & Submit — one click per role instead of manually ticking
+  // candidates in Talent Pool. "Suitable" is judged the same way a
+  // recruiter would skim a candidate list: their tags include this
+  // exact role title (candidates tagged that way when imported/added),
+  // or their current title overlaps with the role title. Always shown
+  // for review before anything is actually submitted — this suggests,
+  // it doesn't silently auto-apply anyone.
+  const [matchReqId, setMatchReqId] = useState<number | null>(null);
+  const [matchCandidates, setMatchCandidates] = useState<any[] | null>(null);
+  const [matchSelected, setMatchSelected] = useState<Set<number>>(new Set());
+  const [loadingMatches, setLoadingMatches] = useState(false);
+  const [submittingMatches, setSubmittingMatches] = useState(false);
+  const [matchResult, setMatchResult] = useState<{ submitted: number; alreadyIn: number; failed: number } | null>(null);
+
+  const isSuitableMatch = (c: any, reqTitle: string) => {
+    const title = (c.current_title || "").toLowerCase().trim();
+    const reqT = reqTitle.toLowerCase().trim();
+    const tagMatch = (c.tags || []).some((t: string) => t.toLowerCase().trim() === reqT);
+    const titleMatch = !!title && (title.includes(reqT) || reqT.includes(title));
+    return tagMatch || titleMatch;
+  };
+
+  const openMatchModal = async (reqId: number) => {
+    setMatchReqId(reqId);
+    setMatchCandidates(null);
+    setMatchSelected(new Set());
+    setMatchResult(null);
+    setLoadingMatches(true);
+    try {
+      const req = requisitions.find((r) => r.id === reqId);
+      const all = await acquisitionApi.listCandidates();
+      const suitable = req ? all.filter((c: any) => isSuitableMatch(c, req.title)) : [];
+      setMatchCandidates(suitable);
+      setMatchSelected(new Set(suitable.map((c: any) => c.id))); // pre-check every suggested match; still reviewable/deselectable before submit
+    } finally {
+      setLoadingMatches(false);
+    }
+  };
+  const toggleMatchSelect = (id: number) => {
+    setMatchSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+  const submitMatches = async () => {
+    if (!matchReqId || matchSelected.size === 0) return;
+    setSubmittingMatches(true);
+    const results = await Promise.allSettled(
+      Array.from(matchSelected).map((candidateId) => pipelineApi.submit({ candidate_id: candidateId, requisition_id: matchReqId }))
+    );
+    const submitted = results.filter((r) => r.status === "fulfilled").length;
+    const alreadyIn = results.filter((r) => r.status === "rejected" && (r as PromiseRejectedResult).reason?.response?.status === 409).length;
+    const failed = results.length - submitted - alreadyIn;
+    setMatchResult({ submitted, alreadyIn, failed });
+    setSubmittingMatches(false);
+    await load(); // refresh Applications counts on the table behind the modal
+  };
 
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -52,6 +152,8 @@ export default function RequisitionsPage() {
 
   const [detailId, setDetailId] = useState<number | null>(null);
   const [linkCopied, setLinkCopied] = useState(false);
+  const [hmLinkModal, setHmLinkModal] = useState<{ url: string; copyFailed: boolean } | null>(null);
+  const [checklistPopoverId, setChecklistPopoverId] = useState<number | null>(null);
 
   const [showCsv, setShowCsv] = useState(false);
   const [showClientCsv, setShowClientCsv] = useState(false);
@@ -71,7 +173,7 @@ export default function RequisitionsPage() {
     setLoading(true);
     try {
       const [reqs, cl, jdList, cts] = await Promise.all([
-        requisitionApi.list(statusFilter ? { status: statusFilter } : undefined),
+        requisitionApi.list(),
         candidateTrackApi.listClients(),
         candidateTrackApi.listJDs(),
         requisitionApi.listContacts(),
@@ -85,7 +187,7 @@ export default function RequisitionsPage() {
     }
   };
 
-  useEffect(() => { load(); }, [statusFilter]);
+  useEffect(() => { load(); }, []);
 
   const openAdd = () => { setForm(emptyForm); setEditingId(null); setFormError(""); setShowForm(true); };
   const openEdit = (r: any) => {
@@ -119,10 +221,19 @@ export default function RequisitionsPage() {
       hiring_manager_contact_id: form.hiring_manager_contact_id === "" ? null : Number(form.hiring_manager_contact_id),
     };
     try {
-      if (editingId) await requisitionApi.update(editingId, payload);
-      else await requisitionApi.create(payload);
+      const saved = editingId ? await requisitionApi.update(editingId, payload) : await requisitionApi.create(payload);
+      // Optimistic: the PUT/POST response already IS the fully updated
+      // record — drop it straight into local state and close immediately
+      // instead of waiting on a full reload round-trip before the modal
+      // closes. load() still runs after, in the background, to pick up
+      // anything cross-cutting (e.g. a brand-new client appearing in the
+      // Client dropdown) — but the table itself updates instantly.
+      setRequisitions((prev) => {
+        if (editingId) return prev.map((r) => (r.id === editingId ? saved : r));
+        return [saved, ...prev];
+      });
       setShowForm(false);
-      await load();
+      load();
     } catch (e: any) {
       setFormError(e?.response?.data?.detail || "Could not save requisition.");
     } finally {
@@ -150,8 +261,11 @@ export default function RequisitionsPage() {
   };
 
   const toggleSelectAll = () => {
-    if (selected.size === requisitions.length) setSelected(new Set());
-    else setSelected(new Set(requisitions.map((r) => r.id)));
+    // Select-all applies to the currently-visible (filtered) rows, not
+    // every requisition regardless of what the column filters are
+    // hiding — matches normal table UX once filtering is per-column.
+    if (selected.size === filteredRequisitions.length) setSelected(new Set());
+    else setSelected(new Set(filteredRequisitions.map((r) => r.id)));
   };
 
   const handleBulkDelete = async () => {
@@ -171,24 +285,84 @@ export default function RequisitionsPage() {
   };
 
   const handleStatusChange = async (id: number, status: string) => {
+    const prev = requisitions;
+    setRequisitions((rs) => rs.map((r) => (r.id === id ? { ...r, status } : r)));
     try {
-      await requisitionApi.changeStatus(id, status);
-      await load();
+      const saved = await requisitionApi.changeStatus(id, status);
+      setRequisitions((rs) => rs.map((r) => (r.id === id ? saved : r)));
     } catch (e: any) {
+      setRequisitions(prev); // the transition was rejected (e.g. skipping a required step) — revert the dropdown
       alert(e?.response?.data?.detail || "Could not change status.");
     }
   };
 
+  const handlePriorityChange = async (id: number, priority: string) => {
+    const prev = requisitions;
+    setRequisitions((rs) => rs.map((r) => (r.id === id ? { ...r, priority } : r)));
+    try {
+      const saved = await requisitionApi.update(id, { priority });
+      setRequisitions((rs) => rs.map((r) => (r.id === id ? saved : r)));
+    } catch (e: any) {
+      setRequisitions(prev);
+      alert(e?.response?.data?.detail || "Could not change priority.");
+    }
+  };
+
   const handleChecklistToggle = async (id: number, field: string, value: boolean) => {
-    await requisitionApi.updateChecklist(id, { [field]: value });
-    await load();
+    const prev = requisitions;
+    // Optimistic: flip it immediately (and recompute checklist_complete
+    // locally) so a checkbox visibly ticks the instant you click it,
+    // rather than waiting on a round-trip before it appears checked.
+    setRequisitions((rs) => rs.map((r) => {
+      if (r.id !== id) return r;
+      const next = { ...r, [field]: value };
+      next.checklist_complete = ["salary_approved", "headcount_approved", "jd_approved", "location_confirmed"].every((f) => !!next[f]);
+      return next;
+    }));
+    try {
+      const saved = await requisitionApi.updateChecklist(id, { [field]: value });
+      setRequisitions((rs) => rs.map((r) => (r.id === id ? saved : r)));
+    } catch (e: any) {
+      setRequisitions(prev);
+      alert(e?.response?.data?.detail || "Could not update the checklist.");
+    }
   };
 
   const copyHmLink = async (id: number) => {
-    const res = await requisitionApi.generateHmViewLink(id);
-    navigator.clipboard.writeText(`${window.location.origin}${res.view_url_path}`);
-    setLinkCopied(true);
-    setTimeout(() => setLinkCopied(false), 2000);
+    let url = "";
+    try {
+      const res = await requisitionApi.generateHmViewLink(id);
+      url = `${window.location.origin}${res.view_url_path}`;
+    } catch (e: any) {
+      alert(e?.response?.data?.detail || "Could not generate the hiring manager link.");
+      return;
+    }
+    // Show the actual link on screen rather than trusting an invisible
+    // clipboard write — some browsers silently refuse
+    // navigator.clipboard.writeText() here because it's happening after
+    // an awaited network call, outside the original click's user-gesture
+    // window, which left the clipboard holding whatever was copied
+    // earlier instead. This way the real link is always visible and
+    // selectable even if the one-click copy itself fails.
+    let copyFailed = false;
+    try {
+      await navigator.clipboard.writeText(url);
+    } catch {
+      copyFailed = true;
+    }
+    setHmLinkModal({ url, copyFailed });
+  };
+
+  const retryCopyHmLink = async () => {
+    if (!hmLinkModal) return;
+    try {
+      await navigator.clipboard.writeText(hmLinkModal.url);
+      setHmLinkModal({ ...hmLinkModal, copyFailed: false });
+      setLinkCopied(true);
+      setTimeout(() => setLinkCopied(false), 2000);
+    } catch {
+      setHmLinkModal({ ...hmLinkModal, copyFailed: true });
+    }
   };
 
   // ── Clients table: edit / delete / bulk-select ──────────────────────
@@ -224,31 +398,52 @@ export default function RequisitionsPage() {
     setClientFormError("");
     try {
       const clientPayload = { name: clientForm.name, address: clientForm.address, abn: clientForm.abn, area_of_work: clientForm.area_of_work };
-      let clientId: number;
-      if (clientFormState?.mode === "edit") {
-        await candidateTrackApi.updateClient(clientFormState.client.id, clientPayload);
-        clientId = clientFormState.client.id;
-      } else {
-        const created = await candidateTrackApi.createClient(clientPayload);
-        clientId = created.id;
-      }
-
-      // Contact fields are optional as a group — only touch the contact
-      // record if at least one was actually filled in.
       const hasContactInput = clientForm.contact_name.trim() || clientForm.contact_email.trim() || clientForm.contact_phone.trim();
-      if (hasContactInput) {
-        const contactPayload = {
+      let savedClient: any;
+
+      if (clientFormState?.mode === "edit") {
+        const clientId = clientFormState.client.id;
+        // Editing: the client update and the contact update don't depend
+        // on each other's result, so run them together instead of one
+        // after another — this alone roughly halves the wait on an edit
+        // that also touches the primary contact.
+        const contactPayload = hasContactInput ? {
           client_id: clientId,
-          name: clientForm.contact_name.trim() || clientForm.name.trim(), // fallback so email/phone-only input isn't rejected (name is required)
+          name: clientForm.contact_name.trim() || clientForm.name.trim(),
           title: clientForm.contact_title, email: clientForm.contact_email, phone: clientForm.contact_phone,
           is_primary: true,
-        };
-        if (clientForm.contact_id) await requisitionApi.updateContact(clientForm.contact_id, contactPayload);
-        else await requisitionApi.createContact(contactPayload);
+        } : null;
+        const [c] = await Promise.all([
+          candidateTrackApi.updateClient(clientId, clientPayload),
+          contactPayload
+            ? (clientForm.contact_id ? requisitionApi.updateContact(clientForm.contact_id, contactPayload) : requisitionApi.createContact(contactPayload))
+            : Promise.resolve(null),
+        ]);
+        savedClient = c;
+      } else {
+        // Creating: the contact genuinely needs the new client's id first,
+        // so this leg has to stay sequential.
+        savedClient = await candidateTrackApi.createClient(clientPayload);
+        if (hasContactInput) {
+          await requisitionApi.createContact({
+            client_id: savedClient.id,
+            name: clientForm.contact_name.trim() || clientForm.name.trim(),
+            title: clientForm.contact_title, email: clientForm.contact_email, phone: clientForm.contact_phone,
+            is_primary: true,
+          });
+        }
       }
 
+      // Optimistic: drop the saved client straight into local state and
+      // close right away — contacts/counts refresh in the background via
+      // load() rather than holding the modal open until every last
+      // related list has re-fetched.
+      setClients((prev) => {
+        if (clientFormState?.mode === "edit") return prev.map((c: any) => (c.id === savedClient.id ? savedClient : c));
+        return [...prev, savedClient];
+      });
       setClientFormState(null);
-      await load();
+      load();
     } catch (e: any) {
       setClientFormError(e?.response?.data?.detail || "Could not save client.");
     } finally {
@@ -299,30 +494,59 @@ export default function RequisitionsPage() {
 
   const detail = requisitions.find((r) => r.id === detailId);
 
+  // Every filterable column's display value, in one place — used both
+  // to build each column's "options actually present" list and to
+  // filter the table, so the two can never disagree with each other.
+  const salaryRangeText = (r: any) => (r.salary_min || r.salary_max ? `${r.salary_min ? r.salary_min.toLocaleString() : "?"} – ${r.salary_max ? r.salary_max.toLocaleString() : "?"}` : "—");
+  const targetDateText = (r: any) => (r.target_hire_date ? new Date(r.target_hire_date).toLocaleDateString() : "—");
+  const getColValue = (r: any, key: string): string => {
+    switch (key) {
+      case "sequence_number": return String(r.sequence_number ?? "");
+      case "title": return r.title;
+      case "client": return r.client_name || "—";
+      case "priority": return r.priority;
+      case "vacancy_count": return String(r.vacancy_count);
+      case "reason_for_hire": return r.reason_for_hire || "—";
+      case "employment_type": return r.employment_type || "—";
+      case "location": return r.location || "—";
+      case "salary_range": return salaryRangeText(r);
+      case "target_hire_date": return targetDateText(r);
+      case "status": return r.status;
+      case "checklist": return r.checklist_complete ? "Complete" : "Incomplete";
+      case "hiring_manager": return r.hiring_manager_name || "—";
+      case "application_count": return String(r.application_count);
+      default: return "";
+    }
+  };
+  const colOptions = (key: string) => Array.from(new Set(requisitions.map((r) => getColValue(r, key)))).sort();
+  const filteredRequisitions = requisitions.filter((r) =>
+    Object.entries(colFilters).every(([key, val]) => !val || getColValue(r, key) === val)
+  );
+
   return (
     <div className="tiq-content">
-      <div className="tiq-page-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
+      <div className="tiq-page-header">
         <div>
           <div className="tiq-page-title">Requisitions</div>
           <div className="tiq-page-sub">A job doesn't exist until it's a structured, approved, owned object.</div>
         </div>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <button className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={() => setShowClientsTable((v) => !v)}>
-            <Building2 size={14} /> {showClientsTable ? "Hide Clients" : "Show Clients"}
-          </button>
-          <button className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={openAddClient}>
-            <Building2 size={14} /> Add Client
-          </button>
-          <button className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={() => setShowClientCsv(true)}>
-            <Upload size={14} /> Bulk Import Clients
-          </button>
-          <button className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={() => setShowCsv(true)}>
-            <Upload size={14} /> Bulk Import Requisitions
-          </button>
-          <button className="tiq-btn tiq-btn-primary tiq-btn-sm" onClick={openAdd}>
-            <Plus size={14} /> New Requisition
-          </button>
-        </div>
+      </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-start", marginTop: 12, marginBottom: 8 }}>
+        <button className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={() => setShowClientsTable((v) => !v)}>
+          <Building2 size={14} /> {showClientsTable ? "Hide Clients" : "Show Clients"}
+        </button>
+        <button className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={openAddClient}>
+          <Building2 size={14} /> Add Client
+        </button>
+        <button className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={() => setShowClientCsv(true)}>
+          <Upload size={14} /> Bulk Import Clients
+        </button>
+        <button className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={() => setShowCsv(true)}>
+          <Upload size={14} /> Bulk Import Requisitions
+        </button>
+        <button className="tiq-btn tiq-btn-primary tiq-btn-sm" onClick={openAdd}>
+          <Plus size={14} /> New Requisition
+        </button>
       </div>
 
       {/* ── Clients table — shown above the Requisitions table so a
@@ -386,66 +610,158 @@ export default function RequisitionsPage() {
         </div>
       )}
 
-      <div style={{ display: "flex", gap: 8, marginTop: 16, marginBottom: 16, flexWrap: "wrap", alignItems: "center" }}>
-        <button className={`tiq-btn tiq-btn-sm ${statusFilter === "" ? "tiq-btn-primary" : "tiq-btn-outline"}`} onClick={() => setStatusFilter("")}>All</button>
-        {STATUS_FLOW.map((s) => (
-          <button key={s} className={`tiq-btn tiq-btn-sm ${statusFilter === s ? "tiq-btn-primary" : "tiq-btn-outline"}`} onClick={() => setStatusFilter(s)}>{s}</button>
-        ))}
-        {selected.size > 0 && (
-          <button className="tiq-btn tiq-btn-outline tiq-btn-sm" style={{ marginLeft: "auto", color: "#ef4444", borderColor: "#ef4444" }}
+      {selected.size > 0 && (
+        <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 16, marginBottom: 8 }}>
+          <button className="tiq-btn tiq-btn-outline tiq-btn-sm" style={{ color: "#ef4444", borderColor: "#ef4444" }}
                   onClick={handleBulkDelete}>
             <Trash2 size={13} /> Delete {selected.size} selected
           </button>
-        )}
-      </div>
+        </div>
+      )}
 
       {loading ? (
         <div className="tiq-spinner-wrap"><div className="tiq-spinner" /></div>
       ) : requisitions.length === 0 ? (
         <div className="tiq-empty">No requisitions yet. Create one to get the intake workflow started.</div>
+      ) : filteredRequisitions.length === 0 ? (
+        <div className="tiq-empty">
+          No requisitions match the current column filters.{" "}
+          <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" onClick={() => setColFilters({})}>Clear filters</button>
+        </div>
       ) : (
-        <div className="tiq-table-wrap">
-          <table className="tiq-table">
+        <div className="tiq-table-wrap" style={{ marginTop: 16 }}>
+          <table className="tiq-table" style={{ tableLayout: "fixed" }}>
             <thead>
               <tr>
                 <th style={{ width: 28 }}>
-                  <input type="checkbox" checked={selected.size > 0 && selected.size === requisitions.length}
+                  <input type="checkbox" checked={selected.size > 0 && selected.size === filteredRequisitions.length}
                          onChange={toggleSelectAll} />
                 </th>
-                <th>Title</th>
-                <th>Client</th>
-                <th>Priority</th>
-                <th>Vacancies</th>
-                <th>Status</th>
-                <th>Checklist</th>
-                <th>Applications</th>
+                <ResizableFilterHeader label="Req #" value={colFilters.sequence_number} options={colOptions("sequence_number")} onChange={(v) => setColFilter("sequence_number", v)} align="center" width={colWidths.sequence_number} onWidthChange={(w) => setColWidth("sequence_number", w)} />
+                <ResizableFilterHeader label="Title" value={colFilters.title} options={colOptions("title")} onChange={(v) => setColFilter("title", v)} width={colWidths.title} onWidthChange={(w) => setColWidth("title", w)} />
+                <ResizableFilterHeader label="Client" value={colFilters.client} options={colOptions("client")} onChange={(v) => setColFilter("client", v)} width={colWidths.client} onWidthChange={(w) => setColWidth("client", w)} />
+                <ResizableFilterHeader label="Priority" value={colFilters.priority} options={colOptions("priority")} onChange={(v) => setColFilter("priority", v)} width={colWidths.priority} onWidthChange={(w) => setColWidth("priority", w)} />
+                <ResizableFilterHeader label="Vacancies" value={colFilters.vacancy_count} options={colOptions("vacancy_count")} onChange={(v) => setColFilter("vacancy_count", v)} align="center" width={colWidths.vacancy_count} onWidthChange={(w) => setColWidth("vacancy_count", w)} />
+                <ResizableFilterHeader label="Reason for Hire" value={colFilters.reason_for_hire} options={colOptions("reason_for_hire")} onChange={(v) => setColFilter("reason_for_hire", v)} width={colWidths.reason_for_hire} onWidthChange={(w) => setColWidth("reason_for_hire", w)} />
+                <ResizableFilterHeader label="Employment Type" value={colFilters.employment_type} options={colOptions("employment_type")} onChange={(v) => setColFilter("employment_type", v)} width={colWidths.employment_type} onWidthChange={(w) => setColWidth("employment_type", w)} />
+                <ResizableFilterHeader label="Location" value={colFilters.location} options={colOptions("location")} onChange={(v) => setColFilter("location", v)} width={colWidths.location} onWidthChange={(w) => setColWidth("location", w)} />
+                <ResizableFilterHeader label="Salary Range" value={colFilters.salary_range} options={colOptions("salary_range")} onChange={(v) => setColFilter("salary_range", v)} width={colWidths.salary_range} onWidthChange={(w) => setColWidth("salary_range", w)} />
+                <ResizableFilterHeader label="Target Hire Date" value={colFilters.target_hire_date} options={colOptions("target_hire_date")} onChange={(v) => setColFilter("target_hire_date", v)} width={colWidths.target_hire_date} onWidthChange={(w) => setColWidth("target_hire_date", w)} />
+                <ResizableFilterHeader label="Status" value={colFilters.status} options={colOptions("status")} onChange={(v) => setColFilter("status", v)} width={colWidths.status} onWidthChange={(w) => setColWidth("status", w)} />
+                <ResizableFilterHeader label="Checklist" value={colFilters.checklist} options={colOptions("checklist")} onChange={(v) => setColFilter("checklist", v)} width={colWidths.checklist} onWidthChange={(w) => setColWidth("checklist", w)} />
+                <ResizableFilterHeader label="Hiring Manager" value={colFilters.hiring_manager} options={colOptions("hiring_manager")} onChange={(v) => setColFilter("hiring_manager", v)} width={colWidths.hiring_manager} onWidthChange={(w) => setColWidth("hiring_manager", w)} />
+                <ResizableFilterHeader label="Applications" value={colFilters.application_count} options={colOptions("application_count")} onChange={(v) => setColFilter("application_count", v)} align="center" width={colWidths.application_count} onWidthChange={(w) => setColWidth("application_count", w)} />
                 <th style={{ width: 90 }}>Actions</th>
               </tr>
             </thead>
             <tbody>
-              {requisitions.map((r) => (
+              {filteredRequisitions.map((r) => {
+                const client = clients.find((c: any) => c.id === r.client_id);
+                return (
                 <tr key={r.id} style={{ cursor: "pointer" }} onClick={() => setDetailId(r.id)}>
                   <td onClick={(e) => e.stopPropagation()}>
                     <input type="checkbox" checked={selected.has(r.id)} onChange={() => toggleSelect(r.id)} />
                   </td>
+                  <td style={{ textAlign: "center", color: "var(--text-muted)" }}>{r.sequence_number}</td>
                   <td>
-                    <div style={{ fontWeight: 600 }}>{r.title} <span style={{ color: "var(--text-muted)", fontWeight: 400 }}>#{r.sequence_number}</span></div>
+                    <div style={{ fontWeight: 600 }}>{r.title}</div>
                     {r.jd_title && <div style={{ fontSize: 11, color: "var(--text-muted)" }}>JD: {r.jd_title}</div>}
                   </td>
-                  <td style={{ fontSize: 12 }}>{r.client_name || "—"}</td>
-                  <td><span className="tiq-badge" style={{ background: `${PRIORITY_COLORS[r.priority]}20`, color: PRIORITY_COLORS[r.priority] }}>{r.priority}</span></td>
-                  <td style={{ textAlign: "center" }}>{r.vacancy_count}</td>
-                  <td>
-                    <span className="tiq-badge" style={{ background: STATUS_COLORS[r.status]?.bg, color: STATUS_COLORS[r.status]?.fg }}>{r.status}</span>
+                  <td style={{ fontSize: 12 }} onClick={(e) => e.stopPropagation()}>
+                    {r.client_name ? (
+                      <button
+                        onClick={() => (client ? openEditClient(client) : setShowClientsTable(true))}
+                        title="View client details"
+                        style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "var(--violet-500)", fontWeight: 600, textDecoration: "underline", textUnderlineOffset: 2 }}
+                      >
+                        {r.client_name}
+                      </button>
+                    ) : "—"}
                   </td>
-                  <td>
-                    {r.checklist_complete ? (
-                      <span style={{ display: "flex", alignItems: "center", gap: 4, color: "#10b981", fontSize: 11 }}><Check size={13} /> Complete</span>
-                    ) : (
-                      <span style={{ display: "flex", alignItems: "center", gap: 4, color: "#f59e0b", fontSize: 11 }}><AlertTriangle size={13} /> Incomplete</span>
+                  <td onClick={(e) => e.stopPropagation()}>
+                    <select
+                      value={r.priority}
+                      onChange={(e) => handlePriorityChange(r.id, e.target.value)}
+                      style={{
+                        fontSize: 11, fontWeight: 700, padding: "3px 20px 3px 8px", borderRadius: 999, border: "none",
+                        background: `${PRIORITY_COLORS[r.priority]}20`, color: PRIORITY_COLORS[r.priority], appearance: "none", cursor: "pointer",
+                      }}
+                    >
+                      {PRIORITIES.map((p) => <option key={p} value={p}>{p}</option>)}
+                    </select>
+                  </td>
+                  <td style={{ textAlign: "center" }}>{r.vacancy_count}</td>
+                  <td style={{ fontSize: 12 }}>{r.reason_for_hire || "—"}</td>
+                  <td style={{ fontSize: 12 }}>{r.employment_type || "—"}</td>
+                  <td style={{ fontSize: 12 }}>{r.location || "—"}</td>
+                  <td style={{ fontSize: 12, whiteSpace: "nowrap" }}>
+                    {r.salary_min || r.salary_max
+                      ? `${r.salary_min ? r.salary_min.toLocaleString() : "?"} – ${r.salary_max ? r.salary_max.toLocaleString() : "?"}`
+                      : "—"}
+                  </td>
+                  <td style={{ fontSize: 12, whiteSpace: "nowrap" }}>{r.target_hire_date ? new Date(r.target_hire_date).toLocaleDateString() : "—"}</td>
+                  <td onClick={(e) => e.stopPropagation()}>
+                    <div style={{ position: "relative", display: "inline-block" }}>
+                      <select
+                        value={r.status}
+                        onChange={(e) => handleStatusChange(r.id, e.target.value)}
+                        style={{
+                          fontSize: 11, fontWeight: 700, padding: "3px 20px 3px 8px", borderRadius: 999, border: "none",
+                          background: STATUS_COLORS[r.status]?.bg, color: STATUS_COLORS[r.status]?.fg, appearance: "none", cursor: "pointer",
+                        }}
+                      >
+                        {STATUS_FLOW.map((s) => <option key={s} value={s}>{s}</option>)}
+                      </select>
+                    </div>
+                  </td>
+                  <td onClick={(e) => e.stopPropagation()}>
+                    <button
+                      onClick={() => setChecklistPopoverId(r.id)}
+                      style={{ display: "flex", alignItems: "center", gap: 4, background: "none", border: "none", cursor: "pointer", padding: 0, color: r.checklist_complete ? "#10b981" : "#f59e0b", fontSize: 11 }}
+                    >
+                      {r.checklist_complete ? <Check size={13} /> : <AlertTriangle size={13} />}
+                      {r.checklist_complete ? "Complete" : "Incomplete"}
+                    </button>
+                    {checklistPopoverId === r.id && (
+                      <>
+                        <div style={{ position: "fixed", inset: 0, zIndex: 1000 }} onClick={() => setChecklistPopoverId(null)} />
+                        <div style={{
+                          position: "absolute", background: "#fff", color: "#111827", border: "1px solid var(--border)",
+                          borderRadius: 10, boxShadow: "0 8px 24px rgba(0,0,0,.16)", zIndex: 1001, padding: 14, minWidth: 220,
+                        }}>
+                          <div style={{ fontWeight: 700, fontSize: 12, marginBottom: 8 }}>
+                            Intake Checklist {r.checklist_complete ? "— all done" : "— what's missing"}
+                          </div>
+                          {[
+                            ["salary_approved", "Salary approved"],
+                            ["headcount_approved", "Headcount approved"],
+                            ["jd_approved", "JD approved"],
+                            ["location_confirmed", "Location confirmed"],
+                          ].map(([field, label]) => (
+                            <label key={field} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, cursor: "pointer", padding: "4px 0" }}>
+                              <input type="checkbox" checked={!!r[field]} onChange={(e) => handleChecklistToggle(r.id, field, e.target.checked)} />
+                              {label}
+                            </label>
+                          ))}
+                        </div>
+                      </>
                     )}
                   </td>
-                  <td style={{ textAlign: "center" }}>{r.application_count}</td>
+                  <td style={{ fontSize: 12 }}>
+                    {r.hiring_manager_name || "—"}
+                    {r.hiring_manager_email && <div style={{ fontSize: 10, color: "var(--text-muted)" }}>{r.hiring_manager_email}</div>}
+                  </td>
+                  <td style={{ textAlign: "center" }}>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 4 }}>
+                      <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" onClick={(e) => { e.stopPropagation(); openApplicants(r.id); }}>
+                        {r.application_count}
+                      </button>
+                      <button className="tiq-btn tiq-btn-outline tiq-btn-sm" title="Find and submit suitable candidates from Talent Pool"
+                              onClick={(e) => { e.stopPropagation(); openMatchModal(r.id); }}>
+                        <UserPlus size={12} /> Match
+                      </button>
+                    </div>
+                  </td>
                   <td onClick={(e) => e.stopPropagation()}>
                     <div style={{ display: "flex", gap: 4 }}>
                       <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" onClick={() => openEdit(r)}>Edit</button>
@@ -453,10 +769,11 @@ export default function RequisitionsPage() {
                     </div>
                   </td>
                 </tr>
-              ))}
+              );})}
             </tbody>
           </table>
         </div>
+
       )}
 
       {/* ── Detail / Workflow drawer ─────────────────────────────── */}
@@ -525,15 +842,183 @@ export default function RequisitionsPage() {
               <div><span className="tiq-label">Salary Range</span><div>{detail.salary_min || detail.salary_max ? `${detail.salary_min ?? "?"} – ${detail.salary_max ?? "?"}` : "—"}</div></div>
               <div><span className="tiq-label">Target Hire Date</span><div>{detail.target_hire_date ? new Date(detail.target_hire_date).toLocaleDateString() : "—"}</div></div>
               <div><span className="tiq-label">Hiring Manager</span><div>{detail.hiring_manager_name || "—"} {detail.hiring_manager_email && `(${detail.hiring_manager_email})`}</div></div>
-              <div><span className="tiq-label">Applications</span><div>{detail.application_count}</div></div>
+              <div><span className="tiq-label">Applications</span><div>
+                <button className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={() => openApplicants(detail.id)}>{detail.application_count}</button>
+              </div></div>
             </div>
 
             <div className="tiq-flex-end">
               <button className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={() => copyHmLink(detail.id)}>
-                {linkCopied ? <Check size={13} /> : <Link2 size={13} />} {linkCopied ? "Copied!" : "Copy Hiring Manager Link"}
+                <Link2 size={13} /> Copy Hiring Manager Link
               </button>
               <button className="tiq-btn tiq-btn-ghost" onClick={() => setDetailId(null)}>Close</button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Hiring manager link — shown visibly rather than trusted to an
+          invisible clipboard write, which some browsers silently refuse
+          this long after the click that triggered it. ────────────────── */}
+      {hmLinkModal && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 1100, display: "flex", alignItems: "center", justifyContent: "center" }}
+             onClick={() => setHmLinkModal(null)}>
+          <div style={{ background: "#fff", color: "#111827", borderRadius: 14, padding: 24, maxWidth: 480, width: "94%" }}
+               onClick={(e) => e.stopPropagation()}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+              <div style={{ fontWeight: 800, fontSize: 16, display: "flex", alignItems: "center", gap: 8 }}>
+                <Link2 size={16} /> Hiring Manager Link
+              </div>
+              <button onClick={() => setHmLinkModal(null)} style={{ background: "none", border: "none", cursor: "pointer" }}><X size={18} /></button>
+            </div>
+            {hmLinkModal.copyFailed ? (
+              <div className="tiq-alert tiq-alert-error" style={{ marginBottom: 12, fontSize: 12 }}>
+                Couldn't copy automatically — select the link below and copy it manually, or try the button again.
+              </div>
+            ) : (
+              <div style={{ fontSize: 12, color: "#10b981", marginBottom: 12 }}>✓ Copied to your clipboard.</div>
+            )}
+            <input
+              className="tiq-input" readOnly value={hmLinkModal.url}
+              onFocus={(e) => e.target.select()}
+              style={{ marginBottom: 12, fontSize: 12 }}
+            />
+            <div className="tiq-flex-end">
+              <button className="tiq-btn tiq-btn-ghost" onClick={() => setHmLinkModal(null)}>Close</button>
+              <button className="tiq-btn tiq-btn-primary" onClick={retryCopyHmLink}>
+                {linkCopied ? <Check size={13} /> : <Copy size={13} />} {linkCopied ? "Copied!" : "Copy"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Applicants Popup — who's actually applied to this role ──── */}
+      {applicantsReqId && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 1100, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}
+             onClick={() => setApplicantsReqId(null)}>
+          <div style={{ background: "#fff", color: "#111827", borderRadius: 14, padding: 24, maxWidth: 780, width: "94%", maxHeight: "86vh", overflowY: "auto" }}
+               onClick={(e) => e.stopPropagation()}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+              <div style={{ fontWeight: 800, fontSize: 16 }}>
+                Applicants — {requisitions.find((r) => r.id === applicantsReqId)?.title}
+              </div>
+              <button onClick={() => setApplicantsReqId(null)} style={{ background: "none", border: "none", cursor: "pointer" }}><X size={18} /></button>
+            </div>
+            {loadingApplicants ? (
+              <div className="tiq-spinner-wrap"><div className="tiq-spinner" /></div>
+            ) : !applicants || applicants.length === 0 ? (
+              <div className="tiq-empty">
+                No applicants yet. Candidates are only linked to a requisition once they're submitted via the Pipeline
+                module's "Add Candidate to Pipeline" — importing candidates into Talent Pool doesn't apply them to any role automatically.
+              </div>
+            ) : (
+              <div className="tiq-table-wrap">
+                <table className="tiq-table">
+                  <thead>
+                    <tr>
+                      <th style={{ textAlign: "center" }}>Candidate #</th>
+                      <th>Name</th>
+                      <th>Email</th>
+                      <th>Phone</th>
+                      <th>Current Title</th>
+                      <th>Stage</th>
+                      <th>Applied</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {applicants.map((a) => (
+                      <tr key={a.id}>
+                        <td style={{ textAlign: "center" }}>{a.candidate?.sequence_number ?? "—"}</td>
+                        <td style={{ fontWeight: 600 }}>{a.candidate_name}</td>
+                        <td style={{ fontSize: 12 }}>{a.candidate?.email || "—"}</td>
+                        <td style={{ fontSize: 12 }}>{a.candidate?.phone || "—"}</td>
+                        <td style={{ fontSize: 12 }}>{a.candidate?.current_title || "—"}</td>
+                        <td><span className="tiq-badge tiq-badge-slate">{a.current_stage_name}</span></td>
+                        <td style={{ fontSize: 12 }}>{a.created_at ? new Date(a.created_at).toLocaleDateString() : "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── Match & Submit Popup — suggests suitable Talent Pool
+          candidates for this role in one click, reviewable before
+          anything is actually submitted. ────────────────────────── */}
+      {matchReqId && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 1100, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}
+             onClick={() => setMatchReqId(null)}>
+          <div style={{ background: "#fff", color: "#111827", borderRadius: 14, padding: 24, maxWidth: 820, width: "94%", maxHeight: "86vh", overflowY: "auto" }}
+               onClick={(e) => e.stopPropagation()}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+              <div style={{ fontWeight: 800, fontSize: 16 }}>
+                Match Candidates — {requisitions.find((r) => r.id === matchReqId)?.title}
+              </div>
+              <button onClick={() => setMatchReqId(null)} style={{ background: "none", border: "none", cursor: "pointer" }}><X size={18} /></button>
+            </div>
+            <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>
+              Suggested from Talent Pool by matching tag or current title against this role's title. All matches are
+              pre-checked — review and untick anyone who isn't actually a fit, then submit.
+            </div>
+
+            {loadingMatches ? (
+              <div className="tiq-spinner-wrap"><div className="tiq-spinner" /></div>
+            ) : matchResult ? (
+              <div className="tiq-alert tiq-alert-success" style={{ marginBottom: 12, fontSize: 13 }}>
+                Submitted {matchResult.submitted} candidate(s) to this requisition's pipeline
+                {matchResult.alreadyIn > 0 && `, ${matchResult.alreadyIn} were already in it`}
+                {matchResult.failed > 0 && `, ${matchResult.failed} failed`}.
+                The Applications count behind this popup has been refreshed.
+              </div>
+            ) : !matchCandidates || matchCandidates.length === 0 ? (
+              <div className="tiq-empty">
+                No suitable candidates found in Talent Pool — no candidate's tag or current title matches
+                "{requisitions.find((r) => r.id === matchReqId)?.title}". Add or import candidates with a matching
+                title/tag, or use "Submit N selected to requisition…" from Talent Pool to add anyone manually.
+              </div>
+            ) : (
+              <>
+                <div className="tiq-table-wrap" style={{ marginBottom: 14 }}>
+                  <table className="tiq-table">
+                    <thead>
+                      <tr>
+                        <th style={{ width: 28 }}>
+                          <input type="checkbox" checked={matchSelected.size === matchCandidates.length}
+                                 onChange={() => setMatchSelected(matchSelected.size === matchCandidates.length ? new Set() : new Set(matchCandidates.map((c) => c.id)))} />
+                        </th>
+                        <th style={{ textAlign: "center" }}>Candidate #</th>
+                        <th>Name</th>
+                        <th>Current Title</th>
+                        <th>Skills</th>
+                        <th>Email</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {matchCandidates.map((c) => (
+                        <tr key={c.id}>
+                          <td><input type="checkbox" checked={matchSelected.has(c.id)} onChange={() => toggleMatchSelect(c.id)} /></td>
+                          <td style={{ textAlign: "center" }}>{c.sequence_number}</td>
+                          <td style={{ fontWeight: 600 }}>{c.full_name}</td>
+                          <td style={{ fontSize: 12 }}>{c.current_title}</td>
+                          <td style={{ fontSize: 12 }}>{(c.skills || []).slice(0, 4).join(", ")}</td>
+                          <td style={{ fontSize: 12 }}>{c.email}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="tiq-flex-end">
+                  <button className="tiq-btn tiq-btn-ghost" onClick={() => setMatchReqId(null)}>Cancel</button>
+                  <button className="tiq-btn tiq-btn-primary" disabled={matchSelected.size === 0 || submittingMatches} onClick={submitMatches}>
+                    {submittingMatches ? "Submitting…" : `Submit ${matchSelected.size} Selected`}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
