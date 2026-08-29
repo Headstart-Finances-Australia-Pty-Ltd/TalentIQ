@@ -213,13 +213,18 @@ export default function LandingPage() {
         position: "sticky", top: 0, zIndex: 100,
         boxShadow: "0 1px 3px rgba(0,0,0,.06)",
       }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <div style={{ width: 32, height: 32, borderRadius: 8, background: "#5ee8db", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 2px 8px rgba(0,199,183,.35)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ width: 32, height: 32, borderRadius: 8, background: "#5ee8db", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 2px 8px rgba(0,199,183,.35)", flexShrink: 0 }}>
             <Zap size={18} color="#f97316" fill="#f97316" />
           </div>
-          <span style={{ fontSize: 18, fontWeight: 800, letterSpacing: "-0.5px", color: "#00c7b7" }}>
-            TalentIQ
-          </span>
+          <div style={{ display: "flex", flexDirection: "column", lineHeight: 1.1 }}>
+            <span style={{ fontSize: 18, fontWeight: 800, letterSpacing: "-0.5px", color: "#00c7b7" }}>
+              TalentIQ Solution
+            </span>
+            <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.6px", textTransform: "uppercase", color: "#fb923c" }}>
+              AI-Powered Talent Intelligence
+            </span>
+          </div>
         </div>
 
         <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
@@ -441,7 +446,7 @@ export default function LandingPage() {
       <section style={{ background: "#f8fafc", borderTop: "1px solid #f1f5f9", borderBottom: "1px solid #f1f5f9", padding: "80px 5%" }}>
         <div style={{ maxWidth: 1100, margin: "0 auto" }}>
           <div style={{ textAlign: "center", marginBottom: 56 }}>
-            <h2 style={{ fontSize: "clamp(26px,4vw,40px)", fontWeight: 800, letterSpacing: "-.5px", color: "#0f172a", marginBottom: 12 }}>Why TalentIQ?</h2>
+            <h2 style={{ fontSize: "clamp(26px,4vw,40px)", fontWeight: 800, letterSpacing: "-.5px", color: "#0f172a", marginBottom: 12 }}>Why TalentIQ Solution?</h2>
             <p style={{ fontSize: 16, color: "#64748b" }}>Built for teams that want AI-powered hiring without the SaaS sprawl.</p>
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 20 }}>
@@ -451,7 +456,7 @@ export default function LandingPage() {
               { icon: TrendingUp, color: "#f59e0b", title: "Grows with you", body: "Start with job hunting. Add market intelligence. Build a recruiting pipeline. Each module is composable." },
               { icon: Zap, color: "#34d399", title: "LangChain + Groq", body: "Each module is a composable LangChain agent — easy to extend, chain, and deploy for your workflow." },
               { icon: Globe, color: "#f472b6", title: "No vendor lock-in", body: "Self-hosted, open architecture. Swap any LLM, API, or database. Your keys, your data." },
-              { icon: Database, color: "#fb923c", title: "One platform, one database", body: "Stop juggling separate SaaS products. TalentIQ unifies candidate acquisition, screening, and market research." },
+              { icon: Database, color: "#fb923c", title: "One platform, one database", body: "Stop juggling separate SaaS products. TalentIQ Solution unifies candidate acquisition, screening, and market research." },
             ].map(({ icon: Icon, color, title, body }) => (
               <div key={title} style={{
                 padding: 28, background: "white", borderRadius: 16,
@@ -504,13 +509,13 @@ export default function LandingPage() {
       {/* ── FOOTER ── */}
       <footer style={{ background: "#0f172a", color: "white", padding: "56px 5% 32px" }}>
         <div style={{ maxWidth: 1100, margin: "0 auto" }}>
-          <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr 1fr", gap: 40, marginBottom: 48 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "2fr 1.6fr 1fr 1fr", gap: 40, marginBottom: 48 }}>
             <div>
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
                 <div style={{ width: 30, height: 30, borderRadius: 8, background: "#5ee8db", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 2px 8px rgba(0,199,183,.35)" }}>
                   <Zap size={16} color="#f97316" fill="#f97316" />
                 </div>
-                <span style={{ fontSize: 16, fontWeight: 800, color: "#00c7b7" }}>TalentIQ</span>
+                <span style={{ fontSize: 16, fontWeight: 800, color: "#00c7b7" }}>TalentIQ Solution</span>
               </div>
               <p style={{ fontSize: 13, color: "#94a3b8", lineHeight: 1.7, maxWidth: 240 }}>
                 The AI-native recruitment platform — one database, zero vendor lock-in, built to scale with you.
@@ -525,13 +530,15 @@ export default function LandingPage() {
             </div>
             <div>
               <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "1px", color: "#475569", marginBottom: 16 }}>Modules</div>
-              {ALL_MODULES.map(m => (
-                <Link key={m.name} to={m.route} style={{ display: "block", fontSize: 13, color: "#64748b", textDecoration: "none", marginBottom: 10 }}
-                  onMouseEnter={e => (e.currentTarget.style.color = "white")}
-                  onMouseLeave={e => (e.currentTarget.style.color = "#64748b")}>
-                  {m.name}
-                </Link>
-              ))}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", columnGap: 20 }}>
+                {ALL_MODULES.map(m => (
+                  <Link key={m.name} to={m.route} style={{ display: "block", fontSize: 13, color: "#64748b", textDecoration: "none", marginBottom: 10 }}
+                    onMouseEnter={e => (e.currentTarget.style.color = "white")}
+                    onMouseLeave={e => (e.currentTarget.style.color = "#64748b")}>
+                    {m.name}
+                  </Link>
+                ))}
+              </div>
             </div>
             <div>
               <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "1px", color: "#475569", marginBottom: 16 }}>Platform</div>
@@ -541,12 +548,6 @@ export default function LandingPage() {
                   onMouseLeave={e => (e.currentTarget.style.color = "#64748b")}>
                   {label}
                 </Link>
-              ))}
-            </div>
-            <div>
-              <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "1px", color: "#475569", marginBottom: 16 }}>Tech Stack</div>
-              {["React + TypeScript", "PostgreSQL", "Playwright"].map(t => (
-                <div key={t} style={{ fontSize: 13, color: "#475569", marginBottom: 10 }}>{t}</div>
               ))}
             </div>
             <div>
@@ -561,7 +562,7 @@ export default function LandingPage() {
             </div>
           </div>
           <div style={{ borderTop: "1px solid #1e293b", paddingTop: 24, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12 }}>
-            <div style={{ fontSize: 12, color: "#475569" }}>© {new Date().getFullYear()} TalentIQ Platform. All rights reserved.</div>
+            <div style={{ fontSize: 12, color: "#475569" }}>© {new Date().getFullYear()} TalentIQ Solution Platform. All rights reserved.</div>
             <div style={{ display: "flex", gap: 18, alignItems: "center" }}>
               <Link to="/terms" style={{ fontSize: 12, color: "#475569", textDecoration: "none" }}>Terms of Use</Link>
               <Link to="/privacy" style={{ fontSize: 12, color: "#475569", textDecoration: "none" }}>Privacy Policy</Link>

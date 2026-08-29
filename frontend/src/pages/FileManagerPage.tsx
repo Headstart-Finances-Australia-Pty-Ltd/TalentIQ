@@ -6,6 +6,7 @@ import DataTable from "../components/DataTable";
 
 const adminApi = {
   tables: () => api.get("/api/admin/tables").then(r => r.data),
+  storage: () => api.get("/api/admin/storage").then(r => r.data),
   schema: (t: string) => api.get(`/api/admin/tables/${t}/schema`).then(r => r.data),
   rows: (t: string, page: number, search?: string) =>
     api.get(`/api/admin/tables/${t}/rows`, { params: { page, page_size: 25, search } }).then(r => r.data),
@@ -14,7 +15,28 @@ const adminApi = {
   bulkDeleteRows: (t: string, ids: number[]) => api.delete(`/api/admin/tables/${t}/rows`, { data: { ids } }).then(r => r.data),
   insertRow: (t: string, data: any) => api.post(`/api/admin/tables/${t}/rows`, { data }).then(r => r.data),
   query: (sql: string) => api.post("/api/admin/query", { sql }).then(r => r.data),
+  forceDeleteRequisitions: (ids: number[]) =>
+    api.post("/api/admin/requisitions/force-delete-batch", { ids, confirm: "force delete requisitions" }).then(r => r.data),
+  forceDeleteCandidates: (ids: number[]) =>
+    api.post("/api/admin/candidates/force-delete-batch", { ids, confirm: "force delete candidates" }).then(r => r.data),
+  moduleToggles: () => api.get("/api/admin/module-toggles").then(r => r.data as Record<string, boolean>),
 };
+
+// Must match the route key AdminConsolePage.tsx's Modules Management >
+// System Tools section toggles — that's what actually hides/shows this
+// button. Kept as a named constant here (rather than a bare string
+// repeated twice) so a rename can't silently drift between the two files.
+const FORCE_DELETE_MODULE_ROUTE = "admin/force-delete-test-data";
+
+// Compact "1.2 GB" / "340 MB" style formatting — used for both the
+// overall database-usage banner and the per-table sizes in the left box.
+function formatBytes(bytes: number): string {
+  if (!bytes || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const value = bytes / Math.pow(1024, i);
+  return `${value.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+}
 
 export default function FileManagerPage({ embedded = false }: { embedded?: boolean } = {}) {
   const [activeTable, setActiveTable] = useState<string | null>(null);
@@ -31,6 +53,13 @@ export default function FileManagerPage({ embedded = false }: { embedded?: boole
   const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 2500); };
 
   const { data: tables = [] } = useQuery({ queryKey: ["admin-tables"], queryFn: adminApi.tables, refetchInterval: 30000 });
+  const { data: storage } = useQuery({ queryKey: ["admin-storage"], queryFn: adminApi.storage, refetchInterval: 30000 });
+
+  // Same query key AppLayout.tsx/AdminConsolePage.tsx use — shares the
+  // cached result rather than re-fetching, and picks up a Modules
+  // Management change immediately once that page's Save invalidates it.
+  const { data: moduleToggles = {} } = useQuery({ queryKey: ["module-toggles"], queryFn: adminApi.moduleToggles });
+  const forceDeleteEnabled = moduleToggles[FORCE_DELETE_MODULE_ROUTE] ?? true;
 
   const { data: schema = [] } = useQuery({
     queryKey: ["schema", activeTable],
@@ -63,6 +92,23 @@ export default function FileManagerPage({ embedded = false }: { embedded?: boole
     onError: (e: any) => { flash(`❌ Bulk delete failed: ${e.response?.data?.detail || e.message}`); },
   });
 
+  // Force-delete (cascade) — only meaningful for tiq_requisitions and
+  // tiq_candidates, where a plain DELETE fails/is blocked once real
+  // hiring activity (interviews, pipeline entries, offers, etc.) is
+  // attached. See routers/admin.py's force-delete-batch endpoints —
+  // this permanently removes that downstream data too, no undo.
+  const forceDeleteMut = useMutation({
+    mutationFn: (ids: number[]) =>
+      activeTable === "tiq_requisitions" ? adminApi.forceDeleteRequisitions(ids) : adminApi.forceDeleteCandidates(ids),
+    onSuccess: (data, ids) => {
+      refetchRows();
+      setSelectedRowIds([]);
+      const skipped = data?.missing_ids?.length ? `, ${data.missing_ids.length} already gone` : "";
+      flash(`Force-deleted ${data?.deleted_ids?.length ?? ids.length} row(s) and everything linked to them${skipped}.`);
+    },
+    onError: (e: any) => { flash(`❌ Force delete failed: ${e.response?.data?.detail || e.message}`); },
+  });
+
   const insertMut = useMutation({
     mutationFn: (data: any) => adminApi.insertRow(activeTable!, data),
     onSuccess: () => { refetchRows(); setNewRow(false); setNewData({}); flash("Row inserted."); },
@@ -88,11 +134,40 @@ export default function FileManagerPage({ embedded = false }: { embedded?: boole
           <h1 className="tiq-page-title" style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <Database size={22} color="var(--teal-500)" /> File & Database Manager
           </h1>
-          <p className="tiq-page-sub">Browse, edit and manage all TalentIQ database tables</p>
+          <p className="tiq-page-sub">Browse, edit and manage all TalentIQ Solution database tables</p>
         </div>
       )}
 
       {msg && <div className="tiq-alert tiq-alert-success" style={{ marginBottom: 16 }}>{msg}</div>}
+
+      {/* DATABASE STORAGE USAGE — total used vs. the allocated plan
+          quota, refreshed every 30s alongside the table list. */}
+      {storage && (
+        <div className="tiq-card" style={{ marginBottom: 16, padding: "14px 16px" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: ".5px" }}>
+              Database Storage
+            </div>
+            <div style={{ fontSize: 13 }}>
+              <span style={{ fontWeight: 700 }}>{formatBytes(storage.total_bytes)}</span>
+              <span style={{ color: "var(--text-muted)" }}> / {formatBytes(storage.allocated_bytes)} ({storage.used_pct}%)</span>
+            </div>
+          </div>
+          <div style={{ height: 8, borderRadius: 4, background: "var(--bg-tertiary)", overflow: "hidden" }}>
+            <div style={{
+              height: "100%",
+              width: `${Math.min(100, storage.used_pct)}%`,
+              background: storage.used_pct >= 90 ? "#ef4444" : storage.used_pct >= 70 ? "#f59e0b" : "var(--teal-500)",
+              transition: "width .3s ease",
+            }} />
+          </div>
+          {storage.used_pct >= 70 && (
+            <div style={{ fontSize: 11.5, color: storage.used_pct >= 90 ? "#ef4444" : "#f59e0b", marginTop: 6 }}>
+              {storage.used_pct >= 90 ? "⚠ Nearing the allocated limit" : "Approaching the allocated limit"} — see the largest tables below.
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="tiq-tabs">
         <button className={`tiq-tab${tab==="browser"?" active":""}`} onClick={() => setTab("browser")}>
@@ -116,12 +191,16 @@ export default function FileManagerPage({ embedded = false }: { embedded?: boole
                   padding: "10px 16px", cursor: "pointer", fontSize: 13,
                   background: activeTable === t.table ? "rgba(0,199,183,.08)" : "transparent",
                   borderLeft: activeTable === t.table ? "3px solid var(--teal-500)" : "3px solid transparent",
-                  display: "flex", justifyContent: "space-between", alignItems: "center",
                 }}>
-                <span style={{ fontWeight: activeTable === t.table ? 700 : 400 }}>
-                  {t.table.replace("tiq_", "")}
-                </span>
-                <span className="tiq-badge tiq-badge-slate" style={{ fontSize: 10 }}>{t.rows}</span>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span style={{ fontWeight: activeTable === t.table ? 700 : 400 }}>
+                    {t.table.replace("tiq_", "")}
+                  </span>
+                  <span className="tiq-badge tiq-badge-slate" style={{ fontSize: 10 }}>{t.rows}</span>
+                </div>
+                <div style={{ fontSize: 10.5, color: "var(--text-muted)", marginTop: 2 }}>
+                  {formatBytes(t.size_bytes)}
+                </div>
               </div>
             ))}
           </div>
@@ -193,6 +272,23 @@ export default function FileManagerPage({ embedded = false }: { embedded?: boole
                         <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" style={{ color: "var(--rose-500)" }}
                           onClick={() => { if (confirm(`Delete ${selectedRowIds.length} selected row(s)?`)) bulkDeleteMut.mutate(selectedRowIds as number[]); }}>
                           <Trash2 size={12} /> Delete {selectedRowIds.length} selected
+                        </button>
+                      )}
+                      {forceDeleteEnabled && selectedRowIds.length > 0 &&
+                        (activeTable === "tiq_requisitions" || activeTable === "tiq_candidates") && (
+                        <button className="tiq-btn tiq-btn-sm" style={{ background: "#b91c1c", color: "#fff", border: "none" }}
+                          disabled={forceDeleteMut.isPending}
+                          onClick={() => {
+                            const label = activeTable === "tiq_requisitions" ? "requisition" : "candidate";
+                            const ok = confirm(
+                              `Force delete ${selectedRowIds.length} ${label}(s)?\n\n` +
+                              `This ALSO permanently deletes every linked interview, pipeline entry, offer, ` +
+                              `placement, invoice, timesheet, and communication record — no undo. ` +
+                              `Only use this on test data.`
+                            );
+                            if (ok) forceDeleteMut.mutate(selectedRowIds as number[]);
+                          }}>
+                          <Trash2 size={12} /> {forceDeleteMut.isPending ? "Force deleting…" : `Force delete ${selectedRowIds.length} (cascade)`}
                         </button>
                       )}
                       <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" onClick={() => refetchRows()}>

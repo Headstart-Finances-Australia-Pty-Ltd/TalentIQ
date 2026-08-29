@@ -53,7 +53,7 @@ export default function LoginPage() {
         <div className="tiq-auth-card">
           <div className="tiq-brand-row">
             <div className="tiq-brand-icon"><Zap size={16} color="#f97316" fill="#f97316" /></div>
-            <span className="tiq-logo-wordmark" style={{ fontSize: 20, color: "#00c7b7" }}>TalentIQ</span>
+            <span className="tiq-logo-wordmark" style={{ fontSize: 20, color: "#00c7b7" }}>TalentIQ Solution</span>
           </div>
           <h1 className="tiq-auth-title">Reset password</h1>
           <p className="tiq-auth-sub">Enter your email and we'll send a reset link</p>
@@ -108,7 +108,7 @@ export default function LoginPage() {
       <div className="tiq-auth-card">
         <div className="tiq-brand-row">
           <div className="tiq-brand-icon"><Zap size={16} color="#f97316" fill="#f97316" /></div>
-          <span className="tiq-logo-wordmark" style={{ fontSize: 20, color: "#00c7b7" }}>TalentIQ</span>
+          <span className="tiq-logo-wordmark" style={{ fontSize: 20, color: "#00c7b7" }}>TalentIQ Solution</span>
         </div>
         <h1 className="tiq-auth-title">Welcome back</h1>
         <p className="tiq-auth-sub">Sign in with your email address</p>

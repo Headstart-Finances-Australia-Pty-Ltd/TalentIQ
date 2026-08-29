@@ -278,7 +278,7 @@ function TeamTab({ myRole, orgId }: { myRole: string | null; orgId: number }) {
             </div>
             {inviteError && <div className="tiq-alert tiq-alert-error" style={{ marginBottom: 12 }}>{inviteError}</div>}
             <div className="tiq-form-group"><label className="tiq-label">Email *</label>
-              <input className="tiq-input" value={inviteForm.email} onChange={(e) => setInviteForm({ ...inviteForm, email: e.target.value })} placeholder="they must already have a TalentIQ account" /></div>
+              <input className="tiq-input" value={inviteForm.email} onChange={(e) => setInviteForm({ ...inviteForm, email: e.target.value })} placeholder="they must already have a TalentIQ Solution account" /></div>
             <div className="tiq-form-group"><label className="tiq-label">Role</label>
               <select className="tiq-select" value={inviteForm.role} onChange={(e) => setInviteForm({ ...inviteForm, role: e.target.value })}>
                 <option value="Manager">Manager — sees the whole organisation</option>

@@ -4,18 +4,18 @@ export default function PrivacyPolicyPage() {
   return (
     <LegalPageLayout title="Privacy Policy" lastUpdated="27 August 2026">
       <p>
-        This Privacy Policy explains how TalentIQ collects, uses, stores, and protects personal data
+        This Privacy Policy explains how TalentIQ Solution collects, uses, stores, and protects personal data
         across the recruitment platform — including data about recruiters and hiring teams, and data
         about job candidates who apply for roles, submit résumés, or complete phone and video
-        interviews through TalentIQ. It applies whether you access TalentIQ as a logged-in recruiter,
+        interviews through TalentIQ Solution. It applies whether you access TalentIQ Solution as a logged-in recruiter,
         or through a public, token-based link as a candidate, hiring manager, client, or vendor.
       </p>
 
       <h2>1. Who is responsible for your data</h2>
       <p>
-        Where a company ("Organisation") uses TalentIQ to run its hiring process, that Organisation is
+        Where a company ("Organisation") uses TalentIQ Solution to run its hiring process, that Organisation is
         generally the <strong>data controller</strong> for candidate personal data — it decides which
-        candidates to invite, which questions to ask, and what to do with the results. TalentIQ acts as
+        candidates to invite, which questions to ask, and what to do with the results. TalentIQ Solution acts as
         the <strong>data processor</strong>, storing and processing that data on the Organisation's
         instructions and behalf. If you are a candidate with a question about how your specific
         application or interview data is being used, your first point of contact should be the
@@ -59,9 +59,9 @@ export default function PrivacyPolicyPage() {
         scores — is visible only to: (a) recruiters and hiring managers within the Organisation that
         collected it, subject to that Organisation's own internal access controls (including
         row-level checks that restrict a candidate's data to the recruiter who owns that hiring
-        pipeline, or an administrator); and (b) TalentIQ personnel or automated systems, strictly as
+        pipeline, or an administrator); and (b) TalentIQ Solution personnel or automated systems, strictly as
         needed to operate, secure, and support the Platform. We do not share candidate data with other
-        Organisations using TalentIQ, or with third parties for their own marketing purposes.
+        Organisations using TalentIQ Solution, or with third parties for their own marketing purposes.
       </p>
       <p>
         Some processing (such as generating interview questions, scoring transcripts, or converting
@@ -87,7 +87,7 @@ export default function PrivacyPolicyPage() {
         Organisation policy. An Organisation may delete a candidate's record, résumé, or video at any
         time through the Platform, which permanently removes the underlying stored file. Candidates
         who wish to request deletion of their data should contact the Organisation that collected it
-        directly; TalentIQ will support such requests as the Organisation's processor.
+        directly; TalentIQ Solution will support such requests as the Organisation's processor.
       </p>
 
       <h2>7. Your rights</h2>
@@ -95,13 +95,13 @@ export default function PrivacyPolicyPage() {
         Depending on where you live, you may have rights to access, correct, delete, or port your
         personal data, or to object to or restrict certain processing (for example, automated
         scoring). Because the Organisation is generally the data controller, these requests should
-        usually be directed to the Organisation first. Where TalentIQ can assist directly (for example,
+        usually be directed to the Organisation first. Where TalentIQ Solution can assist directly (for example,
         where no active Organisation relationship exists), contact us using the details below.
       </p>
 
       <h2>8. Children's data</h2>
       <p>
-        TalentIQ is intended for use by individuals who are eligible to work in the relevant
+        TalentIQ Solution is intended for use by individuals who are eligible to work in the relevant
         jurisdiction and is not directed at children. We do not knowingly collect personal data from
         children.
       </p>
@@ -122,7 +122,7 @@ export default function PrivacyPolicyPage() {
       <h2>11. Contact</h2>
       <p>
         If you are a candidate, please contact the Organisation that invited you to apply or
-        interview. If you are a recruiter or Organisation administrator, contact TalentIQ support
+        interview. If you are a recruiter or Organisation administrator, contact TalentIQ Solution support
         through your usual support channel. See also our <a href="/data-security">Data Security</a>{" "}
         page for details on how data is technically protected.
       </p>

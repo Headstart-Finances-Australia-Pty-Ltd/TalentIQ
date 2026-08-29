@@ -20,9 +20,13 @@ RUN npm run build
 # ── Stage 2: Production image ────────────────────────────────────
 FROM python:3.11-slim
 
-# System deps for Playwright + PDF libs
+# System deps for Playwright + PDF libs + ffmpeg (video transcode on upload,
+# see utils/storage.py's transcode_to_mp4 — this is the actual "compress
+# without losing quality" step for interview videos before they're pushed
+# to S3/R2; without this binary present, uploads silently fall back to
+# storing the untranscoded original)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl wget gnupg ca-certificates \
+    curl wget gnupg ca-certificates ffmpeg \
     libglib2.0-0 libnss3 libnspr4 libdbus-1-3 \
     libatk1.0-0 libatk-bridge2.0-0 libcups2 \
     libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 \

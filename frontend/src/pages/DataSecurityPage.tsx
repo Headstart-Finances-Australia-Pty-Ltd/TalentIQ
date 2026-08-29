@@ -4,7 +4,7 @@ export default function DataSecurityPage() {
   return (
     <LegalPageLayout title="Data Security" lastUpdated="27 August 2026">
       <p>
-        This page describes, in plain terms, how TalentIQ technically protects the data it stores —
+        This page describes, in plain terms, how TalentIQ Solution technically protects the data it stores —
         including recruiter accounts, candidate résumés, and recorded video and audio interviews. It is
         intended to complement, not replace, our <a href="/privacy">Privacy Policy</a> and{" "}
         <a href="/terms">Terms of Use</a>.
@@ -14,7 +14,7 @@ export default function DataSecurityPage() {
       <p>
         Candidate résumés, recorded interview video and audio, and derived analysis (transcripts,
         scores, and emotion signals) are stored as encrypted-at-rest binary records directly inside
-        TalentIQ's primary application database, alongside the structured candidate record they belong
+        TalentIQ Solution's primary application database, alongside the structured candidate record they belong
         to (name, application status, scores, and so on) — rather than being scattered across separate
         file-storage buckets with their own independent access rules. This means a candidate's résumé,
         video, transcript, and score all live in one place, governed by the same access controls, which
@@ -27,7 +27,7 @@ export default function DataSecurityPage() {
 
       <h2>2. Encryption in transit</h2>
       <p>
-        All traffic between a candidate's, recruiter's, or hiring manager's browser and TalentIQ's
+        All traffic between a candidate's, recruiter's, or hiring manager's browser and TalentIQ Solution's
         servers is encrypted using TLS (HTTPS). This includes candidate-facing pages such as job
         applications, video interviews, and hiring-manager review links — not just the logged-in
         recruiter application.
@@ -56,8 +56,8 @@ export default function DataSecurityPage() {
         Some processing steps — generating interview questions, transcribing interview audio, scoring
         transcripts, and converting interview questions to natural-sounding speech — are performed
         using AI infrastructure, using credentials configured by the Organisation (or a platform-wide
-        credential managed by a TalentIQ administrator). Content sent to these providers is used solely
-        to return the requested result and is not used by TalentIQ to train models outside the context
+        credential managed by a TalentIQ Solution administrator). Content sent to these providers is used solely
+        to return the requested result and is not used by TalentIQ Solution to train models outside the context
         of the Platform.
       </p>
 
@@ -77,8 +77,8 @@ export default function DataSecurityPage() {
 
       <h2>8. Reporting a security concern</h2>
       <p>
-        If you believe you have found a security vulnerability in TalentIQ, please report it
-        responsibly through your Organisation's TalentIQ administrator or your usual TalentIQ support
+        If you believe you have found a security vulnerability in TalentIQ Solution, please report it
+        responsibly through your Organisation's TalentIQ Solution administrator or your usual TalentIQ Solution support
         channel, rather than testing it against real candidate or Organisation data. We take all
         reports seriously and will investigate promptly.
       </p>

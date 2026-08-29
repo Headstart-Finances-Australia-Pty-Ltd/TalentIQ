@@ -475,6 +475,12 @@ body {
   animation: tiq-spin .7s linear infinite;
 }
 
+/* Small inline spin for icons inside buttons (e.g. a Loader2 icon next
+   to "Test Connection" while the request is in flight) — reuses the
+   same tiq-spin keyframe as the big spinner above, just without
+   fighting the icon's own width/height/border. */
+.tiq-spin { animation: tiq-spin .8s linear infinite; }
+
 /* ── TAB BAR ── */
 .tiq-tabs {
   display: flex;

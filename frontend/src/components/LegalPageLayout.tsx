@@ -17,7 +17,7 @@ export default function LegalPageLayout({
             <div style={{ width: 28, height: 28, borderRadius: 8, background: "#5ee8db", display: "flex", alignItems: "center", justifyContent: "center" }}>
               <Zap size={14} color="#f97316" fill="#f97316" />
             </div>
-            <span style={{ fontSize: 15, fontWeight: 800, color: "#0f172a" }}>TalentIQ</span>
+            <span style={{ fontSize: 15, fontWeight: 800, color: "#0f172a" }}>TalentIQ Solution</span>
           </Link>
           <Link to="/" style={{ fontSize: 13, color: "#0d9488", textDecoration: "none", fontWeight: 600 }}>← Back to home</Link>
         </div>

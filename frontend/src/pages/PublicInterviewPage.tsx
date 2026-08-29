@@ -114,14 +114,35 @@ export default function PublicInterviewPage() {
   const startCamera = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "user" }, audio: true,
+        // Capped to 480p — this is a talking-head interview recording,
+        // not action footage, so it stays perfectly reviewable while
+        // cutting the raw capture size well before it's ever uploaded
+        // and stored. "ideal" (not exact/min) so it never blocks the
+        // camera from starting if a webcam can't hit exactly 480p.
+        video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } },
+        audio: true,
       });
       if (videoRef.current) { videoRef.current.srcObject = stream; await videoRef.current.play(); }
       setStarted(true);
       // Record the WHOLE interview as a single continuous MediaRecorder
       // session — see equivalent comment in JobLensPage's VideoInterviewModal.
+      // Prefer VP9 (better compression than VP8 at the same quality) and
+      // cap the bitrate explicitly rather than leaving it at the
+      // browser's own default (which can land anywhere from ~1–3+ Mbps) —
+      // 500kbps video + 48kbps audio keeps a multi-minute interview to
+      // low tens of MB instead of hundreds.
       try {
-        const mr = new MediaRecorder(stream, { mimeType: "video/webm" });
+        const preferredMimeTypes = [
+          "video/webm;codecs=vp9,opus",
+          "video/webm;codecs=vp8,opus",
+          "video/webm",
+        ];
+        const mimeType = preferredMimeTypes.find(t => MediaRecorder.isTypeSupported(t)) || "video/webm";
+        const mr = new MediaRecorder(stream, {
+          mimeType,
+          videoBitsPerSecond: 500_000,
+          audioBitsPerSecond: 48_000,
+        });
         mediaRef.current = mr;
         chunksRef.current = [];
         mr.ondataavailable = e => { if (e.data.size > 0) chunksRef.current.push(e.data); };
@@ -376,7 +397,7 @@ export default function PublicInterviewPage() {
               the full duration of the session. Your recording will be:
             </p>
             <ul style={{ margin: "0 0 10px", paddingLeft: 20 }}>
-              <li><strong>Stored securely</strong> on the hiring company's TalentIQ account.</li>
+              <li><strong>Stored securely</strong> on the hiring company's TalentIQ Solution account.</li>
               <li><strong>Reviewed by decision-makers</strong> involved in this hiring process (recruiters and hiring managers).</li>
               <li>Analysed by an AI system to help assess communication, relevance, and confidence in your answers.</li>
               <li>Kept only as long as needed for this hiring process, per the employer's data retention practice.</li>

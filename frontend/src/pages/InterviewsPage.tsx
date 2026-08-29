@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   Plus, X, Trash2, Link2, Copy, Check, Calendar, ClipboardList,
-  ChevronDown, Star, ExternalLink, Bot, RefreshCw, ShieldCheck, Gavel,
+  ChevronDown, Star, ExternalLink, Bot, RefreshCw, ShieldCheck, Gavel, Mail,
 } from "lucide-react";
 import { interviewApi, acquisitionApi, requisitionApi, avatarInterviewApi } from "../lib/api";
 
@@ -45,6 +45,45 @@ const RECOMMENDATION_COLORS: Record<string, string> = {
 };
 const DEFAULT_CRITERIA = ["Technical Skills", "Communication", "Culture Fit", "Overall Impression"];
 
+// ── Calendly popup widget (same pattern as the public Prama-ai site) ──
+// Loads Calendly's own overlay script once so booking links open as an
+// in-page popup instead of a new browser tab.
+declare global {
+  interface Window {
+    Calendly?: { initPopupWidget: (options: { url: string }) => void };
+  }
+}
+const CALENDLY_CSS = "https://assets.calendly.com/assets/external/widget.css";
+const CALENDLY_JS = "https://assets.calendly.com/assets/external/widget.js";
+
+function loadCalendlyWidget() {
+  if (!document.querySelector(`link[href="${CALENDLY_CSS}"]`)) {
+    const link = document.createElement("link");
+    link.rel = "stylesheet";
+    link.href = CALENDLY_CSS;
+    document.head.appendChild(link);
+  }
+  if (!document.querySelector(`script[src="${CALENDLY_JS}"]`)) {
+    const script = document.createElement("script");
+    script.src = CALENDLY_JS;
+    script.async = true;
+    document.body.appendChild(script);
+  }
+}
+
+function openCalendlyPopup(url: string, e?: React.MouseEvent) {
+  if (window.Calendly) {
+    e?.preventDefault();
+    window.Calendly.initPopupWidget({ url });
+  } else if (!e) {
+    // Plain button with no href to fall back to, and the widget script
+    // hasn't finished loading yet — open a normal tab instead.
+    window.open(url, "_blank", "noreferrer");
+  }
+  // If e IS set but Calendly isn't ready yet, the click just falls
+  // through to the anchor's normal href/target="_blank" behaviour.
+}
+
 const emptyForm = {
   candidate_id: "" as string | number,
   requisition_id: "" as string | number,
@@ -80,9 +119,14 @@ export default function InterviewsPage({ embedded = false }: { embedded?: boolea
 
   const [linkModalInterview, setLinkModalInterview] = useState<any | null>(null);
   const [generatedLink, setGeneratedLink] = useState("");
+  const [generatedLinkIsCalendly, setGeneratedLinkIsCalendly] = useState(false);
   const [linkCopied, setLinkCopied] = useState(false);
   const [calendlyConfigured, setCalendlyConfigured] = useState(false);
   const [generatingCalendly, setGeneratingCalendly] = useState(false);
+
+  // Load Calendly's popup-widget script once on mount, same as the
+  // public website, so booking links can open as an overlay.
+  useEffect(() => { loadCalendlyWidget(); }, []);
 
   const [decisionTarget, setDecisionTarget] = useState<any | null>(null);
   const [decisionDetail, setDecisionDetail] = useState<any | null>(null);
@@ -342,6 +386,8 @@ export default function InterviewsPage({ embedded = false }: { embedded?: boolea
   const openLinkModal = (i: any) => {
     setLinkModalInterview(i);
     setGeneratedLink("");
+    setGeneratedLinkIsCalendly(false);
+    setCalendlyEmailed(false);
   };
   const generateLink = async (slots: string[]) => {
     if (!linkModalInterview) return;
@@ -350,6 +396,7 @@ export default function InterviewsPage({ embedded = false }: { embedded?: boolea
     try {
       const res = await interviewApi.createSelfScheduleLink(linkModalInterview.id, validSlots);
       setGeneratedLink(`${window.location.origin}${res.schedule_url_path}`);
+      setGeneratedLinkIsCalendly(false);
       await load();
     } catch (e: any) {
       alert(e?.response?.data?.detail || "Could not generate the scheduling link.");
@@ -367,11 +414,30 @@ export default function InterviewsPage({ embedded = false }: { embedded?: boolea
     try {
       const res = await interviewApi.createCalendlyLink(linkModalInterview.id);
       setGeneratedLink(res.calendly_scheduling_url);
+      setGeneratedLinkIsCalendly(true);
       await load();
     } catch (e: any) {
       alert(e?.response?.data?.detail || "Could not generate a Calendly link.");
     } finally {
       setGeneratingCalendly(false);
+    }
+  };
+
+  // Emails the Calendly link straight to the candidate — same link
+  // generateCalendlyLink shows, just delivered instead of copy/pasted.
+  const [emailingCalendly, setEmailingCalendly] = useState(false);
+  const [calendlyEmailed, setCalendlyEmailed] = useState(false);
+  const emailCalendlyToCandidate = async () => {
+    if (!linkModalInterview) return;
+    setEmailingCalendly(true);
+    try {
+      await interviewApi.emailCalendlyLink(linkModalInterview.id);
+      setCalendlyEmailed(true);
+      await load();
+    } catch (e: any) {
+      alert(e?.response?.data?.detail || "Could not email the Calendly link.");
+    } finally {
+      setEmailingCalendly(false);
     }
   };
 
@@ -493,7 +559,9 @@ export default function InterviewsPage({ embedded = false }: { embedded?: boolea
                     <td style={{ fontSize: 12 }}>
                       {i.scheduled_at ? new Date(i.scheduled_at).toLocaleString() : (
                         i.calendly_scheduling_url ? (
-                          <a href={i.calendly_scheduling_url} target="_blank" rel="noreferrer" style={{ color: "var(--brand-teal, #0d9488)" }}>
+                          <a href={i.calendly_scheduling_url} target="_blank" rel="noreferrer"
+                             onClick={(e) => openCalendlyPopup(i.calendly_scheduling_url, e)}
+                             style={{ color: "var(--brand-teal, #0d9488)" }}>
                             Calendly link sent
                           </a>
                         ) : i.self_schedule_token ? <span style={{ color: "var(--text-muted)" }}>Awaiting self-schedule</span> : "—"
@@ -737,7 +805,25 @@ export default function InterviewsPage({ embedded = false }: { embedded?: boolea
             {generatedLink ? (
               <div>
                 <div className="tiq-alert tiq-alert-success" style={{ marginBottom: 12, wordBreak: "break-all", fontSize: 12 }}>{generatedLink}</div>
+                {generatedLinkIsCalendly && (
+                  <div style={{ marginBottom: 12 }}>
+                    <button className="tiq-btn tiq-btn-outline" style={{ width: "100%", justifyContent: "center" }}
+                            onClick={emailCalendlyToCandidate} disabled={emailingCalendly}>
+                      <Mail size={14} /> {emailingCalendly ? "Sending…" : calendlyEmailed ? "Sent — Send Again" : "Email to Candidate"}
+                    </button>
+                    {calendlyEmailed && (
+                      <div style={{ fontSize: 11, color: "#10b981", marginTop: 6, textAlign: "center" }}>
+                        Calendly link emailed — tracked on this interview in Interview Scheduling.
+                      </div>
+                    )}
+                  </div>
+                )}
                 <div className="tiq-flex-end">
+                  {generatedLinkIsCalendly && (
+                    <button className="tiq-btn tiq-btn-outline" onClick={() => openCalendlyPopup(generatedLink)}>
+                      <ExternalLink size={14} /> Open Calendly
+                    </button>
+                  )}
                   <button className="tiq-btn tiq-btn-outline" onClick={copyLink}>
                     {linkCopied ? <Check size={14} /> : <Copy size={14} />} {linkCopied ? "Copied!" : "Copy Link"}
                   </button>
@@ -755,7 +841,7 @@ export default function InterviewsPage({ embedded = false }: { embedded?: boolea
                     <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 6, textAlign: "center" }}>
                       Calendly handles time-slot picking and calendar conflicts for you.
                     </div>
-                    <div style={{ fontSize: 11, color: "var(--text-muted)", textAlign: "center", margin: "10px 0" }}>— or use TalentIQ's own link —</div>
+                    <div style={{ fontSize: 11, color: "var(--text-muted)", textAlign: "center", margin: "10px 0" }}>— or use TalentIQ Solution's own link —</div>
                   </div>
                 )}
                 <SelfScheduleSlotsForm onGenerate={generateLink} />

@@ -171,6 +171,11 @@ export const interviewApi = {
   createSelfScheduleLink: (id: number, proposed_slots: string[]) =>
     api.post(`/api/interviews/interviews/${id}/self-schedule-link`, { proposed_slots }).then((r) => r.data),
   createCalendlyLink: (id: number) => api.post(`/api/interviews/interviews/${id}/calendly-link`).then((r) => r.data),
+  // Generates (or reuses) the Calendly link the same way createCalendlyLink
+  // does, then emails it straight to the candidate instead of just handing
+  // back a link to copy/paste.
+  emailCalendlyLink: (id: number, data?: { to_email?: string; subject?: string; body_html?: string }) =>
+    api.post(`/api/interviews/interviews/${id}/calendly-link/email`, data || {}).then((r) => r.data),
   calendlyStatus: () => api.get("/api/interviews/calendly/status").then((r) => r.data),
   calendlyEventTypes: () => api.get("/api/interviews/calendly/event-types").then((r) => r.data),
 
@@ -388,10 +393,36 @@ export const authApi = {
     api.post(`/api/auth/change-password?old_password=${encodeURIComponent(old_pw)}&new_password=${encodeURIComponent(new_pw)}`).then((r) => r.data),
   listApiKeys: () => api.get("/api/auth/api-keys").then((r) => r.data),
   listGlobalKeys: () => api.get("/api/auth/global-keys").then((r) => r.data),
+  groqPoolActive: () => api.get("/api/auth/groq-pool-active").then((r) => r.data as { active: boolean }),
   saveApiKey: (data: any) => api.post("/api/auth/api-keys", data).then((r) => r.data),
   deleteApiKey: (id: number) => api.delete(`/api/auth/api-keys/${id}`).then((r) => r.data),
   listUsers: () => api.get("/api/auth/users").then((r) => r.data),
   deactivateUser: (id: number) => api.put(`/api/auth/users/${id}/deactivate`).then((r) => r.data),
+};
+
+export const systemApi = {
+  // Admin Console > API Keys — Database panel. Saving/listing/deleting the
+  // actual credential reuses authApi.saveApiKey/listGlobalKeys/deleteApiKey
+  // with service: "database" or "s3" — these two are just the "Test
+  // Connection" checks, which never persist anything.
+  currentDatabaseInfo: () => api.get("/api/admin/system/database/current").then((r) => r.data),
+  testDatabaseConnection: (connection_url: string) =>
+    api.post("/api/admin/system/database/test", { connection_url }).then((r) => r.data),
+  testS3Connection: (data: { access_key_id: string; secret_access_key: string; bucket_name: string; region?: string; endpoint_url?: string }) =>
+    api.post("/api/admin/system/s3/test", data).then((r) => r.data),
+  // Allocated storage quota (GB) that the Storage panel's used % is
+  // calculated against — a validated dedicated setter, not routed
+  // through the generic api-keys upsert.
+  getStorageQuota: () => api.get("/api/admin/system/database/storage-quota").then((r) => r.data),
+  setStorageQuota: (allocated_gb: number) =>
+    api.put("/api/admin/system/database/storage-quota", { allocated_gb }).then((r) => r.data),
+  // Provider-to-provider schema+data migration (e.g. Neon -> Xata).
+  // start returns a job_id immediately (the copy runs in the background
+  // server-side); poll getMigrationStatus for progress.
+  startDatabaseMigration: (source_url: string, target_url: string) =>
+    api.post("/api/admin/system/database/migrate", { source_url, target_url }).then((r) => r.data),
+  getMigrationStatus: (jobId: string) =>
+    api.get(`/api/admin/system/database/migrate/${jobId}`).then((r) => r.data),
 };
 
 export const groqPoolApi = {

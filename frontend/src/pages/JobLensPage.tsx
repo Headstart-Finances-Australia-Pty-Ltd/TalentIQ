@@ -6,7 +6,7 @@ import { useLatestMutation } from "../hooks/useLatestMutation";
 import {
   Users, Upload, FileText, Play, Download, ChevronDown, ChevronUp,
   CheckCircle, Clock, XCircle, Star, Video, RefreshCw, Sparkles, BarChart2,
-  Trash2, Mail, Building2, AlertTriangle, Phone } from "lucide-react";
+  Trash2, Mail, Building2, AlertTriangle, Phone, CalendarClock } from "lucide-react";
 import { api } from "../lib/api";
 import { useAuth } from "../hooks/useAuth";
 
@@ -197,8 +197,21 @@ const jobLensApi = {
     api.post(`/api/joblens/candidates/${cid}/video-view-token`).then(r => r.data),
   markContacted: (cid: number) =>
     api.post(`/api/joblens/candidates/${cid}/mark-contacted`).then(r => r.data),
+  // Actually delivers the invite via the recruiter's own SMTP config
+  // (Settings > API Keys > SMTP), server-side — no local mail client
+  // involved. Backend resolves the sender purely from the logged-in
+  // user's saved "smtp" credentials (host/port/username/password/
+  // from_email); nothing about the sender is passed from the frontend.
+  sendInvite: (cid: number, data: { to_email: string; subject: string; body_html: string }) =>
+    api.post(`/api/joblens/candidates/${cid}/send-invite`, data).then(r => r.data),
   markPhoneContacted: (cid: number) =>
     api.post(`/api/joblens/candidates/${cid}/phone-contacted`).then(r => r.data),
+  // Emails the recruiter's Calendly booking link to the candidate so they
+  // can self-schedule the initial HR phone screening. Also registers/
+  // updates this candidate's Interview Scheduling row (Phone Interview
+  // round) — see backend _get_or_create_joblens_interview.
+  sendPhoneCalendlyLink: (cid: number, data?: { to_email?: string; subject?: string; body_html?: string }) =>
+    api.post(`/api/joblens/candidates/${cid}/phone-interview/send-calendly-link`, data || {}).then(r => r.data),
   updateStatus: (cid: number, status: string) =>
     api.put(`/api/joblens/candidates/${cid}/status`, { status }).then(r => r.data),
   savePhoneResult: (cid: number, data: { recommendation: string; notes: string }) =>
@@ -429,7 +442,14 @@ function VideoInterviewModal({
   const startCamera = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "user" }, audio: true,
+        // Capped to 480p — an interview is a talking-head recording, not
+        // action footage, so this resolution stays perfectly reviewable
+        // while cutting the raw capture size dramatically before it ever
+        // reaches MediaRecorder. Browsers still fall back to whatever the
+        // webcam actually supports if 480p isn't available (ideal, not
+        // exact/min), so this never blocks the camera from starting.
+        video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } },
+        audio: true,
       });
       if (videoRef.current) { videoRef.current.srcObject = stream; await videoRef.current.play(); }
       setStarted(true);
@@ -437,8 +457,28 @@ function VideoInterviewModal({
       // session (started once, stopped once) — starting/stopping a new
       // recorder per-question would produce several independent WebM
       // fragments that can't simply be concatenated into one playable file.
+      //
+      // Compression: prefer VP9 (noticeably better compression than the
+      // VP8 default at the same visual quality) and fall back through
+      // progressively more basic mime types if the browser doesn't
+      // support it. Bitrate is capped explicitly rather than left to the
+      // browser's own default (which targets resolution-based quality,
+      // not file size, and can land anywhere from ~1–3+ Mbps) — 500kbps
+      // video + 48kbps audio is plenty for a compressed talking-head
+      // recording and keeps a multi-minute interview to low tens of MB
+      // instead of hundreds, directly reducing what lands in video_blob.
       try {
-        const mr = new MediaRecorder(stream, { mimeType: "video/webm" });
+        const preferredMimeTypes = [
+          "video/webm;codecs=vp9,opus",
+          "video/webm;codecs=vp8,opus",
+          "video/webm",
+        ];
+        const mimeType = preferredMimeTypes.find(t => MediaRecorder.isTypeSupported(t)) || "video/webm";
+        const mr = new MediaRecorder(stream, {
+          mimeType,
+          videoBitsPerSecond: 500_000,
+          audioBitsPerSecond: 48_000,
+        });
         mediaRef.current = mr;
         chunksRef.current = [];
         mr.ondataavailable = e => { if (e.data.size > 0) chunksRef.current.push(e.data); };
@@ -723,9 +763,22 @@ function VideoInterviewModal({
 }
 
 // ─── CANDIDATE CONTACT / SEND INVITE MODAL ─────────────────────────────────
-// Produces a plain-text letter (not HTML) and hands off to the person's
-// default mail client (e.g. Outlook) via a mailto: link, so the actual
-// send happens from their own mailbox.
+// Sends the invite for real, server-side, over SMTP — using whichever
+// SMTP credentials the CURRENTLY LOGGED-IN recruiter has saved under
+// Settings > API Keys (service "smtp"). No mailto:, no local mail
+// client involved, and no sender is hardcoded here: the "From" address
+// is resolved entirely on the backend from that recruiter's own saved
+// from_email (see _send_email / _get_smtp_config in routers/joblens.py).
+// If that recruiter hasn't configured SMTP yet, the send fails with a
+// clear error telling them to set it up in Settings — it never silently
+// falls back to someone else's credentials.
+function escapeHtmlForEmail(s: string) {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
 function ContactModal({
   candidate, token, onClose, onSent
 }: { candidate: any; token: string; onClose: () => void; onSent: () => void }) {
@@ -746,14 +799,35 @@ Please note: this video interview will be recorded, securely stored, and reviewe
 Regards,
 HR Team`
   );
+  const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState("");
   const [opened, setOpened] = useState(false);
 
   const handleSend = async () => {
-    const mailto = `mailto:${encodeURIComponent(toEmail)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
-    window.location.href = mailto;
-    setOpened(true);
-    try { await jobLensApi.markContacted(candidate.id); } catch { /* non-fatal */ }
-    onSent();
+    setSending(true);
+    setSendError("");
+    try {
+      // Turn the plain-text draft into a simple HTML email — escape it
+      // first, then re-linkify the interview URL and turn line breaks
+      // into <br/>, so the candidate gets a clickable link either way.
+      let html = escapeHtmlForEmail(body);
+      const escapedLink = escapeHtmlForEmail(link);
+      html = html.split(escapedLink).join(`<a href="${link}" target="_blank" rel="noopener noreferrer">${link}</a>`);
+      html = html.replace(/\n/g, "<br/>");
+      const body_html = `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.6;color:#111827;">${html}</div>`;
+
+      await jobLensApi.sendInvite(candidate.id, { to_email: toEmail, subject, body_html });
+      try { await jobLensApi.markContacted(candidate.id); } catch { /* non-fatal */ }
+      setOpened(true);
+      onSent();
+    } catch (e: any) {
+      setSendError(
+        e.response?.data?.detail ||
+        "Failed to send. Check your SMTP settings under Settings > API Keys."
+      );
+    } finally {
+      setSending(false);
+    }
   };
 
   return (
@@ -770,10 +844,10 @@ HR Team`
         {opened ? (
           <div style={{ padding: "20px 0", textAlign: "center" }}>
             <div style={{ fontSize: 15, fontWeight: 700, color: "#0d9488", marginBottom: 8 }}>
-              ✅ Draft opened in your email app
+              ✅ Invite sent to {toEmail}
             </div>
             <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 12 }}>
-              Review it in Outlook (or your default mail app) and click Send there.
+              Sent via your SMTP settings from Settings &gt; API Keys.
             </div>
             <button className="tiq-btn tiq-btn-outline" onClick={onClose}>Close</button>
           </div>
@@ -792,11 +866,16 @@ HR Team`
               <textarea className="tiq-input" style={{ minHeight: 220, fontFamily: "inherit", fontSize: 13, whiteSpace: "pre-wrap" }}
                 value={body} onChange={e => setBody(e.target.value)} />
             </div>
+            {sendError && (
+              <div style={{ fontSize: 12, color: "#ef4444", marginBottom: 10, padding: "8px 12px", borderRadius: 6, background: "rgba(239,68,68,.08)" }}>
+                {sendError}
+              </div>
+            )}
             <div style={{ display: "flex", gap: 8 }}>
-              <button className="tiq-btn tiq-btn-primary" onClick={handleSend} disabled={!toEmail}>
-                Send
+              <button className="tiq-btn tiq-btn-primary" onClick={handleSend} disabled={!toEmail || sending}>
+                {sending ? "Sending…" : "Send"}
               </button>
-              <button className="tiq-btn tiq-btn-ghost" onClick={onClose}>Cancel</button>
+              <button className="tiq-btn tiq-btn-ghost" onClick={onClose} disabled={sending}>Cancel</button>
             </div>
           </>
         )}
@@ -952,6 +1031,13 @@ function CandidateRow({
   const phoneContactMut = useMutation({
     mutationFn: () => jobLensApi.markPhoneContacted(c.id),
     onSuccess: () => { onRefresh(); },
+  });
+  const [calendlySendError, setCalendlySendError] = useState("");
+  const [calendlySent, setCalendlySent] = useState(false);
+  const sendCalendlyMut = useMutation({
+    mutationFn: () => jobLensApi.sendPhoneCalendlyLink(c.id),
+    onSuccess: () => { setCalendlySendError(""); setCalendlySent(true); onRefresh(); },
+    onError: (err: any) => { setCalendlySendError(err?.response?.data?.detail || "Failed to send Calendly link."); },
   });
   const statusMut = useMutation({
     mutationFn: (status: string) => jobLensApi.updateStatus(c.id, status),
@@ -1351,6 +1437,25 @@ function CandidateRow({
             <div style={{ fontSize: 11, fontWeight: 700, marginBottom: 6, color: c.phone_screening_status === "Completed" ? "#10b981" : "var(--text-muted)" }}>
               {c.phone_screening_status || "Not Started"}
             </div>
+            {/* Emails the recruiter's Calendly booking link to the candidate
+                so they can self-schedule the initial HR phone screening.
+                Also registers/updates this candidate's row in Interview
+                Scheduling (see backend send-calendly-link endpoint). */}
+            <button className="tiq-btn tiq-btn-outline tiq-btn-sm" style={{ width: "100%", justifyContent: "flex-start", textAlign: "left", marginBottom: 6, fontSize: 10.5 }}
+              onClick={() => { setCalendlySendError(""); setCalendlySent(false); sendCalendlyMut.mutate(); }}
+              disabled={sendCalendlyMut.isPending || !c.email}>
+              <CalendarClock size={13} strokeWidth={2.5} color={STAGE_ICON_COLOR.phone} />
+              {sendCalendlyMut.isPending ? "Sending…" : "Send Calendly Link"}
+            </button>
+            {!c.email && (
+              <div style={{ fontSize: 9.5, color: "var(--text-muted)", marginBottom: 6 }}>No candidate email on file</div>
+            )}
+            {calendlySent && (
+              <div style={{ fontSize: 9.5, color: "#10b981", marginBottom: 6 }}>Calendly link sent</div>
+            )}
+            {calendlySendError && (
+              <div style={{ fontSize: 9.5, color: "#ef4444", marginBottom: 6 }}>{calendlySendError}</div>
+            )}
             <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, marginBottom: 8, cursor: c.phone_screening_status && c.phone_screening_status !== "Not Started" ? "default" : "pointer" }}>
               <input type="checkbox"
                 checked={!!c.phone_screening_status && c.phone_screening_status !== "Not Started"}
@@ -1446,11 +1551,10 @@ function CandidateRow({
         )}
 
         {/* Candidate Contact — sends the candidate their video-interview
-            invite (a real email, composed here and handed off to the
-            recruiter's own mail client via mailto:, through ContactModal
-            below). This was already fully built — handleContactClick,
-            ContactModal, the backend send-invite endpoint — just never
-            had a button anywhere calling it. */}
+            invite as a real email, composed here in ContactModal and
+            delivered server-side over the recruiter's own saved SMTP
+            config (Settings > API Keys > SMTP) via the backend
+            /send-invite endpoint. No local mail client involved. */}
         {mode === "video" && (
           <td style={{ minWidth: 170 }}>
             <button className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={handleContactClick} disabled={preparingInvite}>

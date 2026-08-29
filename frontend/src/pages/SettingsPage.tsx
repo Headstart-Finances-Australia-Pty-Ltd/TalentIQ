@@ -2,7 +2,7 @@ import { useNavigate } from "react-router-dom";
 import { useState, useEffect, useRef, Fragment } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Settings, Key, User, Shield, Trash2, Pencil, Home} from "lucide-react";
-import { authApi, groqPoolApi, interviewApi, candidateLensSettingsApi } from "../lib/api";
+import { authApi, groqPoolApi, interviewApi, candidateLensSettingsApi, api } from "../lib/api";
 import { useAuth } from "../hooks/useAuth";
 
 export default function SettingsPage() {
@@ -35,17 +35,22 @@ export default function SettingsPage() {
 
   // ── API KEYS ─────────────────────────────────────────────────────
   const { data: savedKeys = [] } = useQuery({ queryKey: ["api-keys"], queryFn: authApi.listApiKeys });
+  const smtpSavedKeys = savedKeys.filter((k: any) => k.service === "smtp");
 
   // Each service stores its fields independently
   const [adzuna, setAdzuna] = useState({ app_id: "", app_key: "" });
   const [groq, setGroq] = useState({ api_key: "", model: "" });
   const [linkedin, setLinkedin] = useState({ email: "", password: "" });
-  const [calendly, setCalendly] = useState({ api_key: "", event_type_uri: "" });
+  const [calendly, setCalendly] = useState({ booking_url: "", api_key: "", event_type_uri: "" });
   const [navtalk, setNavtalk] = useState({ api_key: "", avatar_persona_id: "" });
   const [calendlyEventTypes, setCalendlyEventTypes] = useState<any[] | null>(null);
   const [fetchingCalendlyTypes, setFetchingCalendlyTypes] = useState(false);
   const [calendlyFetchError, setCalendlyFetchError] = useState("");
-  const [smtp, setSmtp] = useState({ host: "", port: "587", username: "", password: "", from_email: "" });
+  // port starts blank (not pre-filled with "587") so that saving with
+  // it left empty never overwrites an already-saved custom port (e.g.
+  // 465 for SSL) — the saveKey() call below only sends non-empty
+  // fields, so a blank port here means "leave it as whatever's saved".
+  const [smtp, setSmtp] = useState({ host: "", port: "", username: "", password: "", from_email: "" });
   const [ollama, setOllama] = useState({ base_url: "http://localhost:11434", model: "llama3" });
   const [morphcast, setMorphcast] = useState({ license_key: "" });
   const [interviewSettings, setInterviewSettings] = useState({ answer_seconds: "30", tts_voice: "en-US-JennyNeural", tts_engine: "edge" });
@@ -76,7 +81,28 @@ export default function SettingsPage() {
   const { data: globalKeys = [] } = useQuery({ queryKey: ["global-keys"], queryFn: authApi.listGlobalKeys });
   const globalServiceSet = new Set(globalKeys.map((k: any) => k.service));
   const SHAREABLE = ["groq", "ollama", "adzuna"];
-  const [globalToggle, setGlobalToggle] = useState<Record<string, boolean>>({});
+
+  // Whether non-admins see the "Platform AI & Search Services" status
+  // readout below at all — same module-toggles endpoint/query key
+  // AdminConsolePage.tsx's Modules Management > System Tools uses for
+  // this same toggle. Off (hidden) unless an admin explicitly ticks it
+  // on there; only fetched for non-admins since admins always see the
+  // full editable cards instead of this readout.
+  const SHOW_PLATFORM_AI_STATUS_ROUTE = "settings/show-platform-ai-status";
+  const { data: moduleToggles = {} } = useQuery({
+    queryKey: ["module-toggles"],
+    queryFn: () => api.get("/api/admin/module-toggles").then(r => r.data as Record<string, boolean>),
+    enabled: !isAdmin,
+  });
+  const showPlatformAiStatus = moduleToggles[SHOW_PLATFORM_AI_STATUS_ROUTE] ?? false;
+
+  // Whether Groq is configured platform-wide can come from either the
+  // legacy single is_global key (covered by globalServiceSet below) OR
+  // the Groq Key Pool, which lives in its own table and is invisible to
+  // GET /global-keys — checked separately so the status card doesn't
+  // wrongly say "Not yet configured" when the admin set Groq up via the
+  // pool instead.
+  const { data: groqPoolActive } = useQuery({ queryKey: ["groq-pool-active"], queryFn: authApi.groqPoolActive });
 
   // ── GROQ KEY POOL (admin only) ───────────────────────────────────
   const { data: poolKeys = [], refetch: refetchPool } = useQuery({
@@ -179,7 +205,15 @@ export default function SettingsPage() {
     const entries = Object.entries(fields).filter(([, v]) => v.trim() !== "");
     if (entries.length === 0) { flashMsg("Enter at least one value to save."); return; }
     setSavingService(service);
-    const isGlobal = isAdmin && SHAREABLE.includes(service) && !!globalToggle[service];
+    // Adzuna/Groq/Ollama are admin-only to even open (backend rejects a
+    // non-admin save with 403 — see routers/auth.py), so there's no
+    // legitimate "admin-private, not shared" case for them: whatever the
+    // admin sets here IS the platform-wide value every other user
+    // inherits. Always save as global rather than gating on a checkbox —
+    // a missed tick there was silently saving these as admin-only
+    // private keys, which is exactly why non-admins were seeing "Not yet
+    // configured" despite the admin having filled the form in and saved.
+    const isGlobal = isAdmin && SHAREABLE.includes(service);
     try {
       for (const [key_name, key_value] of entries) {
         await authApi.saveApiKey({ service, key_name, key_value, is_global: isGlobal });
@@ -247,6 +281,88 @@ export default function SettingsPage() {
     }
   };
 
+  // ── Saved-keys summary shown at the TOP of each service's own card ──
+  // Same inline show/edit/delete pattern as the Groq Key Pool section
+  // below, applied generically to every other service — so a saved key
+  // is visible and manageable right where you'd go looking for it,
+  // instead of only in the catch-all table at the bottom of the page.
+  const savedKeysFor = (service: string) => savedKeys.filter((k: any) => k.service === service);
+
+  const savedKeysBar = (service: string) => {
+    const keys = savedKeysFor(service);
+    if (keys.length === 0) return null;
+    return (
+      <div style={{ marginBottom: 16 }}>
+        <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text-muted)", marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.4 }}>
+          Currently saved
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {keys.map((k: any) => (
+            <Fragment key={k.id}>
+              <div style={{
+                display: "flex", alignItems: "center", gap: 10, padding: "8px 12px",
+                border: "1px solid var(--border)", borderRadius: 8,
+              }}>
+                <span style={{ fontFamily: "monospace", fontSize: 12.5 }}>{k.key_name}</span>
+                <span style={{ fontFamily: "monospace", fontSize: 12, color: "var(--text-muted)" }}>{k.key_preview || "—"}</span>
+                <span style={{ fontSize: 11, color: "var(--text-muted)", marginLeft: "auto" }}>
+                  {new Date(k.created_at).toLocaleDateString()}
+                </span>
+                <div style={{ display: "flex", gap: 4 }}>
+                  <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" title="Edit — enter a new value to replace this key"
+                    onClick={() => editingKeyId === k.id ? cancelEdit() : startEdit(k)}>
+                    <Pencil size={13} />
+                  </button>
+                  <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" style={{ color: "var(--rose-500)" }}
+                    title="Delete this key"
+                    onClick={() => { if (confirm(`Delete ${k.service} / ${k.key_name}?`)) deleteKeyMut.mutate(k.id); }}>
+                    <Trash2 size={13} />
+                  </button>
+                </div>
+              </div>
+              {editingKeyId === k.id && (
+                <div style={{
+                  display: "flex", alignItems: "center", gap: 8, padding: "10px 14px",
+                  background: "var(--bg-secondary)", border: "1px solid var(--border)", borderRadius: 8,
+                }}>
+                  <span style={{ fontSize: 12, color: "var(--text-secondary)", whiteSpace: "nowrap" }}>
+                    New value for {k.key_name}:
+                  </span>
+                  <input
+                    type={k.key_name.toLowerCase().includes("password") || k.key_name.toLowerCase().includes("key") ? "password" : "text"}
+                    value={editValue}
+                    onChange={e => setEditValue(e.target.value)}
+                    onKeyDown={e => { if (e.key === "Enter") saveEdit(k); if (e.key === "Escape") cancelEdit(); }}
+                    placeholder="Enter the new value — current value is never shown, for security"
+                    autoFocus
+                    style={{ flex: 1, padding: "6px 10px", fontSize: 12.5, borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg-tertiary)", color: "var(--text-primary)" }}
+                  />
+                  <button className="tiq-btn tiq-btn-primary tiq-btn-sm" onClick={() => saveEdit(k)} disabled={editSaving}>
+                    {editSaving ? "Saving…" : "Save"}
+                  </button>
+                  <button className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={cancelEdit} disabled={editSaving}>
+                    Cancel
+                  </button>
+                  {editError && <div style={{ fontSize: 11.5, color: "var(--rose-500)" }}>{editError}</div>}
+                </div>
+              )}
+            </Fragment>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  // Services that already show/manage their own saved key(s) inline in
+  // their own card (via savedKeysBar above, the Groq Key Pool's own
+  // listing, or — for "interview" — the live-loaded Interview Settings
+  // form). The catch-all "Saved keys" table at the bottom only needs to
+  // show whatever's left: services with no dedicated settings window at
+  // all (e.g. infra credentials like "database"/"s3" that aren't
+  // surfaced as a card in this UI).
+  const DEDICATED_UI_SERVICES = ["adzuna", "groq", "linkedin", "calendly", "navtalk", "ollama", "morphcast", "smtp", "interview"];
+  const otherSavedKeys = savedKeys.filter((k: any) => !DEDICATED_UI_SERVICES.includes(k.service));
+
   // ── ADMIN USERS ──────────────────────────────────────────────────
   const { data: users = [] } = useQuery({
     queryKey: ["admin-users-settings"],
@@ -264,14 +380,6 @@ export default function SettingsPage() {
       <input type={type} className="tiq-input" value={val}
         onChange={e => set(e.target.value)} placeholder={ph} />
     </div>
-  );
-
-  const globalCheckbox = (service: string) => isAdmin && (
-    <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--text-muted)", margin: "8px 0" }}>
-      <input type="checkbox" checked={!!globalToggle[service]}
-        onChange={e => setGlobalToggle(g => ({ ...g, [service]: e.target.checked }))} />
-      Make this available to all users (admin only — Groq/Ollama/Adzuna can be shared platform-wide)
-    </label>
   );
 
   const fetchCalendlyEventTypes = async () => {
@@ -377,11 +485,14 @@ export default function SettingsPage() {
               <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>
                 Free at <a href="https://developer.adzuna.com" target="_blank" rel="noopener noreferrer" style={{ color: "var(--teal-500)" }}>developer.adzuna.com</a>. Needed for JobHunt and JobIntel agents.
               </p>
+              {savedKeysBar("adzuna")}
               <div className="tiq-grid-2">
                 {inp("App ID", adzuna.app_id, v => setAdzuna(a => ({ ...a, app_id: v })), "text", "e.g. 638c0962")}
                 {inp("App Key", adzuna.app_key, v => setAdzuna(a => ({ ...a, app_key: v })), "password", "e.g. 04681adc…")}
               </div>
-              {globalCheckbox("adzuna")}
+              <p style={{ fontSize: 11.5, color: "var(--text-muted)", margin: "4px 0 8px" }}>
+                Shared platform-wide — every user on this deployment automatically uses whatever you save here.
+              </p>
               <button className="tiq-btn tiq-btn-primary" onClick={() => saveKey("adzuna", adzuna)} disabled={savingService === "adzuna"}>
                 {savingService === "adzuna" ? "Saving…" : "Save Adzuna Keys"}
               </button>
@@ -596,6 +707,7 @@ export default function SettingsPage() {
             <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>
               Your LinkedIn login credentials. Used by LinkLens agent to search candidate profiles via Playwright browser automation.
             </p>
+            {savedKeysBar("linkedin")}
             <div className="tiq-grid-2">
               {inp("LinkedIn Email", linkedin.email, v => setLinkedin(l => ({ ...l, email: v })), "email", "you@email.com")}
               {inp("LinkedIn Password", linkedin.password, v => setLinkedin(l => ({ ...l, password: v })), "password", "••••••••")}
@@ -605,50 +717,84 @@ export default function SettingsPage() {
             </button>
           </div>
 
-          {/* CALENDLY */}
+          {/* CALENDLY — admin-managed only, same pattern as Adzuna/Groq/Ollama above. */}
+          {isAdmin ? (
           <div className="tiq-card tiq-mb-6">
             <div className="tiq-card-title">Calendly — Interview Scheduling</div>
-            <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 6 }}>
-              Lets Interviews generate a single-use Calendly scheduling link for a candidate instead of
-              TalentIQ's own link-based flow — Calendly handles the actual time-slot picking and calendar conflicts.
-            </p>
             <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>
-              Get your Personal Access Token from{" "}
-              <a href="https://calendly.com/integrations/api_webhooks" target="_blank" rel="noreferrer" style={{ color: "var(--brand-teal, #0d9488)" }}>
-                Calendly → Integrations → API & Webhooks
-              </a>. This is a private credential — only you can use it, same as your LinkedIn login above.
+              Lets Interviews hand candidates a Calendly link to book their own time instead of TalentIQ Solution's
+              own link-based flow — Calendly handles the actual time-slot picking and calendar conflicts.
             </p>
-            <div className="tiq-grid-2">
-              {inp("Personal Access Token", calendly.api_key, v => setCalendly(c => ({ ...c, api_key: v })), "password", "eyJraWQiOi...")}
-              <div className="tiq-form-group">
-                <label className="tiq-label">Event Type</label>
-                {calendlyEventTypes ? (
-                  <select className="tiq-select" value={calendly.event_type_uri}
-                          onChange={e => setCalendly(c => ({ ...c, event_type_uri: e.target.value }))}>
-                    <option value="">— Select an event type —</option>
-                    {calendlyEventTypes.map((et: any) => (
-                      <option key={et.uri} value={et.uri}>{et.name} ({et.duration} min)</option>
-                    ))}
-                  </select>
-                ) : (
-                  <input className="tiq-input" value={calendly.event_type_uri}
-                         onChange={e => setCalendly(c => ({ ...c, event_type_uri: e.target.value }))}
-                         placeholder="Click 'Fetch My Event Types' or paste an event type URI" />
-                )}
-              </div>
-            </div>
-            {calendlyFetchError && <div className="tiq-alert tiq-alert-error" style={{ marginBottom: 10, fontSize: 12 }}>{calendlyFetchError}</div>}
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <button className="tiq-btn tiq-btn-outline" onClick={fetchCalendlyEventTypes} disabled={fetchingCalendlyTypes || !calendly.api_key.trim()}>
-                {fetchingCalendlyTypes ? "Fetching…" : "Fetch My Event Types"}
-              </button>
-              <button className="tiq-btn tiq-btn-primary" onClick={() => saveKey("calendly", calendly)} disabled={savingService === "calendly"}>
-                {savingService === "calendly" ? "Saving…" : "Save Calendly Credentials"}
-              </button>
-            </div>
-          </div>
+            {savedKeysBar("calendly")}
 
-          {/* NAVTALK */}
+            {/* Simple mode: one public link, same as embedding Calendly on a website.
+                No token needed — this is the field to use for a single Calendly page
+                shared by the whole team (e.g. https://calendly.com/pksingh210/30min). */}
+            <div className="tiq-form-group">
+              <label className="tiq-label">Booking Link</label>
+              <input className="tiq-input" value={calendly.booking_url}
+                     onChange={e => setCalendly(c => ({ ...c, booking_url: e.target.value }))}
+                     placeholder="https://calendly.com/your-username/30min" />
+            </div>
+            <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>
+              Paste your public Calendly page URL — this is the link every candidate gets. To change the
+              event, duration, or availability later, edit it in Calendly and update the link here; no
+              redeploy needed. Find it under your event type's <strong>Share</strong> button in Calendly.
+            </p>
+            <div style={{ marginBottom: 18 }}>
+              <button className="tiq-btn tiq-btn-primary" onClick={() => saveKey("calendly", calendly)} disabled={savingService === "calendly"}>
+                {savingService === "calendly" ? "Saving…" : "Save Calendly Link"}
+              </button>
+            </div>
+
+            {/* Advanced mode: per-candidate single-use links via the Calendly API.
+                Optional — only needed if you want a fresh, one-time link generated
+                per interview rather than sharing the same booking link above. */}
+            <details>
+              <summary style={{ cursor: "pointer", fontSize: 12, color: "var(--text-muted)", marginBottom: 10 }}>
+                Advanced: generate a single-use link per candidate instead (optional)
+              </summary>
+              <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "10px 0" }}>
+                Get your Personal Access Token from{" "}
+                <a href="https://calendly.com/integrations/api_webhooks" target="_blank" rel="noreferrer" style={{ color: "var(--brand-teal, #0d9488)" }}>
+                  Calendly → Integrations → API & Webhooks
+                </a>. This is a private credential — only you can use it, same as your LinkedIn login above.
+                If a Booking Link is set above, it takes priority and this is ignored.
+              </p>
+              <div className="tiq-grid-2">
+                {inp("Personal Access Token", calendly.api_key, v => setCalendly(c => ({ ...c, api_key: v })), "password", "eyJraWQiOi...")}
+                <div className="tiq-form-group">
+                  <label className="tiq-label">Event Type</label>
+                  {calendlyEventTypes ? (
+                    <select className="tiq-select" value={calendly.event_type_uri}
+                            onChange={e => setCalendly(c => ({ ...c, event_type_uri: e.target.value }))}>
+                      <option value="">— Select an event type —</option>
+                      {calendlyEventTypes.map((et: any) => (
+                        <option key={et.uri} value={et.uri}>{et.name} ({et.duration} min)</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input className="tiq-input" value={calendly.event_type_uri}
+                           onChange={e => setCalendly(c => ({ ...c, event_type_uri: e.target.value }))}
+                           placeholder="Click 'Fetch My Event Types' or paste an event type URI" />
+                  )}
+                </div>
+              </div>
+              {calendlyFetchError && <div className="tiq-alert tiq-alert-error" style={{ marginBottom: 10, fontSize: 12 }}>{calendlyFetchError}</div>}
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <button className="tiq-btn tiq-btn-outline" onClick={fetchCalendlyEventTypes} disabled={fetchingCalendlyTypes || !calendly.api_key.trim()}>
+                  {fetchingCalendlyTypes ? "Fetching…" : "Fetch My Event Types"}
+                </button>
+                <button className="tiq-btn tiq-btn-primary" onClick={() => saveKey("calendly", calendly)} disabled={savingService === "calendly"}>
+                  {savingService === "calendly" ? "Saving…" : "Save Calendly Credentials"}
+                </button>
+              </div>
+            </details>
+          </div>
+          ) : null}
+
+          {/* NAVTALK — admin-managed only, same pattern as Adzuna/Groq/Ollama above. */}
+          {isAdmin ? (
           <div className="tiq-card tiq-mb-6">
             <div className="tiq-card-title">NavTalk — AI Avatar Interviews</div>
             <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 6 }}>
@@ -659,6 +805,7 @@ export default function SettingsPage() {
               Get your API key and avatar persona ID from your NavTalk.ai dashboard. This is a private credential —
               only you can use it, same as your LinkedIn login above.
             </p>
+            {savedKeysBar("navtalk")}
             <div className="tiq-grid-2">
               {inp("API Key", navtalk.api_key, v => setNavtalk(n => ({ ...n, api_key: v })), "password", "nvtk_...")}
               {inp("Avatar Persona ID", navtalk.avatar_persona_id, v => setNavtalk(n => ({ ...n, avatar_persona_id: v })), "text", "e.g. persona_abc123")}
@@ -667,6 +814,7 @@ export default function SettingsPage() {
               {savingService === "navtalk" ? "Saving…" : "Save NavTalk Credentials"}
             </button>
           </div>
+          ) : null}
 
           {isAdmin ? (
             <div className="tiq-card tiq-mb-6">
@@ -676,16 +824,19 @@ export default function SettingsPage() {
                 <a href="https://ollama.com" target="_blank" rel="noopener noreferrer" style={{ color: "var(--teal-500)" }}>Ollama</a>{" "}
                 running locally (or reachable at the URL below) with a model pulled, e.g. <code>ollama pull llama3</code>.
               </p>
+              {savedKeysBar("ollama")}
               <div className="tiq-grid-2">
                 {inp("Base URL", ollama.base_url, v => setOllama(o => ({ ...o, base_url: v })), "text", "http://localhost:11434")}
                 {inp("Model", ollama.model, v => setOllama(o => ({ ...o, model: v })), "text", "llama3")}
               </div>
-              {globalCheckbox("ollama")}
+              <p style={{ fontSize: 11.5, color: "var(--text-muted)", margin: "4px 0 8px" }}>
+                Shared platform-wide — every user on this deployment automatically uses whatever you save here.
+              </p>
               <button className="tiq-btn tiq-btn-primary" onClick={() => saveKey("ollama", ollama)} disabled={savingService === "ollama"}>
                 {savingService === "ollama" ? "Saving…" : "Save Ollama Settings"}
               </button>
             </div>
-          ) : (
+          ) : showPlatformAiStatus ? (
             <div className="tiq-card tiq-mb-6">
               <div className="tiq-card-title">Platform AI & Search Services</div>
               <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>
@@ -698,22 +849,28 @@ export default function SettingsPage() {
                   { key: "adzuna", label: "Adzuna (job search)" },
                   { key: "groq", label: "Groq (AI / LLM)" },
                   { key: "ollama", label: "Ollama (local LLM fallback)" },
-                ].map(({ key, label }) => (
+                ].map(({ key, label }) => {
+                  // Groq alone has a second path to "configured": the
+                  // Groq Key Pool, a separate table that GET /global-keys
+                  // never sees (see authApi.groqPoolActive).
+                  const configured = globalServiceSet.has(key) || (key === "groq" && !!groqPoolActive?.active);
+                  return (
                   <div key={key} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
                     <span style={{
                       width: 8, height: 8, borderRadius: "50%",
-                      background: globalServiceSet.has(key) ? "#10b981" : "#d1d5db",
+                      background: configured ? "#10b981" : "#d1d5db",
                       flexShrink: 0,
                     }} />
                     <span>{label}</span>
                     <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
-                      {globalServiceSet.has(key) ? "Configured" : "Not yet configured"}
+                      {configured ? "Configured" : "Not yet configured"}
                     </span>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
-          )}
+          ) : null}
 
           {/* INTERVIEW SETTINGS — admin-only platform-wide controls for
               CandidateLens's phone/video interview experience: how long a
@@ -723,7 +880,7 @@ export default function SettingsPage() {
               SpeechSynthesis voice). */}
           {isAdmin ? (
             <div className="tiq-card tiq-mb-6">
-              <div className="tiq-card-title">Interview Settings — Admin Console</div>
+              <div className="tiq-card-title">Video Interview Settings</div>
               <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>
                 Applies platform-wide to every Phone and Video Interview — for every recruiter and
                 every candidate link.
@@ -778,7 +935,8 @@ export default function SettingsPage() {
             </div>
           ) : null}
 
-          {/* MORPHCAST */}
+          {/* MORPHCAST — admin-managed only, same pattern as Adzuna/Groq/Ollama above. */}
+          {isAdmin ? (
           <div className="tiq-card tiq-mb-6">
             <div className="tiq-card-title">MorphCast — Video Interview Emotion AI</div>
             <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>
@@ -787,6 +945,7 @@ export default function SettingsPage() {
               <a href="https://www.morphcast.com" target="_blank" rel="noopener noreferrer" style={{ color: "var(--teal-500)" }}>morphcast.com</a>{" "}
               — a key is required on every load; without one, interviews still run but skip emotion analysis.
             </p>
+            {savedKeysBar("morphcast")}
             <div className="tiq-grid-2">
               {inp("License Key", morphcast.license_key, v => setMorphcast({ license_key: v }), "text", "paste your MorphCast license key")}
             </div>
@@ -794,14 +953,38 @@ export default function SettingsPage() {
               {savingService === "morphcast" ? "Saving…" : "Save MorphCast Key"}
             </button>
           </div>
+          ) : null}
 
-          {/* SMTP */}
+          {/* SMTP — this is what "Send Interview Invite" on the Video
+              Interview screen actually sends through: the backend reads
+              these credentials fresh, per-request, for whichever
+              recruiter is logged in (never a shared/admin fallback), so
+              whatever is saved here takes effect immediately on the very
+              next invite send — no separate "activate" step. */}
           <div className="tiq-card tiq-mb-6">
             <div className="tiq-card-title">SMTP — Candidate Email Invites</div>
             <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>
               Used by CandidateLens to send video-interview invite emails to candidates.
               For Gmail, use an <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener noreferrer" style={{ color: "var(--teal-500)" }}>app password</a>, not your regular password.
             </p>
+
+            {/* Always-visible status of what's currently saved for THIS
+                user, so the section never just looks empty/unset after
+                a page reload — the values themselves stay masked (same
+                security model as every other credential in this app;
+                see key_preview in list_api_keys). Same inline
+                show/edit/delete bar every other service's card uses. */}
+            {smtpSavedKeys.length > 0 ? (
+              savedKeysBar("smtp")
+            ) : (
+              <div style={{
+                fontSize: 12, marginBottom: 16, padding: "10px 12px", borderRadius: 8,
+                background: "rgba(239,68,68,.06)", border: "1px solid rgba(239,68,68,.2)", color: "var(--text-muted)",
+              }}>
+                Not configured yet — invite sending will fail until all fields below are saved at least once.
+              </div>
+            )}
+
             <div className="tiq-grid-2">
               {inp("SMTP Host", smtp.host, v => setSmtp(s => ({ ...s, host: v })), "text", "e.g. smtp.gmail.com")}
               {inp("SMTP Port", smtp.port, v => setSmtp(s => ({ ...s, port: v })), "text", "587")}
@@ -810,21 +993,26 @@ export default function SettingsPage() {
               {inp("From Email", smtp.from_email, v => setSmtp(s => ({ ...s, from_email: v })), "email", "recruiting@company.com")}
             </div>
             <button className="tiq-btn tiq-btn-primary" onClick={() => saveKey("smtp", smtp)} disabled={savingService === "smtp"}>
-              {savingService === "smtp" ? "Saving…" : "Save SMTP Settings"}
+              {savingService === "smtp" ? "Saving…" : smtpSavedKeys.length > 0 ? "Update SMTP Settings" : "Save SMTP Settings"}
             </button>
           </div>
 
-          {/* SAVED KEYS LIST */}
+          {/* SAVED KEYS LIST — only services with no dedicated card above
+              (e.g. infra credentials not surfaced as their own settings
+              window in this UI). Everything else is now managed inline,
+              at the top of its own card, via savedKeysBar(). */}
           <div className="tiq-card">
-            <div className="tiq-card-title">Saved keys</div>
-            {savedKeys.length === 0 ? (
-              <div style={{ fontSize: 13, color: "var(--text-muted)" }}>No keys saved yet.</div>
+            <div className="tiq-card-title">Other saved keys</div>
+            {otherSavedKeys.length === 0 ? (
+              <div style={{ fontSize: 13, color: "var(--text-muted)" }}>
+                Nothing here — every saved key belongs to a service with its own settings card above.
+              </div>
             ) : (
               <div className="tiq-table-wrap">
                 <table className="tiq-table">
                   <thead><tr><th>Service</th><th>Key</th><th>Value</th><th>Saved</th><th></th></tr></thead>
                   <tbody>
-                    {savedKeys.map((k: any) => (
+                    {otherSavedKeys.map((k: any) => (
                       <Fragment key={k.id}>
                         <tr>
                           <td><span className="tiq-badge tiq-badge-slate">{k.service}</span></td>

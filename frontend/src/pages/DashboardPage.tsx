@@ -173,7 +173,7 @@ export default function DashboardPage() {
       <div className="tiq-page-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 8 }}>
         <div>
           <h1 className="tiq-page-title">Management Dashboard</h1>
-          <p className="tiq-page-sub">Your TalentIQ activity at a glance</p>
+          <p className="tiq-page-sub">Your TalentIQ Solution activity at a glance</p>
         </div>
         <div style={{ fontSize: 13, color: "var(--text-muted)", fontWeight: 600, alignSelf: "flex-end" }}>
           {today}
@@ -209,13 +209,18 @@ export default function DashboardPage() {
           <div style={{ textAlign: "center", padding: 28, color: "var(--text-muted)" }}>Loading…</div>
         ) : overviewError ? (
           <div style={{ textAlign: "center", padding: 20, color: "var(--rose-500)", fontSize: 12 }}>Failed to load business overview.</div>
-        ) : !overview || overview.summary.total_requisitions === 0 ? (
+        ) : !overview ? (
           <div style={{ textAlign: "center", padding: 28 }}>
             <Building2 size={22} color="var(--text-muted)" style={{ opacity: .5, marginBottom: 6 }} />
             <div style={{ color: "var(--text-muted)", fontSize: 12 }}>No requisitions yet — start one from Requisitions.</div>
           </div>
         ) : (
           <>
+            {overview.summary.total_requisitions === 0 && (
+              <div style={{ textAlign: "center", padding: "0 0 16px", color: "var(--text-muted)", fontSize: 12 }}>
+                No requisitions yet — start one from Requisitions. Showing zeros until then.
+              </div>
+            )}
             {/* Summary stat tiles — all clickable, each opens a drill-down
                 (Client/Role breakdown, or a richer multi-table view for
                 Clients/Roles Tracked below) built from overview data
@@ -423,7 +428,7 @@ export default function DashboardPage() {
           }}
         >
           <span style={{ fontSize: 12, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: ".06em" }}>
-            Recruitment Workflow · How Your Hiring Flows Through TalentIQ
+            Recruitment Workflow · How Your Hiring Flows Through TalentIQ Solution
           </span>
           {workflowOpen ? <ChevronDown size={16} color="var(--text-muted)" /> : <ChevronRight size={16} color="var(--text-muted)" />}
         </button>

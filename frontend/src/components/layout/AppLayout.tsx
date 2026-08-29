@@ -92,7 +92,7 @@ export default function AppLayout() {
         <div className="tiq-logo">
           <div className="tiq-logo-row">
             <div className="tiq-logo-icon"><Zap size={16} color="#f97316" fill="#f97316" /></div>
-            <div className="tiq-logo-wordmark">TalentIQ</div>
+            <div className="tiq-logo-wordmark">TalentIQ Solution</div>
           </div>
           <div className="tiq-logo-sub">Platform</div>
         </div>

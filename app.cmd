@@ -7,7 +7,6 @@ if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
 set "BACKEND=%ROOT%\backend"
 set "FRONTEND=%ROOT%\frontend"
 set "VENV=%BACKEND%\venv"
-set "DB=postgresql+asyncpg://neondb_owner:npg_XH2QFas3gYDd@ep-dawn-scene-aqma9lhs.c-8.us-east-1.aws.neon.tech/neondb"
 
 if not exist "C:\Temp" mkdir "C:\Temp"
 
@@ -89,14 +88,35 @@ if "%DOPIP%"=="1" (
 )
 echo.
 
-:: ── Step 5: Write .env ────────────────────────────────────────────────────
-echo  Step 5: Writing .env...
-echo DATABASE_URL=%DB%> "%BACKEND%\.env"
-echo SECRET_KEY=talentiq-secret-key-2024>> "%BACKEND%\.env"
-echo ADZUNA_APP_ID=638c0962>> "%BACKEND%\.env"
-echo ADZUNA_APP_KEY=04681adc21daeda69c41b271627d448a>> "%BACKEND%\.env"
-echo GROQ_API_KEY=>> "%BACKEND%\.env"
-echo  OK .env written
+:: ── Step 5: Write .env (only if missing — never stomp existing config) ────
+echo  Step 5: Checking .env...
+if exist "%BACKEND%\.env" (
+    echo  OK .env already exists — leaving your existing settings as-is.
+) else (
+    echo  No .env found — this looks like a first run.
+    echo.
+    echo  DATABASE_URL is the ONLY thing that has to live in this file - it's
+    echo  needed before the app can even reach the database, so it can't be
+    echo  stored inside the database itself. Everything else - SECRET_KEY,
+    echo  Groq/Adzuna keys, S3/R2 credentials - is generated or configured
+    echo  once and then lives in the database from then on - a fresh
+    echo  extraction of this project into a new folder won't ask for those
+    echo  again as long as DATABASE_URL below points at the same database.
+    echo.
+    set "DBURL="
+    set /p "DBURL=  Paste your Neon (or other Postgres) DATABASE_URL: "
+    if "!DBURL!"=="" (
+        echo  ERROR: DATABASE_URL is required — the app will not start without it.
+        echo  Re-run app.cmd once you have a connection string.
+        pause
+        exit /b 1
+    )
+
+    (
+        echo DATABASE_URL=!DBURL!
+    ) > "%BACKEND%\.env"
+    echo  OK .env written.
+)
 echo.
 
 :: ── Step 6: Frontend packages ─────────────────────────────────────────────
@@ -117,7 +137,6 @@ echo  Step 7: Writing launchers...
 (
 echo @echo off
 echo title TalentIQ Backend
-echo set "DATABASE_URL=%DB%"
 echo cd /d "%BACKEND%"
 echo echo Backend: http://localhost:8000
 echo echo Docs:    http://localhost:8000/api/docs
