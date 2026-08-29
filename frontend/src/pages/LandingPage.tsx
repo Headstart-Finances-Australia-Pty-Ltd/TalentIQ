@@ -221,7 +221,7 @@ export default function LandingPage() {
             <span style={{ fontSize: 18, fontWeight: 800, letterSpacing: "-0.5px", color: "#00c7b7" }}>
               TalentIQ Solution
             </span>
-            <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.6px", textTransform: "uppercase", color: "#fb923c" }}>
+            <span style={{ fontSize: 9, fontStyle: "italic", fontWeight: 700, letterSpacing: "0.6px", textTransform: "uppercase", color: "#fb923c" }}>
               AI-Powered Talent Intelligence
             </span>
           </div>
