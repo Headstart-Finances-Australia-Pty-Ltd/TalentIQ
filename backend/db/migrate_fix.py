@@ -275,6 +275,10 @@ MIGRATIONS = [
     # migrate_fix.py's existing per-statement try/except below, and the
     # embedding column falls back to plain JSON storage (see models.py's
     # guarded Vector import) if the extension truly can't be created.
+    # On Xata specifically: extensions require a Dedicated Cluster plan —
+    # this statement will fail (and be swallowed, per the above) on the
+    # default shared-cluster plan. See models.py's "XATA NOTE" above
+    # Vector's guarded import for the full fallback chain.
     "CREATE EXTENSION IF NOT EXISTS vector",
     "ALTER TABLE tiq_skill_taxonomy ADD COLUMN IF NOT EXISTS embedding vector(384)",
     # Approximate nearest-neighbor index (cosine distance) — makes
@@ -588,6 +592,45 @@ MIGRATIONS = [
     # CandidateLens: timestamp of the candidate accepting the pre-interview
     # recording/privacy notice — gates camera access on the public page.
     "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS privacy_accepted_at TIMESTAMP",
+
+    # ── Video moved out of Postgres into S3-compatible object storage ──
+    # video_key is the object key in the configured bucket (see
+    # utils/storage.py + Admin Console > API Keys > S3 panel); video_blob
+    # is kept — NOT dropped — as the legacy/fallback path for (a) any row
+    # recorded before S3 was configured and never backfilled, and (b) any
+    # deployment that hasn't configured S3 at all yet, so upload/playback
+    # keep working either way. See routers/joblens.py's upload/serve
+    # endpoints and db/migrate_videos_to_s3.py for the backfill script.
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS video_key VARCHAR(500)",
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS video_size_bytes INTEGER",
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS resume_key VARCHAR(500)",
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS resume_size_bytes INTEGER",
+
+    # JD Management + Requisition: uploaded document moved to S3
+    "ALTER TABLE tiq_jd_records ADD COLUMN IF NOT EXISTS jd_file_key VARCHAR(500)",
+    "ALTER TABLE tiq_jd_records ADD COLUMN IF NOT EXISTS jd_file_size_bytes INTEGER",
+    "ALTER TABLE tiq_requisitions ADD COLUMN IF NOT EXISTS jd_file_key VARCHAR(500)",
+    "ALTER TABLE tiq_requisitions ADD COLUMN IF NOT EXISTS jd_file_size_bytes INTEGER",
+
+    # Vendor Management (TrackedCandidate): resume + cover letter moved to S3
+    "ALTER TABLE tiq_tracked_candidates ADD COLUMN IF NOT EXISTS resume_key VARCHAR(500)",
+    "ALTER TABLE tiq_tracked_candidates ADD COLUMN IF NOT EXISTS resume_size_bytes INTEGER",
+    "ALTER TABLE tiq_tracked_candidates ADD COLUMN IF NOT EXISTS cover_letter_key VARCHAR(500)",
+    "ALTER TABLE tiq_tracked_candidates ADD COLUMN IF NOT EXISTS cover_letter_size_bytes INTEGER",
+
+    # Deletion-proof flag for protected accounts (see User.is_protected's
+    # docstring in models/models.py). The backfill only ever sets this to
+    # TRUE for the one known bootstrap admin account and only if it's
+    # currently FALSE — it never flips a deliberately-unprotected account
+    # back on, so an admin choosing to unprotect it later sticks.
+    "ALTER TABLE tiq_users ADD COLUMN IF NOT EXISTS is_protected BOOLEAN NOT NULL DEFAULT FALSE",
+    "UPDATE tiq_users SET is_protected = TRUE WHERE lower(email) = 'admin@talentiq.ai' AND is_protected = FALSE",
+
+    # System-level config that has no natural "owner user" and isn't
+    # per-account — SECRET_KEY lives here (see utils/auth_utils.py's
+    # bootstrap_secret_key), self-generated on first run, database-backed
+    # rather than requiring a .env entry.
+    "CREATE TABLE IF NOT EXISTS tiq_system_config (config_key VARCHAR(100) PRIMARY KEY, config_value TEXT NOT NULL)",
 ]
 
 async def run():

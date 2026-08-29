@@ -159,7 +159,7 @@ async def find_candidate_duplicate(db: AsyncSession, organisation_id: int, email
 # candidate, apply via the career page) but ruinous for a 100-row CSV or
 # folder import: 100 rows x (1 dedup query + 1 next-sequence query) = ~200
 # extra round trips to the database. Against local SQLite that's invisible
-# (sub-second); against a real remote Postgres (Neon) over the network,
+# (sub-second); against a real remote Postgres (Xata) over the network,
 # each round trip adds real latency, and 200 of them can comfortably blow
 # past a 60-second client-side timeout — this was reported as "bulk import
 # failed" / "csv import failed" with no server-side error at all, because

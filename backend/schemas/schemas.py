@@ -75,6 +75,11 @@ class APIKeyOut(BaseModel):
     key_name: str
     is_global: bool = False
     created_at: datetime
+    # Populated after validation (see _mask_key_preview in routers/auth.py) —
+    # must be declared here or assigning it raises ValueError under
+    # pydantic v2, since undeclared attributes can't be set on a model
+    # instance. The real key_value is never included in this schema.
+    key_preview: Optional[str] = None
 
     model_config = {"from_attributes": True}
 

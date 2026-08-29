@@ -1,12 +1,13 @@
 """
 TalentIQ – SQLAlchemy ORM Models
-All tables prefixed tiq_ to coexist with AccFino on the same Neon database.
+All tables prefixed tiq_ to coexist with AccFino on the same Postgres
+database (Xata Postgres, migrated from Neon).
 """
 
 from datetime import datetime
 from sqlalchemy import (
     Column, Integer, String, Text, Float, Boolean,
-    DateTime, Date, ForeignKey, JSON, LargeBinary, UniqueConstraint,
+    DateTime, Date, ForeignKey, JSON, LargeBinary, UniqueConstraint, text,
 )
 from sqlalchemy.orm import relationship
 
@@ -20,6 +21,15 @@ from db.database import Base
 # plain JSON list, and semantic search over the taxonomy simply isn't
 # available until both are installed (see requirements.txt + the
 # `CREATE EXTENSION vector` migration in db/migrate_fix.py).
+#
+# XATA NOTE: Xata's default shared-cluster plan does not support Postgres
+# extensions at all (ships with plpgsql only) — `vector` only becomes
+# available on a Xata Dedicated Cluster plan. On a shared cluster,
+# `CREATE EXTENSION IF NOT EXISTS vector` in migrate_fix.py will simply
+# fail, this guarded import will fall back to Vector(dim) == JSON, and
+# utils/semantic_match.py's TF-IDF matching is used instead — the app
+# keeps working, just without DB-backed embeddings, until/unless you're
+# on a plan that supports extensions.
 try:
     from pgvector.sqlalchemy import Vector
 except ImportError:
@@ -43,6 +53,14 @@ class User(Base):
     address             = Column(Text)
     role                = Column(String(50), default="user")
     is_active           = Column(Boolean, default=True)
+    # Deletion-proof flag — checked by every user-delete path (the
+    # dedicated /users/{id} endpoint AND the raw File Manager table
+    # browser's row/bulk-delete on tiq_users) before allowing a delete.
+    # NOT a hardcoded email check scattered across files — one column,
+    # one place each delete path reads it. Backfilled true for
+    # admin@talentiq.ai once in migrate_fix.py; can be flipped for any
+    # other account later via the Users tab or a direct SQL update.
+    is_protected        = Column(Boolean, default=False, nullable=False, server_default=text("false"))
     reset_token         = Column(String(255))
     reset_token_expiry  = Column(DateTime)
     created_at          = Column(DateTime, default=datetime.utcnow)
@@ -494,10 +512,21 @@ class JobLensCandidate(Base):
     # above.
     source_application_id = Column(Integer, ForeignKey("tiq_applications.id"), index=True, nullable=True)
 
-    resume_file_blob     = Column(LargeBinary)
+    resume_file_blob     = Column(LargeBinary)   # legacy fallback — see video_blob's comment above; same pattern
     resume_file_mimetype = Column(String(100))
+    resume_key           = Column(String(500))   # S3 object key, when stored in the bucket
+    resume_size_bytes    = Column(Integer)
+
+    # video_blob is LEGACY: kept only as a fallback for rows recorded
+    # before S3 was configured, or for deployments that haven't
+    # configured object storage at all. Every upload/serve/analysis
+    # code path checks video_key FIRST and only falls back to video_blob
+    # if it's empty — see routers/joblens.py and utils/storage.py.
+    # New uploads write to S3 (video_key) and leave this column empty.
     video_blob            = Column(LargeBinary)
     video_mimetype         = Column(String(50), default="video/webm")
+    video_key             = Column(String(500))   # S3 object key, when stored in the bucket
+    video_size_bytes      = Column(Integer)
 
     # ── Automatic post-interview video analysis (runs once the video blob
     # above is stored) — transcript + LLM-scored performance, on the same
@@ -619,9 +648,11 @@ class JDRecord(Base):
     # Optional uploaded JD document (Word/PDF) — description text field
     # above is still the source used for requirement extraction; this is
     # the original document for reference/download.
-    jd_file_blob     = Column(LargeBinary)
+    jd_file_blob     = Column(LargeBinary)   # legacy fallback, same pattern as JobLensCandidate.video_blob
     jd_file_filename = Column(String(300))
     jd_file_mimetype = Column(String(100))
+    jd_file_key        = Column(String(500))   # S3 object key, when stored in the bucket
+    jd_file_size_bytes = Column(Integer)
     created_at      = Column(DateTime, default=datetime.utcnow)
     updated_at      = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -676,15 +707,19 @@ class TrackedCandidate(Base):
     name             = Column(String(200), nullable=False)
     email            = Column(String(200))
     phone            = Column(String(50))
-    resume_blob      = Column(LargeBinary)
+    resume_blob      = Column(LargeBinary)   # legacy fallback, same pattern as JobLensCandidate.video_blob
     resume_filename  = Column(String(300))
     resume_mimetype  = Column(String(100))
+    resume_key         = Column(String(500))   # S3 object key, when stored in the bucket
+    resume_size_bytes  = Column(Integer)
     # Cover letter — uploaded independently of the resume (own file, own
     # slot), never derived from or bundled into the resume upload. Either
     # can be attached/replaced on its own without touching the other.
-    cover_letter_blob     = Column(LargeBinary)
+    cover_letter_blob     = Column(LargeBinary)   # legacy fallback
     cover_letter_filename = Column(String(300))
     cover_letter_mimetype = Column(String(100))
+    cover_letter_key         = Column(String(500))
+    cover_letter_size_bytes  = Column(Integer)
     status           = Column(String(30), default="Applied")
     address          = Column(String(300))
     work_permission  = Column(String(50))   # "Work Visa" / "Permanent Resident" / "Citizenship"
@@ -798,3 +833,25 @@ class ModuleToggle(Base):
     module_route  = Column(String(200), nullable=False, unique=True, index=True)
     enabled       = Column(Boolean, default=True, nullable=False)
     updated_at    = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class SystemSetting(Base):
+    """Generic single-value admin settings that don't warrant their own
+    dedicated table -- first (and so far only) use is Admin Console >
+    API Keys' "Allocated storage" field, which used to be config-only
+    (the DB_ALLOCATED_GB env var, fixed at deploy time via
+    routers/admin.py's DB_ALLOCATED_BYTES). One row per setting_key;
+    value is stored as text and parsed by whichever caller reads it,
+    since different settings will have different types.
+
+    NOT for credentials -- those go through tiq_user_api_keys and the
+    admin.py system/*/test "Test Connection" pattern instead. This is
+    for small scalar admin preferences that need real validation on
+    write (e.g. a bounded number), which is exactly what the generic
+    key/value credential endpoints don't do."""
+    __tablename__ = "tiq_system_settings"
+
+    id           = Column(Integer, primary_key=True, index=True)
+    setting_key  = Column(String(100), nullable=False, unique=True, index=True)
+    value        = Column(Text, nullable=False)
+    updated_at   = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

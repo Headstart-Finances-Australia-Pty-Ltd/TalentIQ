@@ -145,17 +145,34 @@ async def advance_application_stage(db: AsyncSession, application_id: Optional[i
 # ══════════════════════════════════════════════════════════════════════════
 # CALENDLY (optional alternative to the token-based self-schedule flow)
 # ══════════════════════════════════════════════════════════════════════════
-# Uses the recruiter's own Calendly Personal Access Token (saved under
-# Settings -> API Keys -> Calendly) — a strictly private, per-user
-# credential (see utils/credentials.SHAREABLE_SERVICES; "calendly" is
-# deliberately NOT in that set, same policy as "linkedin": one recruiter's
-# Calendly account is never usable by another user, including admins).
+# Two independent ways a recruiter can wire up Calendly, same as each
+# other — Settings just shows whichever fields they've filled in:
+#
+#   1. booking_url — a plain public Calendly page (e.g.
+#      https://calendly.com/pksingh210/30min), pasted in as-is. No token,
+#      no API call — this is the SAME url is shared with every candidate,
+#      exactly like a normal "book time with me" link on a website. Takes
+#      priority when set, since it's the simpler/default path.
+#   2. api_key + event_type_uri — the recruiter's Personal Access Token,
+#      used to mint a fresh single-use link per candidate via the Calendly
+#      API (see create_calendly_single_use_link below). Used only when
+#      booking_url is blank.
+#
+# All three fields are saved under Settings -> API Keys -> Calendly, a
+# strictly private, per-user credential (see utils/credentials.
+# SHAREABLE_SERVICES; "calendly" is deliberately NOT in that set, same
+# policy as "linkedin": one recruiter's Calendly is never usable by
+# another user, including admins).
 
 async def get_calendly_credentials(db: AsyncSession, user_id: int) -> dict:
-    """Returns {"api_key": ..., "event_type_uri": ...} — either may be
-    empty if not yet configured."""
+    """Returns {"booking_url": ..., "api_key": ..., "event_type_uri": ...}
+    — any of these may be empty if not yet configured."""
     creds = await get_all_credentials(db, user_id, "calendly")
-    return {"api_key": creds.get("api_key", ""), "event_type_uri": creds.get("event_type_uri", "")}
+    return {
+        "booking_url": creds.get("booking_url", ""),
+        "api_key": creds.get("api_key", ""),
+        "event_type_uri": creds.get("event_type_uri", ""),
+    }
 
 
 def _calendly_headers(api_key: str) -> dict:

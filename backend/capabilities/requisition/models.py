@@ -66,9 +66,11 @@ class Requisition(Base):
     # both, or neither. Resume Screening's "From Requisitions" JD source
     # prefers this file when present (see routers/joblens.py), falling
     # back to the linked jd_record_id's description otherwise.
-    jd_file_blob       = Column(LargeBinary)
+    jd_file_blob       = Column(LargeBinary)   # legacy fallback, same pattern as JobLensCandidate.video_blob
     jd_file_filename   = Column(String(300))
     jd_file_mimetype   = Column(String(100))
+    jd_file_key        = Column(String(500))   # S3 object key, when stored in the bucket
+    jd_file_size_bytes = Column(Integer)
     status             = Column(String(30), default="Draft")  # see REQUISITION_STATUSES
     priority           = Column(String(20), default="Normal")  # see REQUISITION_PRIORITIES
     vacancy_count      = Column(Integer, default=1)

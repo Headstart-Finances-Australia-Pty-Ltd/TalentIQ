@@ -33,6 +33,7 @@ from capabilities.requisition.models import Requisition, ClientContact
 from capabilities.acquisition import service as acquisition_service
 from utils.auth_utils import get_current_user
 from utils.sequencing import next_sequence_number
+from utils.storage import upload_file, get_file_bytes
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -615,11 +616,20 @@ async def upload_jd_file(
     if not jd:
         raise HTTPException(404, "JD not found")
     content = await file.read()
-    jd.jd_file_blob = content
+    ext = (file.filename or "").rsplit(".", 1)[-1].lower() if "." in (file.filename or "") else "bin"
+    mimetype = file.content_type or "application/octet-stream"
+    uploaded = await upload_file(db, "jds", current_user.id, jd_id, content, mimetype, ext)
+    if uploaded:
+        jd.jd_file_key = uploaded["key"]
+        jd.jd_file_size_bytes = uploaded["size_bytes"]
+        jd.jd_file_blob = None
+    else:
+        jd.jd_file_blob = content
+        jd.jd_file_size_bytes = len(content)
     jd.jd_file_filename = file.filename
-    jd.jd_file_mimetype = file.content_type or "application/octet-stream"
+    jd.jd_file_mimetype = mimetype
     await db.commit()
-    return {"status": "saved", "filename": file.filename}
+    return {"status": "saved", "filename": file.filename, "storage": "s3" if uploaded else "database"}
 
 
 @router.get("/jds/{jd_id}/file")
@@ -630,10 +640,15 @@ async def download_jd_file(
 ):
     r = await db.execute(select(JDRecord).where(JDRecord.id == jd_id, JDRecord.user_id == current_user.id))
     jd = r.scalar_one_or_none()
-    if not jd or not jd.jd_file_blob:
+    if not jd or (not jd.jd_file_key and not jd.jd_file_blob):
+        raise HTTPException(404, "No JD file stored for this JD")
+    data = jd.jd_file_blob
+    if jd.jd_file_key:
+        data = await get_file_bytes(db, jd.jd_file_key) or jd.jd_file_blob
+    if not data:
         raise HTTPException(404, "No JD file stored for this JD")
     return Response(
-        content=jd.jd_file_blob,
+        content=data,
         media_type=jd.jd_file_mimetype or "application/octet-stream",
         headers={"Content-Disposition": f'inline; filename="{jd.jd_file_filename or "jd"}"'},
     )
@@ -918,9 +933,9 @@ async def _fmt_candidate(db: AsyncSession, c: TrackedCandidate) -> dict:
         "status": c.status,
         "is_duplicate": bool(c.is_duplicate),              # tracked internally; not surfaced as its own UI column
         "duplicate_of_id": c.duplicate_of_id,
-        "has_resume": bool(c.resume_blob),
+        "has_resume": bool(c.resume_blob or c.resume_key),
         "resume_filename": c.resume_filename or "",
-        "has_cover_letter": bool(c.cover_letter_blob),
+        "has_cover_letter": bool(c.cover_letter_blob or c.cover_letter_key),
         "cover_letter_filename": c.cover_letter_filename or "",
         "submitted_at": c.submitted_at.isoformat() if c.submitted_at else None,
         "created_at": c.created_at.isoformat() if c.created_at else None,
@@ -957,17 +972,17 @@ async def create_candidate(
     if not vendor_row.scalar_one_or_none():
         raise HTTPException(404, "Vendor not found")
 
-    resume_blob = resume_filename = resume_mimetype = None
+    resume_bytes = resume_filename = resume_mimetype = None
     if file and file.filename:
-        resume_blob = await file.read()
+        resume_bytes = await file.read()
         resume_filename = file.filename
         resume_mimetype = file.content_type or "application/octet-stream"
 
     # Cover letter is its own independent upload — separate slot on the
     # same candidate row, not derived from or merged with the resume file.
-    cover_letter_blob = cover_letter_filename = cover_letter_mimetype = None
+    cover_letter_bytes = cover_letter_filename = cover_letter_mimetype = None
     if cover_letter_file and cover_letter_file.filename:
-        cover_letter_blob = await cover_letter_file.read()
+        cover_letter_bytes = await cover_letter_file.read()
         cover_letter_filename = cover_letter_file.filename
         cover_letter_mimetype = cover_letter_file.content_type or "application/octet-stream"
 
@@ -982,10 +997,8 @@ async def create_candidate(
         phone=phone.strip(),
         address=address.strip(),
         work_permission=work_permission or None,
-        resume_blob=resume_blob,
         resume_filename=resume_filename,
         resume_mimetype=resume_mimetype,
-        cover_letter_blob=cover_letter_blob,
         cover_letter_filename=cover_letter_filename,
         cover_letter_mimetype=cover_letter_mimetype,
         status=status,
@@ -996,6 +1009,31 @@ async def create_candidate(
     db.add(candidate)
     await db.commit()
     await db.refresh(candidate)
+
+    # Uploaded to S3 (or left as a Postgres blob fallback) AFTER the insert
+    # above, since the object key includes candidate.id — which doesn't
+    # exist until the row is committed once.
+    if resume_bytes:
+        ext = (resume_filename or "").rsplit(".", 1)[-1].lower() if "." in (resume_filename or "") else "bin"
+        uploaded = await upload_file(db, "resumes", current_user.id, candidate.id, resume_bytes, resume_mimetype, ext)
+        if uploaded:
+            candidate.resume_key = uploaded["key"]
+            candidate.resume_size_bytes = uploaded["size_bytes"]
+        else:
+            candidate.resume_blob = resume_bytes
+            candidate.resume_size_bytes = len(resume_bytes)
+    if cover_letter_bytes:
+        ext = (cover_letter_filename or "").rsplit(".", 1)[-1].lower() if "." in (cover_letter_filename or "") else "bin"
+        uploaded = await upload_file(db, "cover-letters", current_user.id, candidate.id, cover_letter_bytes, cover_letter_mimetype, ext)
+        if uploaded:
+            candidate.cover_letter_key = uploaded["key"]
+            candidate.cover_letter_size_bytes = uploaded["size_bytes"]
+        else:
+            candidate.cover_letter_blob = cover_letter_bytes
+            candidate.cover_letter_size_bytes = len(cover_letter_bytes)
+    if resume_bytes or cover_letter_bytes:
+        await db.commit()
+        await db.refresh(candidate)
 
     await _link_jd_vendor(db, jd_id, vendor_id)
     db.add(CandidateStatusLog(candidate_id=candidate.id, old_status=None, new_status=status))
@@ -1047,7 +1085,6 @@ async def bulk_upload_candidates(
             email="",
             phone="",
             work_permission=work_permission or None,
-            resume_blob=content,
             resume_filename=f.filename,
             resume_mimetype=f.content_type or "application/octet-stream",
             status=status,
@@ -1056,7 +1093,20 @@ async def bulk_upload_candidates(
             submitted_at=datetime.utcnow(),
         )
         db.add(candidate)
-        await db.flush()
+        await db.flush()  # assigns candidate.id, needed for the S3 key below
+
+        ext = (f.filename or "").rsplit(".", 1)[-1].lower() if "." in (f.filename or "") else "bin"
+        uploaded = await upload_file(
+            db, "resumes", current_user.id, candidate.id, content,
+            f.content_type or "application/octet-stream", ext,
+        )
+        if uploaded:
+            candidate.resume_key = uploaded["key"]
+            candidate.resume_size_bytes = uploaded["size_bytes"]
+        else:
+            candidate.resume_blob = content
+            candidate.resume_size_bytes = len(content)
+
         db.add(CandidateStatusLog(candidate_id=candidate.id, old_status=None, new_status=status))
         created.append(candidate)
 
@@ -1102,8 +1152,8 @@ async def list_candidates(
                 "vendor_id": c.vendor_id, "vendor_name": "",
                 "status": c.status or "Applied",
                 "is_duplicate": False, "duplicate_of_id": None,
-                "has_resume": bool(c.resume_blob), "resume_filename": c.resume_filename or "",
-                "has_cover_letter": bool(c.cover_letter_blob), "cover_letter_filename": c.cover_letter_filename or "",
+                "has_resume": bool(c.resume_blob or c.resume_key), "resume_filename": c.resume_filename or "",
+                "has_cover_letter": bool(c.cover_letter_blob or c.cover_letter_key), "cover_letter_filename": c.cover_letter_filename or "",
                 "submitted_at": None, "created_at": None, "updated_at": None,
                 "_load_error": True,
             })
@@ -1212,10 +1262,15 @@ async def download_candidate_resume(
 ):
     r = await db.execute(select(TrackedCandidate).where(TrackedCandidate.id == candidate_id, TrackedCandidate.user_id == current_user.id))
     c = r.scalar_one_or_none()
-    if not c or not c.resume_blob:
+    if not c or (not c.resume_key and not c.resume_blob):
+        raise HTTPException(404, "No resume stored for this candidate")
+    data = c.resume_blob
+    if c.resume_key:
+        data = await get_file_bytes(db, c.resume_key) or c.resume_blob
+    if not data:
         raise HTTPException(404, "No resume stored for this candidate")
     return Response(
-        content=c.resume_blob,
+        content=data,
         media_type=c.resume_mimetype or "application/octet-stream",
         headers={"Content-Disposition": f'inline; filename="{c.resume_filename or "resume"}"'},
     )
@@ -1238,9 +1293,19 @@ async def upload_candidate_cover_letter(
     if not file.filename:
         raise HTTPException(400, "No file provided.")
 
-    c.cover_letter_blob = await file.read()
+    content = await file.read()
+    ext = (file.filename or "").rsplit(".", 1)[-1].lower() if "." in (file.filename or "") else "bin"
+    mimetype = file.content_type or "application/octet-stream"
+    uploaded = await upload_file(db, "cover-letters", current_user.id, candidate_id, content, mimetype, ext)
+    if uploaded:
+        c.cover_letter_key = uploaded["key"]
+        c.cover_letter_size_bytes = uploaded["size_bytes"]
+        c.cover_letter_blob = None
+    else:
+        c.cover_letter_blob = content
+        c.cover_letter_size_bytes = len(content)
     c.cover_letter_filename = file.filename
-    c.cover_letter_mimetype = file.content_type or "application/octet-stream"
+    c.cover_letter_mimetype = mimetype
     c.updated_at = datetime.utcnow()
     await db.commit()
     await db.refresh(c)
@@ -1255,10 +1320,15 @@ async def download_candidate_cover_letter(
 ):
     r = await db.execute(select(TrackedCandidate).where(TrackedCandidate.id == candidate_id, TrackedCandidate.user_id == current_user.id))
     c = r.scalar_one_or_none()
-    if not c or not c.cover_letter_blob:
+    if not c or (not c.cover_letter_key and not c.cover_letter_blob):
+        raise HTTPException(404, "No cover letter stored for this candidate")
+    data = c.cover_letter_blob
+    if c.cover_letter_key:
+        data = await get_file_bytes(db, c.cover_letter_key) or c.cover_letter_blob
+    if not data:
         raise HTTPException(404, "No cover letter stored for this candidate")
     return Response(
-        content=c.cover_letter_blob,
+        content=data,
         media_type=c.cover_letter_mimetype or "application/octet-stream",
         headers={"Content-Disposition": f'inline; filename="{c.cover_letter_filename or "cover_letter"}"'},
     )

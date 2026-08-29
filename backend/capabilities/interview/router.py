@@ -9,12 +9,14 @@ from datetime import datetime
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, delete as sa_delete
 
 from db.database import get_db
 from models.models import User
 from utils.auth_utils import get_current_user
+from utils.email_send import get_smtp_config, send_email
 from capabilities.acquisition import service as acquisition_service
 from capabilities.acquisition.models import Candidate, Application
 from capabilities.requisition.models import Requisition
@@ -545,7 +547,8 @@ async def calendly_status(current_user: User = Depends(get_current_user), db: As
     at all, without exposing the token itself."""
     creds = await service.get_calendly_credentials(db, current_user.id)
     return {
-        "configured": bool(creds["api_key"] and creds["event_type_uri"]),
+        "configured": bool(creds["booking_url"]) or bool(creds["api_key"] and creds["event_type_uri"]),
+        "has_booking_url": bool(creds["booking_url"]),
         "has_token": bool(creds["api_key"]),
         "has_event_type": bool(creds["event_type_uri"]),
     }
@@ -573,15 +576,89 @@ async def create_calendly_link(
     if i.interview_type not in SELF_SCHEDULABLE_TYPES:
         raise HTTPException(400, f"Self-scheduling is only available for Phone Interview rounds — {i.interview_type} interviews must be scheduled directly by a recruiter, not left to a candidate-facing link.")
     creds = await service.get_calendly_credentials(db, current_user.id)
-    if not creds["api_key"] or not creds["event_type_uri"]:
-        raise HTTPException(400, "Set up Calendly under Settings -> API Keys first (Personal Access Token + Event Type).")
-    booking_url = await service.create_calendly_single_use_link(creds["api_key"], creds["event_type_uri"])
+    if creds["booking_url"]:
+        # Simple mode: the same public Calendly page for every candidate,
+        # no token needed — set once under Settings -> API Keys -> Calendly.
+        booking_url = creds["booking_url"]
+    elif creds["api_key"] and creds["event_type_uri"]:
+        booking_url = await service.create_calendly_single_use_link(creds["api_key"], creds["event_type_uri"])
+    else:
+        raise HTTPException(400, "Set up Calendly under Settings -> API Keys first — either paste your Calendly booking link, or a Personal Access Token + Event Type.")
     i.calendly_scheduling_url = booking_url
     i.status = "Requested"
     i.scheduled_at = None
     i.updated_at = datetime.utcnow()
     await db.commit()
     return {"calendly_scheduling_url": booking_url}
+
+
+class SendCalendlyEmailRequest(BaseModel):
+    to_email: str = ""   # defaults to the interview's own candidate's email if blank
+    subject: str = "Schedule your phone screening interview"
+    body_html: str = ""  # defaults to a standard message wrapping the link if blank
+
+
+async def _candidate_email(db: AsyncSession, i: Interview) -> str:
+    if i.candidate_id:
+        c = (await db.execute(select(Candidate).where(Candidate.id == i.candidate_id))).scalar_one_or_none()
+        return (c.email or "") if c else ""
+    if i.joblens_candidate_id:
+        from models.models import JobLensCandidate
+        jc = (await db.execute(select(JobLensCandidate).where(JobLensCandidate.id == i.joblens_candidate_id))).scalar_one_or_none()
+        return (jc.email or "") if jc else ""
+    return ""
+
+
+@router.post("/interviews/{interview_id}/calendly-link/email")
+async def email_calendly_link(
+    interview_id: int, payload: SendCalendlyEmailRequest,
+    current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    """Interview Scheduling's counterpart to Phone Interview's 'Send
+    Calendly Link' — generates (or reuses) the Calendly booking link for
+    this interview the same way create_calendly_link does, then emails
+    it to the candidate directly instead of just handing the recruiter a
+    link to copy/paste themselves. Works whether the interview came from
+    the Talent Pool (candidate_id) or from CandidateLens/JobLens
+    (joblens_candidate_id) — same bridge as the rest of this file."""
+    org = await _org(db, current_user)
+    i = (await db.execute(select(Interview).where(Interview.id == interview_id, Interview.organisation_id == org.id))).scalar_one_or_none()
+    if not i:
+        raise HTTPException(404, "Interview not found")
+    if i.interview_type not in SELF_SCHEDULABLE_TYPES:
+        raise HTTPException(400, f"Self-scheduling is only available for Phone Interview rounds — {i.interview_type} interviews must be scheduled directly by a recruiter, not left to a candidate-facing link.")
+
+    to_email = (payload.to_email or await _candidate_email(db, i)).strip()
+    if not to_email:
+        raise HTTPException(400, "This candidate has no email on file — nowhere to send the link.")
+
+    booking_url = i.calendly_scheduling_url
+    if not booking_url:
+        creds = await service.get_calendly_credentials(db, current_user.id)
+        if creds["booking_url"]:
+            booking_url = creds["booking_url"]
+        elif creds["api_key"] and creds["event_type_uri"]:
+            booking_url = await service.create_calendly_single_use_link(creds["api_key"], creds["event_type_uri"])
+        else:
+            raise HTTPException(400, "Set up Calendly under Settings -> API Keys first — either paste your Calendly booking link, or a Personal Access Token + Event Type.")
+
+    candidate_name = await _candidate_name(db, i.candidate_id, i.joblens_candidate_id)
+    body_html = payload.body_html.strip() or (
+        f"<p>Hi {candidate_name or 'there'},</p>"
+        f"<p>Thanks for your interest — we'd like to set up a quick initial phone screening interview with you.</p>"
+        f"<p>Please use the link below to pick a time that works for you:</p>"
+        f"<p><a href=\"{booking_url}\">{booking_url}</a></p>"
+        f"<p>Looking forward to speaking with you.</p>"
+    )
+    smtp_cfg = await get_smtp_config(current_user.id, db)
+    send_email(smtp_cfg, to_email, payload.subject.strip() or "Schedule your phone screening interview", body_html)
+
+    i.calendly_scheduling_url = booking_url
+    if i.status not in ("Scheduled", "Completed"):
+        i.status = "Requested"
+    i.updated_at = datetime.utcnow()
+    await db.commit()
+    return {"sent": True, "calendly_scheduling_url": booking_url}
 
 
 # ══════════════════════════════════════════════════════════════════════════

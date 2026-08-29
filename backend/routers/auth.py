@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
 from db.database import get_db
-from models.models import User, UserAPIKey, AuditLog
+from models.models import User, UserAPIKey, AuditLog, GroqKeyPool
 from schemas.schemas import (
     UserRegister, UserLogin, UserOut, TokenOut,
     PasswordResetRequest, PasswordReset, UserUpdate,
@@ -262,6 +262,27 @@ async def list_global_keys(
         item.key_preview = _mask_key_preview(k.key_value)
         out.append(item)
     return out
+
+
+@router.get("/groq-pool-active")
+async def groq_pool_active(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Visible to every user (not just admins) — a Groq Key Pool entry
+    (Settings -> API Keys -> Groq Key Pool, admin-only to manage) makes
+    Groq "configured" for the whole platform exactly the same as a legacy
+    is_global Groq key does, but lives in a separate table (tiq_groq_key_pool)
+    that GET /global-keys never looks at. Without this, the "Platform AI &
+    Search Services" status card would wrongly show Groq as "Not yet
+    configured" for every non-admin whenever the admin set it up via the
+    pool instead of the single legacy key field. Returns only a boolean —
+    never key values or count, which stay admin-only via /admin/groq-pool.
+    """
+    result = await db.execute(
+        select(GroqKeyPool.id).where(GroqKeyPool.is_active.is_(True)).limit(1)
+    )
+    return {"active": result.scalar_one_or_none() is not None}
 
 
 @router.delete("/api-keys/{key_id}")

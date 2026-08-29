@@ -2,6 +2,10 @@
 TalentIQ - Admin Router
 Full database browser, user management, record editing for all tiq_* tables.
 """
+import os
+import asyncio
+import uuid
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,26 +13,96 @@ from sqlalchemy import select, text, update, delete, inspect, func, bindparam
 from sqlalchemy.engine import Row
 from pydantic import BaseModel
 
-from db.database import get_db, engine
+from db.database import get_db, engine, get_connection_display_info, test_connection_url
 from models.models import User
 from utils.auth_utils import get_current_user, require_admin
+from utils.storage import test_s3_config, REQUIRED_S3_FIELDS
 
 router = APIRouter()
+
+# The plan's allocated database storage, in GB — this is the fallback
+# default (env-configured, since it depends on whichever Xata plan/tier
+# is active, not anything the app itself controls). Defaults to 5GB per
+# the current plan. An admin can override this at runtime via Admin
+# Console > API Keys (see SETTING_KEY_ALLOCATED_GB below) without a
+# redeploy — that DB-stored override, when present, always wins over
+# this constant; see _get_allocated_bytes().
+DB_ALLOCATED_BYTES = float(os.getenv("DB_ALLOCATED_GB", "5")) * 1024 ** 3
+
+SETTING_KEY_ALLOCATED_GB = "db_allocated_gb"
+MIN_ALLOCATED_GB = 0.1
+MAX_ALLOCATED_GB = 100_000  # 100TB sanity ceiling — not a real plan limit, just enough to catch a stray extra zero
+
+
+async def _get_allocated_gb_override(db: AsyncSession):
+    """Returns the DB-stored override row for the allocated-storage
+    setting, or None if an admin has never set one (in which case
+    callers should fall back to DB_ALLOCATED_BYTES)."""
+    from models.models import SystemSetting
+    return (await db.execute(
+        select(SystemSetting).where(SystemSetting.setting_key == SETTING_KEY_ALLOCATED_GB)
+    )).scalar_one_or_none()
+
+
+async def _get_allocated_bytes(db: AsyncSession) -> float:
+    row = await _get_allocated_gb_override(db)
+    return float(row.value) * 1024 ** 3 if row else DB_ALLOCATED_BYTES
 
 # ── TABLE LIST ───────────────────────────────────────────────────────
 
 @router.get("/tables")
 async def list_tables(_: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
-    """List all tiq_* tables with row counts."""
-    result = await db.execute(text(
-        "SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename LIKE 'tiq_%' ORDER BY tablename"
+    """List all tiq_* tables with row counts and on-disk size (data +
+    indexes, via pg_total_relation_size — sizes for every table are
+    fetched in a single batched query rather than one call per table)."""
+    size_result = await db.execute(text(
+        "SELECT tablename, pg_total_relation_size(quote_ident(tablename)) AS size_bytes "
+        "FROM pg_tables WHERE schemaname='public' AND tablename LIKE 'tiq_%' ORDER BY tablename"
     ))
+    sizes = {row[0]: row[1] for row in size_result.fetchall()}
+
     tables = []
-    for row in result.fetchall():
-        tname = row[0]
+    for tname, size_bytes in sizes.items():
         cnt = (await db.execute(text(f'SELECT COUNT(*) FROM "{tname}"'))).scalar()
-        tables.append({"table": tname, "rows": cnt})
+        tables.append({"table": tname, "rows": cnt, "size_bytes": size_bytes})
     return tables
+
+
+# ── DATABASE STORAGE USAGE ───────────────────────────────────────────
+
+@router.get("/storage")
+async def storage_usage(_: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    """Total database size vs. the allocated plan quota, plus each
+    tiq_* table's own on-disk size, largest first — so it's obvious at
+    a glance where space is actually going (video_blob on the
+    candidates table is almost always the biggest single consumer).
+
+    Note: pg_database_size() reports this Postgres endpoint's live
+    data+index size. Providers with a branching model (Xata included —
+    each branch is its own copy-on-write Postgres) can bill storage
+    slightly differently from this figure since it doesn't account for
+    other branches/history, but this is the most accurate figure
+    obtainable via SQL and matches what the connected database itself
+    reports.
+    """
+    total_bytes = (await db.execute(text(
+        "SELECT pg_database_size(current_database())"
+    ))).scalar() or 0
+
+    size_result = await db.execute(text(
+        "SELECT tablename, pg_total_relation_size(quote_ident(tablename)) AS size_bytes "
+        "FROM pg_tables WHERE schemaname='public' AND tablename LIKE 'tiq_%'"
+    ))
+    tables = [{"table": row[0], "size_bytes": row[1]} for row in size_result.fetchall()]
+    tables.sort(key=lambda t: t["size_bytes"], reverse=True)
+
+    allocated_bytes = await _get_allocated_bytes(db)
+    return {
+        "total_bytes": total_bytes,
+        "allocated_bytes": allocated_bytes,
+        "used_pct": round(100 * total_bytes / allocated_bytes, 1) if allocated_bytes else None,
+        "tables": tables,
+    }
 
 
 # ── TABLE SCHEMA ─────────────────────────────────────────────────────
@@ -114,6 +188,16 @@ async def delete_row(
 ):
     if not table.startswith("tiq_"):
         raise HTTPException(403, "Only tiq_* tables are accessible")
+    # tiq_users is the one table where a raw row delete can silently
+    # remove a protected/bootstrap admin account — same guard as the
+    # dedicated /users/{id} endpoint, so this generic browser can't be
+    # used as a bypass around it.
+    if table == "tiq_users":
+        protected = (await db.execute(
+            text("SELECT is_protected FROM tiq_users WHERE id = :id"), {"id": row_id}
+        )).scalar_one_or_none()
+        if protected:
+            raise HTTPException(403, "This account is protected and cannot be deleted.")
     await db.execute(text(f'DELETE FROM "{table}" WHERE id = :id'), {"id": row_id})
     await db.commit()
     return {"message": "Row deleted"}
@@ -131,6 +215,21 @@ async def bulk_delete_rows(
     ids = payload.get("ids", [])
     if not ids:
         raise HTTPException(400, "No row ids provided")
+
+    # Same protected-account guard as the single-row delete above — strip
+    # protected ids out of the batch rather than rejecting the whole
+    # request outright, so deleting 10 test users still works even if one
+    # of the selected rows happens to be the protected admin account.
+    if table == "tiq_users":
+        stmt = text("SELECT id FROM tiq_users WHERE id IN :ids AND is_protected = TRUE").bindparams(
+            bindparam("ids", expanding=True)
+        )
+        protected_ids = set((await db.execute(stmt, {"ids": ids})).scalars().all())
+        if protected_ids:
+            ids = [i for i in ids if i not in protected_ids]
+        if not ids:
+            raise HTTPException(403, "All selected accounts are protected and cannot be deleted.")
+
     # A raw Python list bound to :ids with ANY(:ids) doesn't reliably expand
     # through SQLAlchemy's text() + asyncpg — bindparam(expanding=True) with
     # an IN clause is the correct, driver-safe way to bind a variable-length
@@ -226,6 +325,13 @@ async def delete_user(
 ):
     if user_id == current.id:
         raise HTTPException(400, "Cannot delete your own account")
+    protected = (await db.execute(
+        text("SELECT is_protected FROM tiq_users WHERE id = :id"), {"id": user_id}
+    )).scalar_one_or_none()
+    if protected is None:
+        raise HTTPException(404, "User not found")
+    if protected:
+        raise HTTPException(403, "This account is protected and cannot be deleted.")
     await db.execute(text("DELETE FROM tiq_users WHERE id = :id"), {"id": user_id})
     await db.commit()
     return {"message": "User deleted"}
@@ -539,3 +645,465 @@ async def set_module_toggles(
     await db.commit()
     result = await db.execute(select(ModuleToggle))
     return {row.module_route: row.enabled for row in result.scalars().all()}
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# SYSTEM CREDENTIALS — Admin Console > API Keys
+#
+# Actually saving/listing/deleting the database + S3 credentials reuses
+# the existing generic POST/GET/DELETE /api/auth/api-keys + /global-keys
+# endpoints (service="database" / service="s3", is_global=true — both
+# now permitted, see utils/credentials.SHAREABLE_SERVICES) rather than
+# duplicating that logic here. What's admin-only and specific to this
+# tab is the "Test Connection" step for each — validating a candidate
+# credential BEFORE it's saved, without ever persisting or hot-swapping
+# anything on a failed or exploratory test.
+# ══════════════════════════════════════════════════════════════════════════
+
+class DatabaseTestIn(BaseModel):
+    connection_url: str
+
+
+@router.get("/system/database/current")
+async def current_database_info(_: User = Depends(require_admin)):
+    """What this running process is actually connected to right now —
+    read live from the active engine's URL, never from a stored key —
+    so the panel can't show a stale or aspirational value."""
+    return get_connection_display_info()
+
+
+@router.post("/system/database/test")
+async def test_database(payload: DatabaseTestIn, _: User = Depends(require_admin)):
+    """Validates a candidate connection string only — see
+    db.database.test_connection_url's docstring for why this
+    deliberately does not hot-swap the live connection even on
+    success."""
+    if not payload.connection_url.strip():
+        raise HTTPException(400, "Connection string is required.")
+    return await test_connection_url(payload.connection_url)
+
+
+# ── Provider-to-provider migration (e.g. Neon → Xata) ──────────────────
+#
+# Runs as a background asyncio task rather than inline in the request:
+# copying real data can take anywhere from seconds to minutes depending
+# on row counts, comfortably past any reasonable HTTP timeout. The POST
+# below returns a job_id immediately; the GET polls status. Jobs live in
+# a plain in-memory dict — this is an admin-triggered one-off operation,
+# not something that needs to survive a process restart, and a restart
+# mid-migration is already safe to recover from by just re-running it
+# (see db/provider_migration.py's docstring: ON CONFLICT DO NOTHING
+# throughout, so a re-run only fills in whatever didn't finish).
+_MIGRATION_JOBS: Dict[str, dict] = {}
+_MIGRATION_LOG_CAP = 200  # keep the in-memory job bounded on a very large migration
+
+
+class MigrateDatabaseIn(BaseModel):
+    source_url: str
+    target_url: str
+
+
+@router.post("/system/database/migrate")
+async def start_database_migration(payload: MigrateDatabaseIn, _: User = Depends(require_admin)):
+    """Kicks off a background copy of every tiq_* table (schema + data,
+    FK-safe order) from source_url into target_url. Returns a job_id;
+    poll GET .../migrate/{job_id} for live progress. COPY-ONLY — see
+    db/provider_migration.py's docstring for why this never touches the
+    source database, and why it's safe to re-run after a partial
+    failure."""
+    source_raw, target_raw = payload.source_url.strip(), payload.target_url.strip()
+    if not source_raw or not target_raw:
+        raise HTTPException(400, "Both a source and target connection string are required.")
+
+    if any(j["status"] == "running" for j in _MIGRATION_JOBS.values()):
+        raise HTTPException(409, "A migration is already running. Wait for it to finish (or check its status) before starting another.")
+
+    from db.database import normalize_url
+    source_url = normalize_url(source_raw)
+    target_url = normalize_url(target_raw)
+    if source_url == target_url:
+        raise HTTPException(400, "Source and target are the same connection string.")
+
+    job_id = uuid.uuid4().hex[:12]
+    job = {
+        "id": job_id,
+        "status": "running",  # running | completed | failed
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "finished_at": None,
+        # host/db/user only, via the same helper the "current connection"
+        # display uses — the password/API key is never put in the job dict.
+        "source": get_connection_display_info(source_url),
+        "target": get_connection_display_info(target_url),
+        "phase": "starting",
+        "tables_total": None,
+        "tables_done": 0,
+        "current_table": None,
+        "rows_copied": 0,
+        "log": [],
+        "error": None,
+    }
+    _MIGRATION_JOBS[job_id] = job
+
+    def on_progress(update: dict):
+        job.update({k: v for k, v in update.items() if k != "message"})
+        if "message" in update:
+            job["log"].append(update["message"])
+            if len(job["log"]) > _MIGRATION_LOG_CAP:
+                job["log"] = job["log"][-_MIGRATION_LOG_CAP:]
+
+    async def _run():
+        from db.provider_migration import run_provider_migration
+        try:
+            summary = await run_provider_migration(source_url, target_url, on_progress)
+            job["status"] = "completed"
+            job["log"].append(
+                f"Done. {summary['rows_copied']} row(s) copied across {summary['tables_copied']} table(s). "
+                f"Nothing was changed in the source database."
+            )
+        except Exception as e:
+            job["status"] = "failed"
+            job["error"] = f"{type(e).__name__}: {e}"
+            job["log"].append(f"FAILED: {job['error']}")
+        finally:
+            job["finished_at"] = datetime.now(timezone.utc).isoformat()
+
+    asyncio.create_task(_run())
+    return {"job_id": job_id}
+
+
+@router.get("/system/database/migrate/{job_id}")
+async def get_migration_status(job_id: str, _: User = Depends(require_admin)):
+    job = _MIGRATION_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(404, "Unknown migration job (in-memory only — lost on a process restart).")
+    return job
+
+
+class StorageQuotaIn(BaseModel):
+    allocated_gb: float
+
+
+@router.get("/system/database/storage-quota")
+async def get_storage_quota(_: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    """Current allocated-storage quota (GB) that /storage's used_pct is
+    calculated against, and whether it's an explicit DB-stored override
+    or still falling back to the DB_ALLOCATED_GB env default — so the
+    panel can say which one is actually in effect."""
+    row = await _get_allocated_gb_override(db)
+    if row:
+        return {"allocated_gb": float(row.value), "source": "override"}
+    return {"allocated_gb": DB_ALLOCATED_BYTES / 1024 ** 3, "source": "env_default"}
+
+
+@router.put("/system/database/storage-quota")
+async def set_storage_quota(
+    payload: StorageQuotaIn,
+    _: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Dedicated, validated setter for the allocated-storage quota —
+    deliberately its own endpoint rather than routed through the
+    generic /api/auth/api-keys upsert the database/S3 credentials use
+    (that endpoint happily accepts any string as key_value). This
+    value feeds directly into /storage's used_pct math, so it needs
+    real numeric validation plus sane bounds — a stray extra zero or a
+    pasted non-numeric value here would otherwise silently wreck the
+    storage panel rather than being rejected up front."""
+    from models.models import SystemSetting
+    if payload.allocated_gb < MIN_ALLOCATED_GB or payload.allocated_gb > MAX_ALLOCATED_GB:
+        raise HTTPException(
+            400,
+            f"Allocated storage must be between {MIN_ALLOCATED_GB} and {MAX_ALLOCATED_GB} GB.",
+        )
+    row = await _get_allocated_gb_override(db)
+    if row:
+        row.value = str(payload.allocated_gb)
+    else:
+        db.add(SystemSetting(setting_key=SETTING_KEY_ALLOCATED_GB, value=str(payload.allocated_gb)))
+    await db.commit()
+    return {"allocated_gb": payload.allocated_gb, "source": "override"}
+
+
+class S3TestIn(BaseModel):
+    access_key_id: str
+    secret_access_key: str
+    bucket_name: str
+    region: Optional[str] = None
+    endpoint_url: Optional[str] = None
+
+
+@router.post("/system/s3/test")
+async def test_s3(payload: S3TestIn, _: User = Depends(require_admin)):
+    """Validates candidate bucket credentials without persisting them —
+    runs a HEAD on the bucket so a typo'd key, wrong bucket name, or
+    missing permission is caught before Save rather than after."""
+    cfg = {
+        "access_key_id": payload.access_key_id.strip(),
+        "secret_access_key": payload.secret_access_key.strip(),
+        "bucket_name": payload.bucket_name.strip(),
+        "region": (payload.region or "auto").strip(),
+        "endpoint_url": (payload.endpoint_url or "").strip(),
+    }
+    missing = [f for f in REQUIRED_S3_FIELDS if not cfg.get(f)]
+    if missing:
+        raise HTTPException(400, f"Missing required field(s): {', '.join(missing)}")
+    return test_s3_config(cfg)
+
+
+@router.get("/storage/blob-audit")
+async def blob_audit(_: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    """Counts every row across every file-type column that still has
+    actual bytes sitting in Postgres (the legacy *_blob columns) rather
+    than being pushed to S3/R2. A non-zero count here means either: (a)
+    S3 wasn't configured yet when that row was uploaded, or (b) it was
+    uploaded while S3 was misconfigured and silently fell back. Use
+    db/push_remaining_blobs_to_s3.py to migrate everything this reports
+    to S3, once bucket credentials are confirmed working."""
+    checks = [
+        ("tiq_joblens_candidates", "video_blob", "video"),
+        ("tiq_joblens_candidates", "resume_file_blob", "resume"),
+        ("tiq_jd_records", "jd_file_blob", "jd"),
+        ("tiq_requisitions", "jd_file_blob", "jd"),
+        ("tiq_tracked_candidates", "resume_blob", "resume"),
+        ("tiq_tracked_candidates", "cover_letter_blob", "cover_letter"),
+    ]
+    results = []
+    total = 0
+    for table, column, kind in checks:
+        count = (await db.execute(text(f'SELECT COUNT(*) FROM "{table}" WHERE "{column}" IS NOT NULL'))).scalar_one()
+        results.append({"table": table, "column": column, "kind": kind, "rows_with_blob": count})
+        total += count
+    return {"total_rows_with_blob": total, "breakdown": results}
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# FORCE-DELETE (CASCADE) — TEST-DATA CLEANUP ONLY
+# ══════════════════════════════════════════════════════════════════════════
+# The normal DELETE endpoints on a Requisition/Candidate (see
+# capabilities/requisition/router.py and capabilities/acquisition/router.py)
+# deliberately BLOCK deletion once real hiring activity (interviews,
+# pipeline entries, offers, placements — and downstream of those,
+# invoices/timesheets, commercial/billing history) is attached. That's
+# the correct default: those are audit/financial records that should
+# never silently disappear.
+#
+# These two endpoints are the deliberate escape hatch for clearing out
+# TEST data during setup — they delete a requisition or candidate AND
+# every real row that references it, across every downstream capability
+# (pipeline, interviews, offers, placements, invoices, timesheets,
+# communication log, vendor submissions, avatar interview sessions),
+# in dependency-safe order. This is genuinely destructive and NOT
+# something to expose or use against real production hiring data —
+# there is no undo.
+#
+# Both require the literal confirmation string in the request body,
+# the same pattern as db/drop_accfino_tiq_tables.py, so a stray click
+# or a copy-pasted request can't trigger it by accident.
+
+class ForceDeleteIn(BaseModel):
+    confirm: str
+
+
+async def _cascade_delete_requisition_rows(db: AsyncSession, req_id: int) -> None:
+    """The actual cascade SQL, shared by the single-id and batch
+    endpoints below — no confirm check, no commit, just the deletes.
+    Caller is responsible for commit()."""
+    p = {"rid": req_id}
+    await db.execute(text(
+        "DELETE FROM tiq_client_feedback WHERE pipeline_entry_id IN "
+        "(SELECT id FROM tiq_pipeline_entries WHERE requisition_id = :rid)"), p)
+    await db.execute(text("DELETE FROM tiq_vendor_submissions WHERE requisition_id = :rid"), p)
+    await db.execute(text(
+        "DELETE FROM tiq_avatar_interview_questions WHERE session_id IN "
+        "(SELECT id FROM tiq_avatar_interview_sessions WHERE requisition_id = :rid "
+        "OR interview_id IN (SELECT id FROM tiq_interviews WHERE requisition_id = :rid))"), p)
+    await db.execute(text(
+        "DELETE FROM tiq_avatar_interview_sessions WHERE requisition_id = :rid "
+        "OR interview_id IN (SELECT id FROM tiq_interviews WHERE requisition_id = :rid)"), p)
+    await db.execute(text(
+        "DELETE FROM tiq_interview_feedback_links WHERE interview_id IN "
+        "(SELECT id FROM tiq_interviews WHERE requisition_id = :rid)"), p)
+    await db.execute(text(
+        "DELETE FROM tiq_interview_scorecards WHERE interview_id IN "
+        "(SELECT id FROM tiq_interviews WHERE requisition_id = :rid)"), p)
+    await db.execute(text("DELETE FROM tiq_interviews WHERE requisition_id = :rid"), p)
+    await db.execute(text(
+        "DELETE FROM tiq_timesheet_entries WHERE placement_id IN "
+        "(SELECT id FROM tiq_placements WHERE requisition_id = :rid)"), p)
+    await db.execute(text(
+        "DELETE FROM tiq_invoices WHERE requisition_id = :rid OR placement_id IN "
+        "(SELECT id FROM tiq_placements WHERE requisition_id = :rid)"), p)
+    await db.execute(text(
+        "UPDATE tiq_placements SET replaces_placement_id = NULL WHERE replaces_placement_id IN "
+        "(SELECT id FROM tiq_placements WHERE requisition_id = :rid)"), p)
+    await db.execute(text("DELETE FROM tiq_placements WHERE requisition_id = :rid"), p)
+    await db.execute(text("DELETE FROM tiq_offers WHERE requisition_id = :rid"), p)
+    await db.execute(text(
+        "DELETE FROM tiq_pipeline_stage_history WHERE pipeline_entry_id IN "
+        "(SELECT id FROM tiq_pipeline_entries WHERE requisition_id = :rid)"), p)
+    await db.execute(text("DELETE FROM tiq_pipeline_entries WHERE requisition_id = :rid"), p)
+    await db.execute(text("DELETE FROM tiq_communication_log WHERE requisition_id = :rid"), p)
+    await db.execute(text("DELETE FROM tiq_vendor_requisition_assignments WHERE requisition_id = :rid"), p)
+    await db.execute(text("DELETE FROM tiq_pipeline_stages WHERE requisition_id = :rid"), p)
+    await db.execute(text("DELETE FROM tiq_applications WHERE requisition_id = :rid"), p)
+    await db.execute(text("DELETE FROM tiq_requisitions WHERE id = :rid"), p)
+
+
+async def _cascade_delete_candidate_rows(db: AsyncSession, candidate_id: int) -> None:
+    """The actual cascade SQL, shared by the single-id and batch
+    endpoints below — no confirm check, no commit, just the deletes.
+    Caller is responsible for commit()."""
+    p = {"cid": candidate_id}
+    await db.execute(text(
+        "DELETE FROM tiq_client_feedback WHERE pipeline_entry_id IN "
+        "(SELECT id FROM tiq_pipeline_entries WHERE candidate_id = :cid)"), p)
+    await db.execute(text("DELETE FROM tiq_vendor_submissions WHERE candidate_id = :cid"), p)
+    await db.execute(text(
+        "DELETE FROM tiq_avatar_interview_questions WHERE session_id IN "
+        "(SELECT id FROM tiq_avatar_interview_sessions WHERE candidate_id = :cid "
+        "OR interview_id IN (SELECT id FROM tiq_interviews WHERE candidate_id = :cid))"), p)
+    await db.execute(text(
+        "DELETE FROM tiq_avatar_interview_sessions WHERE candidate_id = :cid "
+        "OR interview_id IN (SELECT id FROM tiq_interviews WHERE candidate_id = :cid)"), p)
+    await db.execute(text(
+        "DELETE FROM tiq_interview_feedback_links WHERE interview_id IN "
+        "(SELECT id FROM tiq_interviews WHERE candidate_id = :cid)"), p)
+    await db.execute(text(
+        "DELETE FROM tiq_interview_scorecards WHERE interview_id IN "
+        "(SELECT id FROM tiq_interviews WHERE candidate_id = :cid)"), p)
+    await db.execute(text("DELETE FROM tiq_interviews WHERE candidate_id = :cid"), p)
+    await db.execute(text(
+        "DELETE FROM tiq_timesheet_entries WHERE placement_id IN "
+        "(SELECT id FROM tiq_placements WHERE candidate_id = :cid)"), p)
+    await db.execute(text(
+        "DELETE FROM tiq_invoices WHERE placement_id IN "
+        "(SELECT id FROM tiq_placements WHERE candidate_id = :cid)"), p)
+    await db.execute(text(
+        "UPDATE tiq_placements SET replaces_placement_id = NULL WHERE replaces_placement_id IN "
+        "(SELECT id FROM tiq_placements WHERE candidate_id = :cid)"), p)
+    await db.execute(text("DELETE FROM tiq_placements WHERE candidate_id = :cid"), p)
+    await db.execute(text("DELETE FROM tiq_offers WHERE candidate_id = :cid"), p)
+    await db.execute(text(
+        "DELETE FROM tiq_pipeline_stage_history WHERE pipeline_entry_id IN "
+        "(SELECT id FROM tiq_pipeline_entries WHERE candidate_id = :cid)"), p)
+    await db.execute(text("DELETE FROM tiq_pipeline_entries WHERE candidate_id = :cid"), p)
+    await db.execute(text("DELETE FROM tiq_communication_log WHERE candidate_id = :cid"), p)
+    await db.execute(text("DELETE FROM tiq_applications WHERE candidate_id = :cid"), p)
+    await db.execute(text(
+        "DELETE FROM tiq_candidate_merge_log WHERE primary_candidate_id = :cid OR merged_candidate_id = :cid"), p)
+    await db.execute(text("UPDATE tiq_candidates SET merged_into_id = NULL WHERE merged_into_id = :cid"), p)
+    await db.execute(text("DELETE FROM tiq_candidate_pool_members WHERE candidate_id = :cid"), p)
+    await db.execute(text("DELETE FROM tiq_candidates WHERE id = :cid"), p)
+
+
+@router.delete("/requisitions/{req_id}/force-delete")
+async def force_delete_requisition(
+    req_id: int,
+    payload: ForceDeleteIn,
+    _: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Deletes a requisition and every real row referencing it — pipeline
+    entries, interviews, offers, placements, invoices, timesheets,
+    communication log, vendor submissions/assignments, avatar interview
+    sessions, and applications. Does NOT delete candidates themselves
+    (they may be linked to other requisitions too) — only the
+    requisition-scoped rows above and their downstream children."""
+    if payload.confirm != f"delete requisition {req_id}":
+        raise HTTPException(
+            400,
+            f'Confirmation text must be exactly: delete requisition {req_id}',
+        )
+
+    exists = (await db.execute(text("SELECT 1 FROM tiq_requisitions WHERE id = :rid"), {"rid": req_id})).scalar_one_or_none()
+    if not exists:
+        raise HTTPException(404, "Requisition not found")
+
+    await _cascade_delete_requisition_rows(db, req_id)
+    await db.commit()
+    return {"deleted": True, "requisition_id": req_id}
+
+
+@router.delete("/candidates/{candidate_id}/force-delete")
+async def force_delete_candidate(
+    candidate_id: int,
+    payload: ForceDeleteIn,
+    _: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Deletes a candidate and every real row referencing it — pipeline
+    entries, interviews, offers, placements, invoices, timesheets,
+    communication log, vendor submissions, avatar interview sessions,
+    applications, merge-log history, and pool memberships. Does NOT
+    touch the requisitions this candidate applied to."""
+    if payload.confirm != f"delete candidate {candidate_id}":
+        raise HTTPException(
+            400,
+            f'Confirmation text must be exactly: delete candidate {candidate_id}',
+        )
+
+    exists = (await db.execute(text("SELECT 1 FROM tiq_candidates WHERE id = :cid"), {"cid": candidate_id})).scalar_one_or_none()
+    if not exists:
+        raise HTTPException(404, "Candidate not found")
+
+    await _cascade_delete_candidate_rows(db, candidate_id)
+    await db.commit()
+    return {"deleted": True, "candidate_id": candidate_id}
+
+
+# ── Batch versions — used by the File Manager tab's multi-select "Force
+# Delete (cascade)" button. A single fixed confirm phrase covers the
+# whole selection (the UI itself shows a native confirm() dialog before
+# ever calling this), rather than requiring the exact id-per-row phrase
+# the single-record endpoints above need — that phrasing only makes
+# sense for a human typing one id at a time via /api/docs.
+
+class ForceDeleteBatchIn(BaseModel):
+    ids: List[int]
+    confirm: str
+
+
+@router.post("/requisitions/force-delete-batch")
+async def force_delete_requisitions_batch(
+    payload: ForceDeleteBatchIn,
+    _: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    if payload.confirm != "force delete requisitions":
+        raise HTTPException(400, 'Confirmation text must be exactly: force delete requisitions')
+    if not payload.ids:
+        raise HTTPException(400, "No requisition ids provided")
+
+    deleted, missing = [], []
+    for req_id in payload.ids:
+        exists = (await db.execute(text("SELECT 1 FROM tiq_requisitions WHERE id = :rid"), {"rid": req_id})).scalar_one_or_none()
+        if not exists:
+            missing.append(req_id)
+            continue
+        await _cascade_delete_requisition_rows(db, req_id)
+        deleted.append(req_id)
+    await db.commit()
+    return {"deleted_ids": deleted, "missing_ids": missing}
+
+
+@router.post("/candidates/force-delete-batch")
+async def force_delete_candidates_batch(
+    payload: ForceDeleteBatchIn,
+    _: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    if payload.confirm != "force delete candidates":
+        raise HTTPException(400, 'Confirmation text must be exactly: force delete candidates')
+    if not payload.ids:
+        raise HTTPException(400, "No candidate ids provided")
+
+    deleted, missing = [], []
+    for candidate_id in payload.ids:
+        exists = (await db.execute(text("SELECT 1 FROM tiq_candidates WHERE id = :cid"), {"cid": candidate_id})).scalar_one_or_none()
+        if not exists:
+            missing.append(candidate_id)
+            continue
+        await _cascade_delete_candidate_rows(db, candidate_id)
+        deleted.append(candidate_id)
+    await db.commit()
+    return {"deleted_ids": deleted, "missing_ids": missing}

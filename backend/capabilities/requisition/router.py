@@ -28,6 +28,7 @@ from .schemas import (
     ClientContactCreate, ClientContactUpdate, BulkIds,
 )
 from . import service
+from utils.storage import upload_file, get_file_bytes, delete_file
 
 router = APIRouter()
 
@@ -96,7 +97,7 @@ def _fmt_batch(r: Requisition, client_name: str, jd_title: str, application_coun
         "client_name": client_name,
         "jd_record_id": r.jd_record_id,
         "jd_title": jd_title,
-        "has_jd_file": bool(r.jd_file_blob),
+        "has_jd_file": bool(r.jd_file_blob or r.jd_file_key),
         "jd_file_filename": r.jd_file_filename or "",
         "hiring_manager_contact_id": r.hiring_manager_contact_id,
         "hiring_manager_name": r.hiring_manager_name or "",
@@ -361,9 +362,18 @@ async def upload_requisition_jd_file(
     content = await file.read()
     if not content:
         raise HTTPException(400, "The uploaded file is empty.")
-    r.jd_file_blob = content
+    ext = fname.rsplit(".", 1)[-1] if "." in fname else "bin"
+    mimetype = file.content_type or "application/octet-stream"
+    uploaded = await upload_file(db, "jds", org.owner_user_id, req_id, content, mimetype, ext)
+    if uploaded:
+        r.jd_file_key = uploaded["key"]
+        r.jd_file_size_bytes = uploaded["size_bytes"]
+        r.jd_file_blob = None
+    else:
+        r.jd_file_blob = content
+        r.jd_file_size_bytes = len(content)
     r.jd_file_filename = file.filename
-    r.jd_file_mimetype = file.content_type or "application/octet-stream"
+    r.jd_file_mimetype = mimetype
     r.updated_at = datetime.utcnow()
     await db.commit()
     await db.refresh(r)
@@ -379,10 +389,15 @@ async def download_requisition_jd_file(
     r = (await db.execute(select(Requisition).where(Requisition.id == req_id, Requisition.organisation_id == org.id))).scalar_one_or_none()
     if not r:
         raise HTTPException(404, "Requisition not found")
-    if not r.jd_file_blob:
+    if not r.jd_file_key and not r.jd_file_blob:
+        raise HTTPException(404, "No JD file attached to this requisition.")
+    data = r.jd_file_blob
+    if r.jd_file_key:
+        data = await get_file_bytes(db, r.jd_file_key) or r.jd_file_blob
+    if not data:
         raise HTTPException(404, "No JD file attached to this requisition.")
     return Response(
-        content=r.jd_file_blob,
+        content=data,
         media_type=r.jd_file_mimetype or "application/octet-stream",
         headers={"Content-Disposition": f'inline; filename="{r.jd_file_filename or "jd"}"'},
     )
@@ -396,9 +411,13 @@ async def delete_requisition_jd_file(
     r = (await db.execute(select(Requisition).where(Requisition.id == req_id, Requisition.organisation_id == org.id))).scalar_one_or_none()
     if not r:
         raise HTTPException(404, "Requisition not found")
+    if r.jd_file_key:
+        await delete_file(db, r.jd_file_key)
     r.jd_file_blob = None
+    r.jd_file_key = None
     r.jd_file_filename = None
     r.jd_file_mimetype = None
+    r.jd_file_size_bytes = None
     r.updated_at = datetime.utcnow()
     await db.commit()
     return {"deleted": True}
@@ -487,9 +506,18 @@ async def bulk_upload_requisition_jd_files(
                 })
                 continue
 
-        target.jd_file_blob = content
+        ext = fname.rsplit(".", 1)[-1].lower() if "." in fname else "bin"
+        mimetype = f.content_type or "application/octet-stream"
+        uploaded = await upload_file(db, "jds", org.owner_user_id, target.id, content, mimetype, ext)
+        if uploaded:
+            target.jd_file_key = uploaded["key"]
+            target.jd_file_size_bytes = uploaded["size_bytes"]
+            target.jd_file_blob = None
+        else:
+            target.jd_file_blob = content
+            target.jd_file_size_bytes = len(content)
         target.jd_file_filename = fname
-        target.jd_file_mimetype = f.content_type or "application/octet-stream"
+        target.jd_file_mimetype = mimetype
         target.updated_at = datetime.utcnow()
         attached.append({"filename": fname, "requisition_id": target.id, "title": target.title})
 

@@ -34,6 +34,10 @@ from models.models import User, UserAPIKey, JobLensSession, JobLensCandidate
 from utils.auth_utils import get_current_user
 from utils.credentials import get_credential, get_all_credentials, get_groq_model, ollama_enabled, DEFAULT_GROQ_MODEL
 from utils.sequencing import next_sequence_number
+from utils.storage import (
+    upload_video_and_get_key, get_video_bytes, get_video_presigned_url, delete_video,
+    upload_file, get_file_bytes, get_presigned_url, delete_file,
+)
 
 router = APIRouter()
 
@@ -843,42 +847,12 @@ def _fallback_resume_summary(cv_text: str) -> dict:
 
 
 # ── SMTP EMAIL SENDING ────────────────────────────────────────────────────────
-
-async def _get_smtp_config(user_id: int, db: AsyncSession) -> dict:
-    # SMTP is strictly private — never shared, never falls back to another
-    # user's or admin's credentials.
-    return await get_all_credentials(db, user_id, "smtp")
-
-
-def _send_email(smtp_cfg: dict, to_email: str, subject: str, html_body: str):
-    host = smtp_cfg.get("host")
-    port = int(smtp_cfg.get("port") or 587)
-    username = smtp_cfg.get("username")
-    password = smtp_cfg.get("password")
-    from_email = smtp_cfg.get("from_email") or username
-
-    if not (host and username and password and from_email):
-        raise HTTPException(
-            400,
-            "SMTP is not configured. Add credentials in Settings > API Keys "
-            "(service: smtp; key names: host, port, username, password, from_email)."
-        )
-
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"] = from_email
-    msg["To"] = to_email
-    msg.attach(MIMEText(html_body, "html"))
-
-    try:
-        with smtplib.SMTP(host, port, timeout=15) as server:
-            server.starttls()
-            server.login(username, password)
-            server.sendmail(from_email, [to_email], msg.as_string())
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(500, f"Failed to send email: {str(e)[:200]}")
+# Moved to utils/email_send.py so the Interview Management capability can
+# send Calendly-link emails through the exact same SMTP plumbing (Phone
+# Interview's "Send Calendly Link" / Interview Scheduling's "Email
+# Calendly Link"). Re-exported under the original private names here so
+# nothing else in this file has to change.
+from utils.email_send import get_smtp_config as _get_smtp_config, send_email as _send_email
 
 
 class SendInviteRequest(BaseModel):
@@ -1376,6 +1350,13 @@ async def run_joblens(
         else:
             resume_mimetype = "text/plain"
 
+        resume_ext = {"application/pdf": "pdf",
+                      "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+                      "application/msword": "doc"}.get(resume_mimetype, "txt")
+        resume_uploaded = await upload_file(
+            db, "resumes", current_user.id, session.id, content, resume_mimetype, resume_ext,
+        )
+
         return JobLensCandidate(
             session_id=session.id,
             name=info["name"],
@@ -1407,8 +1388,10 @@ async def run_joblens(
             interview_questions=questions,
             video_status="Pending",
             shortlisted=False,
-            resume_file_blob=content,
+            resume_file_blob=None if resume_uploaded else content,
             resume_file_mimetype=resume_mimetype,
+            resume_key=resume_uploaded["key"] if resume_uploaded else None,
+            resume_size_bytes=resume_uploaded["size_bytes"] if resume_uploaded else len(content),
             source_vendor_id=source_vendor_id,
             source_vendor_name=source_vendor_name,
             source_tracked_candidate_id=source_tracked_candidate_id,
@@ -1910,41 +1893,71 @@ async def send_invite(
     return {"sent": True}
 
 
+async def _get_or_create_joblens_interview(
+    db: AsyncSession, current_user: User, candidate: JobLensCandidate,
+    round_name: str, interview_type: str,
+):
+    """Finds this candidate's existing Interview Scheduling row for a
+    given round (Phone Interview / Video Interview), or creates one.
+    Deliberately ONE row per (joblens_candidate_id, interview_type) —
+    not a fresh row per action — so that "screening done", "phone link
+    sent", "phone status", "video link sent", "video status", etc. all
+    accumulate as state on a single trackable record instead of a
+    scattered activity log. Returns the Interview row (uncommitted
+    changes are the caller's to commit).
+    """
+    from capabilities.acquisition.service import get_or_create_default_organisation
+    from capabilities.interview.models import Interview
+    from capabilities.interview import service as interview_service
+
+    org = await get_or_create_default_organisation(db, current_user)
+    existing = (await db.execute(
+        select(Interview).where(
+            Interview.joblens_candidate_id == candidate.id,
+            Interview.interview_type == interview_type,
+        )
+    )).scalar_one_or_none()
+    if existing:
+        return existing
+
+    interview = Interview(
+        organisation_id=org.id, owner_user_id=current_user.id,
+        sequence_number=await interview_service.get_next_sequence(db, org.id),
+        candidate_id=None, joblens_candidate_id=candidate.id,
+        round_name=round_name, interview_type=interview_type,
+        status="Requested",
+    )
+    db.add(interview)
+    return interview
+
+
 async def _log_joblens_interview(
     db: AsyncSession, current_user: User, candidate: JobLensCandidate,
     round_name: str, interview_type: str, notes: str = "",
 ) -> None:
-    """Registers a row in Interview Scheduling for a JobLens/CandidateLens
-    action — Video Interview's 'Send Interview Invite' and Phone
-    Interview's 'Candidate reached by phone' both call this. JobLens
-    candidates live in tiq_joblens_candidates, not the Talent Pool's
-    tiq_candidates that Interview.candidate_id has always pointed at, so
-    this sets joblens_candidate_id instead (see that column's docstring
-    in capabilities/interview/models.py) and skips create_interview's
-    full endpoint — that path validates a Talent Pool candidate/
-    requisition, builds an interviewers list, and can fire a
-    self-schedule/approval flow, none of which applies here. This is
-    deliberately just "log that this happened", not a full scheduling
-    workflow.
+    """Registers/updates a row in Interview Scheduling for a JobLens/
+    CandidateLens action — Video Interview's 'Send Interview Invite' and
+    Phone Interview's 'Candidate reached by phone' both call this.
+    JobLens candidates live in tiq_joblens_candidates, not the Talent
+    Pool's tiq_candidates that Interview.candidate_id has always pointed
+    at, so this sets joblens_candidate_id instead (see that column's
+    docstring in capabilities/interview/models.py) and skips
+    create_interview's full endpoint — that path validates a Talent Pool
+    candidate/requisition, builds an interviewers list, and can fire a
+    self-schedule/approval flow, none of which applies here.
+
+    Upserts (see _get_or_create_joblens_interview) rather than always
+    inserting, so repeated actions against the same candidate/round
+    update one tracking row instead of piling up duplicates.
 
     Best-effort: never raises. A failure here shouldn't block the actual
     invite/contact action it's just a side-effect record of.
     """
     try:
-        from capabilities.acquisition.service import get_or_create_default_organisation
-        from capabilities.interview.models import Interview
-        from capabilities.interview import service as interview_service
-
-        org = await get_or_create_default_organisation(db, current_user)
-        interview = Interview(
-            organisation_id=org.id, owner_user_id=current_user.id,
-            sequence_number=await interview_service.get_next_sequence(db, org.id),
-            candidate_id=None, joblens_candidate_id=candidate.id,
-            round_name=round_name, interview_type=interview_type,
-            status="Requested",
-            notes=notes,
-        )
-        db.add(interview)
+        interview = await _get_or_create_joblens_interview(db, current_user, candidate, round_name, interview_type)
+        if notes:
+            interview.notes = notes
+        interview.updated_at = datetime.utcnow()
         await db.commit()
     except Exception:
         await db.rollback()
@@ -1997,6 +2010,66 @@ async def mark_phone_contacted(
     else:
         await db.commit()
     return {"phone_screening_status": c.phone_screening_status}
+
+
+class SendCalendlyLinkRequest(BaseModel):
+    to_email: str = ""   # defaults to the candidate's own email if blank
+    subject: str = "Schedule your phone screening interview"
+    body_html: str = ""  # defaults to a standard message wrapping the link if blank
+
+
+@router.post("/candidates/{candidate_id}/phone-interview/send-calendly-link")
+async def send_phone_calendly_link(
+    candidate_id: int, payload: SendCalendlyLinkRequest,
+    current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    """Phone Interview page action: generates the recruiter's Calendly
+    booking link (same credentials as Interview Scheduling's Calendly
+    integration — Settings -> API Keys -> Calendly) and emails it to the
+    candidate so they can book their own initial HR screening call.
+
+    Registers/updates the same Interview Scheduling row this candidate's
+    other Phone Interview actions use (see _get_or_create_joblens_interview)
+    so "phone interview schedule link sent" and the resulting booking are
+    both visible there, not just on this page.
+    """
+    cr = await db.execute(select(JobLensCandidate).where(JobLensCandidate.id == candidate_id))
+    c = cr.scalar_one_or_none()
+    if not c:
+        raise HTTPException(404, "Candidate not found")
+
+    to_email = (payload.to_email or c.email or "").strip()
+    if not to_email:
+        raise HTTPException(400, "This candidate has no email on file — nowhere to send the link.")
+
+    from capabilities.interview import service as interview_service
+
+    creds = await interview_service.get_calendly_credentials(db, current_user.id)
+    if creds["booking_url"]:
+        booking_url = creds["booking_url"]
+    elif creds["api_key"] and creds["event_type_uri"]:
+        booking_url = await interview_service.create_calendly_single_use_link(creds["api_key"], creds["event_type_uri"])
+    else:
+        raise HTTPException(400, "Set up Calendly under Settings -> API Keys first — either paste your Calendly booking link, or a Personal Access Token + Event Type.")
+
+    body_html = payload.body_html.strip() or (
+        f"<p>Hi {c.name or 'there'},</p>"
+        f"<p>Thanks for your interest — we'd like to set up a quick initial phone screening interview with you.</p>"
+        f"<p>Please use the link below to pick a time that works for you:</p>"
+        f"<p><a href=\"{booking_url}\">{booking_url}</a></p>"
+        f"<p>Looking forward to speaking with you.</p>"
+    )
+    smtp_cfg = await _get_smtp_config(current_user.id, db)
+    _send_email(smtp_cfg, to_email, payload.subject.strip() or "Schedule your phone screening interview", body_html)
+
+    interview = await _get_or_create_joblens_interview(db, current_user, c, round_name="Phone Screening", interview_type="Phone Interview")
+    interview.calendly_scheduling_url = booking_url
+    if interview.status not in ("Scheduled", "Completed"):
+        interview.status = "Requested"
+    interview.updated_at = datetime.utcnow()
+    await db.commit()
+
+    return {"sent": True, "calendly_scheduling_url": booking_url, "interview_id": interview.id}
 
 
 CANDIDATE_STATUSES = ["Qualified", "Review", "Not Qualified"]
@@ -2294,13 +2367,26 @@ async def _run_video_analysis(candidate_id: int):
                 await db.commit()
                 return
 
-            if not c.video_blob:
+            if not c.video_key and not c.video_blob:
                 c.video_analysis_status = "Failed"
                 c.video_analysis = {"error": "No video stored for this candidate."}
                 await db.commit()
                 return
 
-            transcript = _transcribe_video(c.video_blob, c.video_mimetype, groq_key)
+            # S3-backed video (video_key) takes priority; video_blob is
+            # only read for legacy rows or if S3 isn't configured.
+            video_bytes = None
+            if c.video_key:
+                video_bytes = await get_video_bytes(db, c.video_key)
+            if video_bytes is None:
+                video_bytes = c.video_blob
+            if not video_bytes:
+                c.video_analysis_status = "Failed"
+                c.video_analysis = {"error": "Video could not be retrieved from storage."}
+                await db.commit()
+                return
+
+            transcript = _transcribe_video(video_bytes, c.video_mimetype, groq_key)
             if not transcript:
                 c.video_analysis_status = "Failed"
                 c.video_analysis = {"error": "Transcription returned no speech content."}
@@ -2342,12 +2428,23 @@ async def upload_interview_video(
     if not c:
         raise HTTPException(404, "Candidate not found")
     content = await file.read()
-    c.video_blob = content
-    c.video_mimetype = file.content_type or "video/webm"
+
+    # Prefer S3 (transcoded + uploaded); fall back to the old in-Postgres
+    # blob if S3 isn't configured yet, so upload never just breaks.
+    uploaded = await upload_video_and_get_key(db, current_user.id, candidate_id, content, file.content_type)
+    if uploaded:
+        c.video_key = uploaded["key"]
+        c.video_mimetype = uploaded["mimetype"]
+        c.video_size_bytes = uploaded["size_bytes"]
+        c.video_blob = None
+    else:
+        c.video_blob = content
+        c.video_mimetype = file.content_type or "video/webm"
+        c.video_size_bytes = len(content)
     c.video_analysis_status = "Pending"
     await db.commit()
     background_tasks.add_task(_run_video_analysis, candidate_id)
-    return {"status": "saved", "size_bytes": len(content)}
+    return {"status": "saved", "size_bytes": c.video_size_bytes, "storage": "s3" if uploaded else "database"}
 
 
 @router.post("/candidates/{candidate_id}/reanalyze-video")
@@ -2367,7 +2464,7 @@ async def reanalyze_video(
     c = cr.scalar_one_or_none()
     if not c:
         raise HTTPException(404, "Candidate not found")
-    if not c.video_blob:
+    if not c.video_key and not c.video_blob:
         raise HTTPException(400, "No video stored for this candidate yet.")
     c.video_analysis_status = "Pending"
     await db.commit()
@@ -2394,9 +2491,14 @@ async def download_interview_video(
     # view this candidate's video — never any other user.
     if session.user_id != current_user.id and current_user.role != "admin":
         raise HTTPException(404, "Candidate not found")
-    if not c.video_blob:
+    if not c.video_key and not c.video_blob:
         raise HTTPException(404, "No video recorded for this candidate")
-    return Response(content=c.video_blob, media_type=c.video_mimetype or "video/webm")
+    data = c.video_blob
+    if c.video_key:
+        data = await get_video_bytes(db, c.video_key) or c.video_blob
+    if not data:
+        raise HTTPException(404, "No video recorded for this candidate")
+    return Response(content=data, media_type=c.video_mimetype or "video/webm")
 
 
 @router.post("/candidates/{candidate_id}/video-view-token")
@@ -2425,8 +2527,21 @@ async def create_video_view_token(
     c, session = row
     if session.user_id != current_user.id and current_user.role != "admin":
         raise HTTPException(404, "Candidate not found")
-    if not c.video_blob:
+    if not c.video_key and not c.video_blob:
         raise HTTPException(404, "No video recorded for this candidate")
+
+    # S3-backed video: hand back a presigned URL directly. Range requests
+    # and seeking are then handled natively by R2/S3, not proxied through
+    # our own server at all — no need for our own token/stream dance.
+    if c.video_key:
+        url = await get_video_presigned_url(db, c.video_key, expires_in=300)
+        if url:
+            return {"url": url}
+        # Presign failed (e.g. S3 briefly unreachable) — fall through to
+        # the legacy blob path below only if a blob also exists.
+        if not c.video_blob:
+            raise HTTPException(502, "Video storage is temporarily unavailable — try again shortly.")
+
     token = _jwt.encode(
         {"vcid": candidate_id, "exp": datetime.utcnow() + timedelta(minutes=5)},
         SECRET_KEY, algorithm=ALGORITHM,
@@ -2459,7 +2574,22 @@ async def stream_interview_video(
 
     cr = await db.execute(select(JobLensCandidate).where(JobLensCandidate.id == candidate_id))
     c = cr.scalar_one_or_none()
-    if not c or not c.video_blob:
+    if not c:
+        raise HTTPException(404, "No video recorded for this candidate")
+
+    # This proxy endpoint only serves the legacy blob-in-Postgres path.
+    # S3-backed videos (video_key) are served via a presigned URL handed
+    # out directly by /video-view-token and never reach here in normal
+    # operation — but if an old cached link does land here, redirect to
+    # a fresh presigned URL instead of 404ing.
+    if c.video_key and not c.video_blob:
+        url = await get_video_presigned_url(db, c.video_key, expires_in=300)
+        if url:
+            from fastapi.responses import RedirectResponse
+            return RedirectResponse(url, status_code=302)
+        raise HTTPException(502, "Video storage is temporarily unavailable — try again shortly.")
+
+    if not c.video_blob:
         raise HTTPException(404, "No video recorded for this candidate")
 
     data = c.video_blob
@@ -2511,10 +2641,15 @@ async def download_resume_file(
     c, session = row
     if session.user_id != current_user.id and current_user.role != "admin":
         raise HTTPException(404, "Candidate not found")
-    if not c.resume_file_blob:
+    if not c.resume_key and not c.resume_file_blob:
+        raise HTTPException(404, "No resume file stored for this candidate")
+    data = c.resume_file_blob
+    if c.resume_key:
+        data = await get_file_bytes(db, c.resume_key) or c.resume_file_blob
+    if not data:
         raise HTTPException(404, "No resume file stored for this candidate")
     return Response(
-        content=c.resume_file_blob,
+        content=data,
         media_type=c.resume_file_mimetype or "application/octet-stream",
         headers={"Content-Disposition": f'inline; filename="{c.filename or "resume"}"'},
     )
@@ -2643,20 +2778,32 @@ async def public_upload_interview_video(
     interview token so the candidate (no login) can submit their recorded
     video directly from the public interview page."""
     cr = await db.execute(
-        select(JobLensCandidate).where(JobLensCandidate.interview_token == token)
+        select(JobLensCandidate, JobLensSession)
+        .join(JobLensSession, JobLensCandidate.session_id == JobLensSession.id)
+        .where(JobLensCandidate.interview_token == token)
     )
-    c = cr.scalar_one_or_none()
-    if not c:
+    row = cr.first()
+    if not row:
         raise HTTPException(404, "This interview link is invalid or has expired.")
+    c, session = row
     if not c.privacy_accepted_at:
         raise HTTPException(403, "The privacy notice must be accepted before submitting interview video.")
     content = await file.read()
-    c.video_blob = content
-    c.video_mimetype = file.content_type or "video/webm"
+
+    uploaded = await upload_video_and_get_key(db, session.user_id, c.id, content, file.content_type)
+    if uploaded:
+        c.video_key = uploaded["key"]
+        c.video_mimetype = uploaded["mimetype"]
+        c.video_size_bytes = uploaded["size_bytes"]
+        c.video_blob = None
+    else:
+        c.video_blob = content
+        c.video_mimetype = file.content_type or "video/webm"
+        c.video_size_bytes = len(content)
     c.video_analysis_status = "Pending"
     await db.commit()
     background_tasks.add_task(_run_video_analysis, c.id)
-    return {"status": "saved", "size_bytes": len(content)}
+    return {"status": "saved", "size_bytes": c.video_size_bytes, "storage": "s3" if uploaded else "database"}
 
 
 @router.get("/sessions/{session_id}/export")
