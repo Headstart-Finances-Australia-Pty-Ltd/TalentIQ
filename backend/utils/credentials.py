@@ -47,7 +47,14 @@ def ollama_enabled() -> bool:
 # "interview" holds platform-wide CandidateLens video-interview settings
 # (answer time per question, TTS voice) — admin-configured, not a personal
 # credential, so it belongs in the same shareable bucket as groq/adzuna.
-SHAREABLE_SERVICES = {"groq", "ollama", "adzuna", "interview"}
+# "database" and "s3" hold platform infrastructure credentials (the
+# Xata Postgres connection string on record, and the object-storage
+# bucket used for video/audio) — see Admin Console > API Keys. These
+# are inherently
+# platform-wide (there's one database and one bucket for the whole
+# deployment, not one per user), so they're admin-managed only, same as
+# groq/adzuna, with no notion of a private per-user override.
+SHAREABLE_SERVICES = {"groq", "ollama", "adzuna", "interview", "database", "s3"}
 
 # Fallback ONLY — used when a user (and no admin-shared global) has set a
 # Groq model. Groq periodically deprecates models (llama3-70b-8192, then
@@ -92,6 +99,25 @@ async def get_credential(
         )
     )
     return r.scalar_one_or_none()
+
+
+async def get_global_credentials(db: AsyncSession, service: str) -> dict:
+    """Pure platform-wide lookup — {key_name: key_value} for every
+    global row under a service, with no per-user overlay. For
+    infra-only services (database, s3) there's no such thing as a
+    user's own override, and callers here are often background code
+    with no request-bound user_id to pass (e.g. a storage helper used
+    from a script or a queued job) — this avoids needing to fake one.
+    Restricted to SHAREABLE_SERVICES, same as everywhere else."""
+    if service not in SHAREABLE_SERVICES:
+        return {}
+    r = await db.execute(
+        select(UserAPIKey.key_name, UserAPIKey.key_value).where(
+            UserAPIKey.is_global.is_(True),
+            UserAPIKey.service == service,
+        )
+    )
+    return {k: v for k, v in r.all()}
 
 
 async def get_all_credentials(db: AsyncSession, user_id: int, service: str) -> dict:

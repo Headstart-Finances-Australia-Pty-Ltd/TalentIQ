@@ -31,6 +31,10 @@ httpx==0.28.1
 pandas==2.2.3
 openpyxl==3.1.5
 
+# ── Object storage (S3-compatible: AWS S3, Cloudflare R2, etc.) ────
+# See utils/storage.py + Admin Console > API Keys.
+boto3==1.35.74
+
 # ── Document parsing ───────────────────────────────────────
 PyMuPDF==1.25.1
 docx2txt==0.8

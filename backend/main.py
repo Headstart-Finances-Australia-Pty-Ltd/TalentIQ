@@ -47,7 +47,20 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"  [!] Migration warning: {e}")
 
-    print("  Creating TalentIQ tables (tiq_*) in neondb...")
+    print("  Bootstrapping SECRET_KEY...")
+    try:
+        from utils.auth_utils import bootstrap_secret_key
+        async with AsyncSessionLocal() as db:
+            await bootstrap_secret_key(db)
+        print("  [OK] SECRET_KEY ready.")
+    except Exception as e:
+        # Deliberately NOT swallowed into a generic warning — a real
+        # login is impossible without this, so a loud failure here beats
+        # a confusing 500 on the first login attempt.
+        print(f"  [!] SECRET_KEY bootstrap FAILED: {e}")
+        raise
+
+    print("  Creating TalentIQ tables (tiq_*)...")
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
