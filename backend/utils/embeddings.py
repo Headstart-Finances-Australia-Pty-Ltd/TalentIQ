@@ -20,12 +20,23 @@ environment doesn't retry a slow, doomed model load on every single
 request.
 """
 from typing import List, Optional
-import threading
+import os, threading
 
 _model = None
 _load_attempted = False
 _load_lock = threading.Lock()
 _EMBED_DIM = 384  # all-MiniLM-L6-v2's output size — must match models.SkillTaxonomy.embedding's Vector(384)
+
+# Opt-out switch for memory-constrained deployments: loading
+# sentence-transformers pulls in PyTorch + the model weights, which can
+# add several hundred MB of RSS well beyond the raw ~80MB weight file —
+# enough to OOM-kill a container on a lean memory plan (exit code 137,
+# "Killed" in the logs, no Python traceback since the OS terminates the
+# process directly). Setting DISABLE_LOCAL_EMBEDDINGS=true skips the
+# import/load entirely and every caller falls back to TF-IDF matching,
+# exactly as if the load had failed — same code path as the except
+# branch below, just chosen deliberately instead of discovered by crashing.
+_DISABLED = os.getenv("DISABLE_LOCAL_EMBEDDINGS", "").strip().lower() in ("1", "true", "yes")
 
 
 def _get_model():
@@ -36,6 +47,10 @@ def _get_model():
         if _load_attempted:  # re-check inside the lock (another thread may have just finished)
             return _model
         _load_attempted = True
+        if _DISABLED:
+            print("  [!] Local embedding model disabled via DISABLE_LOCAL_EMBEDDINGS — using TF-IDF matching.")
+            _model = None
+            return _model
         try:
             from sentence_transformers import SentenceTransformer
             _model = SentenceTransformer("all-MiniLM-L6-v2")
@@ -43,9 +58,13 @@ def _get_model():
         except Exception as e:
             # Deliberately broad: covers the package not being installed,
             # no network route to download the weights on first use, a
-            # corrupted cache, out-of-memory, etc. — all of these mean
-            # "embeddings aren't available right now", handled identically
-            # by every caller (fall back to TF-IDF).
+            # corrupted cache, a Python-level MemoryError, etc. — all of
+            # these mean "embeddings aren't available right now", handled
+            # identically by every caller (fall back to TF-IDF). NOTE:
+            # this does NOT cover a container-level OOM-kill (SIGKILL /
+            # exit 137) — that terminates the process before any except
+            # clause can run. If that's what's happening, use
+            # DISABLE_LOCAL_EMBEDDINGS instead of relying on this catching it.
             print(f"  [!] Local embedding model unavailable, falling back to TF-IDF matching — {type(e).__name__}: {str(e)[:200]}")
             _model = None
     return _model
