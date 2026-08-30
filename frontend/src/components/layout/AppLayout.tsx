@@ -104,10 +104,10 @@ export default function AppLayout() {
             <LayoutDashboard size={16} />Dashboard
           </NavLink>
 
-          <div className="tiq-nav-section">Recruitment Capabilities</div>
+          <div className="tiq-nav-section">Recruitment Modules</div>
           {CORE_PIPELINE_CAPABILITIES.map((capability) => <CapabilityGroup key={capability.name} capability={capability} moduleToggles={moduleToggles} />)}
 
-          <div className="tiq-nav-section">Supporting Capabilities</div>
+          <div className="tiq-nav-section">Supporting Modules</div>
           {SUPPORTING_CAPABILITIES.map((capability) => <CapabilityGroup key={capability.name} capability={capability} moduleToggles={moduleToggles} />)}
 
           {/* Job Seeker Tools live outside CAPABILITIES entirely (they're
