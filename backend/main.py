@@ -98,6 +98,26 @@ app = FastAPI(
     redoc_url="/api/redoc",
 )
 
+# ── Legacy domain redirect ──────────────────────────────────────────
+# Redirect all requests from talentiq.prama-ai.com to tiqs.ai.
+# Path and query string are preserved.
+@app.middleware("http")
+async def redirect_legacy_domain(request: Request, call_next):
+    host = request.headers.get("host", "").split(":")[0].lower()
+
+    if host == "talentiq.prama-ai.com":
+        target = f"https://tiqs.ai{request.url.path}"
+
+        if request.url.query:
+            target += f"?{request.url.query}"
+
+        return RedirectResponse(
+            url=target,
+            status_code=301
+        )
+
+    return await call_next(request)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
