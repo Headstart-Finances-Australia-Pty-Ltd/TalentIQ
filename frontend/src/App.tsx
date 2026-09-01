@@ -2,6 +2,8 @@ import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AuthProvider, useAuth } from "./hooks/useAuth";
 import LandingPage    from "./pages/LandingPage";
+import PricingPage    from "./pages/PricingPage";
+import CheckoutResultPage from "./pages/CheckoutResultPage";
 import TermsOfUsePage from "./pages/TermsOfUsePage";
 import PrivacyPolicyPage from "./pages/PrivacyPolicyPage";
 import DataSecurityPage from "./pages/DataSecurityPage";
@@ -12,11 +14,8 @@ import JobHuntPage    from "./pages/JobHuntPage";
 import JobIntelPage   from "./pages/JobIntelPage";
 import LinkLensPage   from "./pages/LinkLensPage";
 import CVIntelPage    from "./pages/CVIntelPage";
-import ResumeScreeningPage from "./pages/ResumeScreeningPage";
-import PhoneInterviewPage  from "./pages/PhoneInterviewPage";
-import VideoInterviewPage  from "./pages/VideoInterviewPage";
-import FinalDecisionPage   from "./pages/FinalDecisionPage";
-import JDCreatorPage  from "./pages/JDCreatorPage";
+import ScreeningPage       from "./pages/ScreeningPage";
+import JobAdsPage     from "./pages/JobAdsPage";
 import PublicInterviewPage from "./pages/PublicInterviewPage";
 import CareerApplyPage    from "./pages/CareerApplyPage";
 import CandidatePortalPage from "./pages/CandidatePortalPage";
@@ -24,6 +23,7 @@ import RequisitionsPage    from "./pages/RequisitionsPage";
 import HiringManagerViewPage from "./pages/HiringManagerViewPage";
 import AcquisitionPage    from "./pages/AcquisitionPage";
 import PlacementsPage     from "./pages/PlacementsPage";
+import InterviewPage      from "./pages/InterviewPage";
 import PortalsPage        from "./pages/PortalsPage";
 import CommunicationPage  from "./pages/CommunicationPage";
 import CommercialsPage    from "./pages/CommercialsPage";
@@ -65,6 +65,8 @@ export default function App() {
         <BrowserRouter>
           <Routes>
             <Route path="/" element={<LandingPage />} />
+            <Route path="/pricing" element={<PricingPage />} />
+            <Route path="/billing/checkout-result" element={<CheckoutResultPage />} />
             <Route path="/terms" element={<TermsOfUsePage />} />
             <Route path="/privacy" element={<PrivacyPolicyPage />} />
             <Route path="/data-security" element={<DataSecurityPage />} />
@@ -85,27 +87,38 @@ export default function App() {
               <Route path="jobintel"   element={<JobIntelPage />} />
               <Route path="linklens"   element={<LinkLensPage />} />
               <Route path="cvintel"    element={<CVIntelPage />} />
-              <Route path="jdcreator"  element={<JDCreatorPage />} />
-              <Route path="resumescreening" element={<ResumeScreeningPage />} />
-              <Route path="phoneinterview"  element={<PhoneInterviewPage />} />
-              <Route path="videointerview"  element={<VideoInterviewPage />} />
-              <Route path="finaldecision"   element={<FinalDecisionPage />} />
+              <Route path="jdcreator"  element={<JobAdsPage />} />
+              <Route path="jobads"    element={<JobAdsPage />} />
+              {/* Resume Screening/Phone Interview/Video Interview/Screening
+                  Decision all render the shared ScreeningPage (its own tab
+                  bar) — same pattern as Interview below. */}
+              <Route path="resumescreening" element={<ScreeningPage />} />
+              <Route path="phoneinterview"  element={<ScreeningPage />} />
+              <Route path="videointerview"  element={<ScreeningPage />} />
+              <Route path="finaldecision"   element={<ScreeningPage />} />
               <Route path="acquisition" element={<AcquisitionPage />} />
               <Route path="requisitions"  element={<RequisitionsPage />} />
+              <Route path="hiring-managers"  element={<RequisitionsPage />} />
               {/* interviews / pipeline kept as standalone routes for
                   anyone with them bookmarked or deep-linked — the
                   sidebar now points at placements instead, which has
                   both as tabs alongside the new Onboarding tab. */}
-              {/* All three routes render the same PlacementsPage — see
-                  that component and capabilities.ts's Phase 5 for why:
-                  three separate sidebar entries, one shared page/tab
-                  bar, so which one you land on tab-wise depends on
-                  which sidebar link was actually clicked. */}
-              <Route path="interviews"    element={<PlacementsPage />} />
-              <Route path="pipeline"      element={<PlacementsPage />} />
-              <Route path="onboarding"    element={<PlacementsPage />} />
-              <Route path="placements"    element={<PlacementsPage />} />
+              {/* Interview Scheduling/Panel Interviewers/Interview Panel/
+                  Interview Decision all render the new InterviewPage
+                  (its own tab bar); Pipeline/Onboarding render the
+                  (now-trimmed) PlacementsPage. */}
+              <Route path="interviews"                          element={<InterviewPage />} />
+              <Route path="interview"                           element={<InterviewPage />} />
+              <Route path="interview/panel-interviewers"        element={<InterviewPage />} />
+              <Route path="interview/interview-panel"           element={<InterviewPage />} />
+              <Route path="interview/scheduling"                element={<InterviewPage />} />
+              <Route path="interview/decision"                  element={<InterviewPage />} />
+              <Route path="pipeline"            element={<PlacementsPage />} />
+              <Route path="onboarding"          element={<PlacementsPage />} />
+              <Route path="placements"          element={<PlacementsPage />} />
               <Route path="portals"       element={<PortalsPage />} />
+              <Route path="client-portal" element={<PortalsPage />} />
+              <Route path="vendor-portal" element={<PortalsPage />} />
               <Route path="communication" element={<CommunicationPage />} />
               <Route path="commercials"   element={<CommercialsPage />} />
               <Route path="reporting"     element={<GovernancePage />} />

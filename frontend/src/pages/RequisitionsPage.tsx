@@ -1,11 +1,14 @@
 import { useEffect, useRef, useState } from "react";
+import { useLocation } from "react-router-dom";
 import {
   ClipboardList, Plus, X, Check, Link2, ChevronRight,
-  AlertTriangle, Copy, Upload, Trash2, Building2, UserPlus, Eye,
+  AlertTriangle, Copy, Upload, Trash2, Building2, UserPlus, Eye, Users, Search,
 } from "lucide-react";
 import { requisitionApi, candidateTrackApi, pipelineApi, acquisitionApi, api } from "../lib/api";
 import { ResizableFilterHeader } from "../components/ResizableFilterHeader";
 import CsvImportModal from "../components/candidatetrack/CsvImportModal";
+import SearchableSelect from "../components/SearchableSelect";
+import HiringManagersPage from "./HiringManagersPage";
 
 async function openBlobInNewTab(url: string) {
   try {
@@ -320,10 +323,28 @@ export default function RequisitionsPage() {
   // One filter value per column, keyed by column id — replaces the old
   // status-only server-side filter with the same client-side pattern
   // used for every other column now that they all filter the same way.
-  const [colFilters, setColFilters] = useState<Record<string, string>>({});
-  const setColFilter = (key: string, value: string) => setColFilters((f) => ({ ...f, [key]: value }));
+  const [colFilters, setColFilters] = useState<Record<string, Set<string>>>({});
+  const location = useLocation();
+  const [pageTab, setPageTab] = useState<"jobs" | "hiring-managers">(
+    location.pathname === "/app/hiring-managers" ? "hiring-managers" : "jobs"
+  );
+  const [globalSearch, setGlobalSearch] = useState("");
+  const setColFilter = (key: string, next: Set<string> | undefined) => setColFilters((f) => {
+    if (!next) { const n = { ...f }; delete n[key]; return n; }
+    return { ...f, [key]: next };
+  });
   const [colWidths, setColWidths] = useState<Record<string, number>>(DEFAULT_COL_WIDTHS);
   const setColWidth = (key: string, w: number) => setColWidths((prev) => ({ ...prev, [key]: w }));
+  // Click-to-sort, same column keys as the filters above — numeric
+  // columns (Req #, Vacancies, Applications) sort numerically, everything
+  // else alphabetically.
+  const [sort, setSort] = useState<{ col: string; dir: "asc" | "desc" } | null>(null);
+  const toggleSort = (col: string) => setSort((prev) => {
+    if (!prev || prev.col !== col) return { col, dir: "asc" };
+    if (prev.dir === "asc") return { col, dir: "desc" };
+    return null;
+  });
+  const NUMERIC_REQ_COLS = new Set(["sequence_number", "vacancy_count", "application_count"]);
 
   // ── Applicants popup — who's actually applied to this role ─────────
   const [applicantsReqId, setApplicantsReqId] = useState<number | null>(null);
@@ -430,7 +451,7 @@ export default function RequisitionsPage() {
   const [selectedClients, setSelectedClients] = useState<Set<number>>(new Set());
   const [clientFormState, setClientFormState] = useState<null | { mode: "create" } | { mode: "edit"; client: any }>(null);
   const [clientForm, setClientForm] = useState({
-    name: "", address: "", abn: "", area_of_work: "",
+    name: "", address: "", abn: "", phone: "", email: "", area_of_work: "",
     contact_id: null as number | null, contact_name: "", contact_title: "", contact_email: "", contact_phone: "",
   });
   const [clientFormSaving, setClientFormSaving] = useState(false);
@@ -665,7 +686,7 @@ export default function RequisitionsPage() {
   // other table in the app (candidates, requisitions): row checkboxes,
   // select-all, per-row edit/delete, and bulk delete.
   const openAddClient = () => {
-    setClientForm({ name: "", address: "", abn: "", area_of_work: "", contact_id: null, contact_name: "", contact_title: "", contact_email: "", contact_phone: "" });
+    setClientForm({ name: "", address: "", abn: "", phone: "", email: "", area_of_work: "", contact_id: null, contact_name: "", contact_title: "", contact_email: "", contact_phone: "" });
     setClientFormState({ mode: "create" });
     setClientFormError("");
   };
@@ -678,7 +699,7 @@ export default function RequisitionsPage() {
     const existingContact = contacts.find((ct: any) => ct.client_id === c.id && ct.is_primary)
       || contacts.find((ct: any) => ct.client_id === c.id);
     setClientForm({
-      name: c.name || "", address: c.address || "", abn: c.abn || "", area_of_work: c.area_of_work || "",
+      name: c.name || "", address: c.address || "", abn: c.abn || "", phone: c.phone || "", email: c.email || "", area_of_work: c.area_of_work || "",
       contact_id: existingContact?.id ?? null,
       contact_name: existingContact?.name || "", contact_title: existingContact?.title || "",
       contact_email: existingContact?.email || "", contact_phone: existingContact?.phone || "",
@@ -691,7 +712,7 @@ export default function RequisitionsPage() {
     setClientFormSaving(true);
     setClientFormError("");
     try {
-      const clientPayload = { name: clientForm.name, address: clientForm.address, abn: clientForm.abn, area_of_work: clientForm.area_of_work };
+      const clientPayload = { name: clientForm.name, address: clientForm.address, abn: clientForm.abn, phone: clientForm.phone, email: clientForm.email, area_of_work: clientForm.area_of_work };
       const hasContactInput = clientForm.contact_name.trim() || clientForm.contact_email.trim() || clientForm.contact_phone.trim();
       let savedClient: any;
 
@@ -813,28 +834,52 @@ export default function RequisitionsPage() {
     }
   };
   const colOptions = (key: string) => Array.from(new Set(requisitions.map((r) => getColValue(r, key)))).sort();
-  const filteredRequisitions = requisitions.filter((r) =>
-    Object.entries(colFilters).every(([key, val]) => !val || getColValue(r, key) === val)
-  );
+  const searchableKeys = ["sequence_number", "title", "client", "priority", "vacancy_count", "reason_for_hire", "employment_type", "location", "salary_range"];
+  const filteredRequisitions = requisitions.filter((r) => {
+    if (!Object.entries(colFilters).every(([key, val]) => !val || val.has(getColValue(r, key)))) return false;
+    if (globalSearch.trim()) {
+      const q = globalSearch.trim().toLowerCase();
+      const haystack = searchableKeys.map((k) => getColValue(r, k)).join(" ").toLowerCase();
+      if (!haystack.includes(q)) return false;
+    }
+    return true;
+  });
+  if (sort) {
+    const { col, dir } = sort;
+    filteredRequisitions.sort((a, b) => {
+      let cmp: number;
+      if (NUMERIC_REQ_COLS.has(col)) {
+        cmp = (Number(getColValue(a, col)) || 0) - (Number(getColValue(b, col)) || 0);
+      } else {
+        cmp = getColValue(a, col).localeCompare(getColValue(b, col));
+      }
+      return dir === "asc" ? cmp : -cmp;
+    });
+  }
 
   return (
     <div className="tiq-content">
       <div className="tiq-page-header">
         <div>
-          <div className="tiq-page-title">Requisitions</div>
+          <div className="tiq-page-title">Jobs</div>
           <div className="tiq-page-sub">A job doesn't exist until it's a structured, approved, owned object.</div>
         </div>
       </div>
+
+      <div className="tiq-tabs" style={{ marginTop: 12, marginBottom: 16 }}>
+        <button className={`tiq-tab${pageTab === "jobs" ? " active" : ""}`} onClick={() => setPageTab("jobs")}>
+          <ClipboardList size={12} style={{ display: "inline", marginRight: 6 }} /> Jobs
+        </button>
+        <button className={`tiq-tab${pageTab === "hiring-managers" ? " active" : ""}`} onClick={() => setPageTab("hiring-managers")}>
+          <Users size={12} style={{ display: "inline", marginRight: 6 }} /> Hiring Managers
+        </button>
+      </div>
+
+      {pageTab === "hiring-managers" ? (
+        <HiringManagersPage embedded />
+      ) : (
+      <>
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-start", marginTop: 12, marginBottom: 8 }}>
-        <button className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={() => setShowClientsTable((v) => !v)}>
-          <Building2 size={14} /> {showClientsTable ? "Hide Clients" : "Show Clients"}
-        </button>
-        <button className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={openAddClient}>
-          <Building2 size={14} /> Add Client
-        </button>
-        <button className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={() => setShowClientCsv(true)}>
-          <Upload size={14} /> Bulk Import Clients
-        </button>
         <button className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={() => setShowCsv(true)}>
           <Upload size={14} /> Bulk Import Requisitions
         </button>
@@ -846,66 +891,26 @@ export default function RequisitionsPage() {
         </button>
       </div>
 
-      {/* ── Clients table — shown above the Requisitions table so a
-          recruiter can see/manage clients right where they're building
-          requisitions, without leaving this page. ─────────────────────── */}
-      {showClientsTable && (
-        <div className="tiq-card" style={{ marginTop: 16, padding: 16 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-            <div style={{ fontSize: 13, fontWeight: 700, display: "flex", alignItems: "center", gap: 6 }}>
-              <Building2 size={14} /> Clients ({clients.length})
-            </div>
-            {selectedClients.size > 0 && (
-              <button className="tiq-btn tiq-btn-outline tiq-btn-sm" style={{ color: "#ef4444", borderColor: "#ef4444" }}
-                      onClick={handleBulkDeleteClients}>
-                <Trash2 size={13} /> Delete {selectedClients.size} selected
-              </button>
-            )}
-          </div>
-          {clients.length === 0 ? (
-            <div className="tiq-empty" style={{ padding: 12 }}>No clients yet — use "Bulk Import Clients" or add one via a requisition's client dropdown.</div>
-          ) : (
-            <div className="tiq-table-wrap">
-              <table className="tiq-table">
-                <thead>
-                  <tr>
-                    <th style={{ width: 28 }}>
-                      <input type="checkbox" checked={clients.length > 0 && selectedClients.size === clients.length}
-                             onChange={toggleSelectAllClients} title="Select all" />
-                    </th>
-                    <th>Name</th>
-                    <th>Address</th>
-                    <th>ABN</th>
-                    <th>Area of Work</th>
-                    <th style={{ textAlign: "center" }}>Requisitions</th>
-                    <th style={{ textAlign: "center" }}>Contacts</th>
-                    <th style={{ width: 90 }}>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {clients.map((cl: any) => (
-                    <tr key={cl.id}>
-                      <td><input type="checkbox" checked={selectedClients.has(cl.id)} onChange={() => toggleSelectClient(cl.id)} /></td>
-                      <td style={{ fontWeight: 600 }}>{cl.name}</td>
-                      <td style={{ fontSize: 12 }}>{cl.address || "—"}</td>
-                      <td style={{ fontSize: 12 }}>{cl.abn || "—"}</td>
-                      <td style={{ fontSize: 12 }}>{cl.area_of_work || "—"}</td>
-                      <td style={{ textAlign: "center" }}>{requisitions.filter((r) => r.client_id === cl.id).length}</td>
-                      <td style={{ textAlign: "center" }}>{contacts.filter((ct: any) => ct.client_id === cl.id).length}</td>
-                      <td>
-                        <div style={{ display: "flex", gap: 4 }}>
-                          <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" title="Edit" onClick={() => openEditClient(cl)}>Edit</button>
-                          <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" title="Delete" onClick={() => handleDeleteClient(cl)}><Trash2 size={13} /></button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-      )}
+      {/* ── Global search — matches against Req #, Title, Client,
+          Priority, Vacancies, Reason for Hire, Employment Type,
+          Location, and Salary Range all at once, in addition to (not
+          instead of) the per-column filter dropdowns already on each
+          header below. ─────────────────────────────────────────────── */}
+      <div style={{ position: "relative", maxWidth: 360, marginBottom: 12 }}>
+        <Search size={14} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "var(--text-muted)" }} />
+        <input
+          className="tiq-input" style={{ paddingLeft: 32 }}
+          placeholder="Search requisitions…"
+          value={globalSearch}
+          onChange={(e) => setGlobalSearch(e.target.value)}
+        />
+        {globalSearch && (
+          <button onClick={() => setGlobalSearch("")}
+            style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)" }}>
+            <X size={14} />
+          </button>
+        )}
+      </div>
 
       {selected.size > 0 && (
         <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 16, marginBottom: 8 }}>
@@ -934,21 +939,21 @@ export default function RequisitionsPage() {
                   <input type="checkbox" checked={selected.size > 0 && selected.size === filteredRequisitions.length}
                          onChange={toggleSelectAll} />
                 </th>
-                <ResizableFilterHeader label="Req #" value={colFilters.sequence_number} options={colOptions("sequence_number")} onChange={(v) => setColFilter("sequence_number", v)} align="center" width={colWidths.sequence_number} onWidthChange={(w) => setColWidth("sequence_number", w)} />
-                <ResizableFilterHeader label="Title" value={colFilters.title} options={colOptions("title")} onChange={(v) => setColFilter("title", v)} width={colWidths.title} onWidthChange={(w) => setColWidth("title", w)} />
+                <ResizableFilterHeader label="Req #" value={colFilters.sequence_number} options={colOptions("sequence_number")} onChange={(v) => setColFilter("sequence_number", v)} align="center" width={colWidths.sequence_number} onWidthChange={(w) => setColWidth("sequence_number", w)} sortDir={sort?.col === "sequence_number" ? sort.dir : null} onSortClick={() => toggleSort("sequence_number")} />
+                <ResizableFilterHeader label="Title" value={colFilters.title} options={colOptions("title")} onChange={(v) => setColFilter("title", v)} width={colWidths.title} onWidthChange={(w) => setColWidth("title", w)} sortDir={sort?.col === "title" ? sort.dir : null} onSortClick={() => toggleSort("title")} />
                 <ResizableFilterHeader label="JD" filterable={false} width={colWidths.jd_file} onWidthChange={(w) => setColWidth("jd_file", w)} />
-                <ResizableFilterHeader label="Client" value={colFilters.client} options={colOptions("client")} onChange={(v) => setColFilter("client", v)} width={colWidths.client} onWidthChange={(w) => setColWidth("client", w)} />
-                <ResizableFilterHeader label="Priority" value={colFilters.priority} options={colOptions("priority")} onChange={(v) => setColFilter("priority", v)} width={colWidths.priority} onWidthChange={(w) => setColWidth("priority", w)} />
-                <ResizableFilterHeader label="Vacancies" value={colFilters.vacancy_count} options={colOptions("vacancy_count")} onChange={(v) => setColFilter("vacancy_count", v)} align="center" width={colWidths.vacancy_count} onWidthChange={(w) => setColWidth("vacancy_count", w)} />
-                <ResizableFilterHeader label="Reason for Hire" value={colFilters.reason_for_hire} options={colOptions("reason_for_hire")} onChange={(v) => setColFilter("reason_for_hire", v)} width={colWidths.reason_for_hire} onWidthChange={(w) => setColWidth("reason_for_hire", w)} />
-                <ResizableFilterHeader label="Employment Type" value={colFilters.employment_type} options={colOptions("employment_type")} onChange={(v) => setColFilter("employment_type", v)} width={colWidths.employment_type} onWidthChange={(w) => setColWidth("employment_type", w)} />
-                <ResizableFilterHeader label="Location" value={colFilters.location} options={colOptions("location")} onChange={(v) => setColFilter("location", v)} width={colWidths.location} onWidthChange={(w) => setColWidth("location", w)} />
-                <ResizableFilterHeader label="Salary Range" value={colFilters.salary_range} options={colOptions("salary_range")} onChange={(v) => setColFilter("salary_range", v)} width={colWidths.salary_range} onWidthChange={(w) => setColWidth("salary_range", w)} />
-                <ResizableFilterHeader label="Target Hire Date" value={colFilters.target_hire_date} options={colOptions("target_hire_date")} onChange={(v) => setColFilter("target_hire_date", v)} width={colWidths.target_hire_date} onWidthChange={(w) => setColWidth("target_hire_date", w)} />
-                <ResizableFilterHeader label="Status" value={colFilters.status} options={colOptions("status")} onChange={(v) => setColFilter("status", v)} width={colWidths.status} onWidthChange={(w) => setColWidth("status", w)} />
-                <ResizableFilterHeader label="Checklist" value={colFilters.checklist} options={colOptions("checklist")} onChange={(v) => setColFilter("checklist", v)} width={colWidths.checklist} onWidthChange={(w) => setColWidth("checklist", w)} />
-                <ResizableFilterHeader label="Hiring Manager" value={colFilters.hiring_manager} options={colOptions("hiring_manager")} onChange={(v) => setColFilter("hiring_manager", v)} width={colWidths.hiring_manager} onWidthChange={(w) => setColWidth("hiring_manager", w)} />
-                <ResizableFilterHeader label="Applications" value={colFilters.application_count} options={colOptions("application_count")} onChange={(v) => setColFilter("application_count", v)} align="center" width={colWidths.application_count} onWidthChange={(w) => setColWidth("application_count", w)} />
+                <ResizableFilterHeader label="Client" value={colFilters.client} options={colOptions("client")} onChange={(v) => setColFilter("client", v)} width={colWidths.client} onWidthChange={(w) => setColWidth("client", w)} sortDir={sort?.col === "client" ? sort.dir : null} onSortClick={() => toggleSort("client")} />
+                <ResizableFilterHeader label="Priority" value={colFilters.priority} options={colOptions("priority")} onChange={(v) => setColFilter("priority", v)} width={colWidths.priority} onWidthChange={(w) => setColWidth("priority", w)} sortDir={sort?.col === "priority" ? sort.dir : null} onSortClick={() => toggleSort("priority")} />
+                <ResizableFilterHeader label="Vacancies" value={colFilters.vacancy_count} options={colOptions("vacancy_count")} onChange={(v) => setColFilter("vacancy_count", v)} align="center" width={colWidths.vacancy_count} onWidthChange={(w) => setColWidth("vacancy_count", w)} sortDir={sort?.col === "vacancy_count" ? sort.dir : null} onSortClick={() => toggleSort("vacancy_count")} />
+                <ResizableFilterHeader label="Reason for Hire" value={colFilters.reason_for_hire} options={colOptions("reason_for_hire")} onChange={(v) => setColFilter("reason_for_hire", v)} width={colWidths.reason_for_hire} onWidthChange={(w) => setColWidth("reason_for_hire", w)} sortDir={sort?.col === "reason_for_hire" ? sort.dir : null} onSortClick={() => toggleSort("reason_for_hire")} />
+                <ResizableFilterHeader label="Employment Type" value={colFilters.employment_type} options={colOptions("employment_type")} onChange={(v) => setColFilter("employment_type", v)} width={colWidths.employment_type} onWidthChange={(w) => setColWidth("employment_type", w)} sortDir={sort?.col === "employment_type" ? sort.dir : null} onSortClick={() => toggleSort("employment_type")} />
+                <ResizableFilterHeader label="Location" value={colFilters.location} options={colOptions("location")} onChange={(v) => setColFilter("location", v)} width={colWidths.location} onWidthChange={(w) => setColWidth("location", w)} sortDir={sort?.col === "location" ? sort.dir : null} onSortClick={() => toggleSort("location")} />
+                <ResizableFilterHeader label="Salary Range" value={colFilters.salary_range} options={colOptions("salary_range")} onChange={(v) => setColFilter("salary_range", v)} width={colWidths.salary_range} onWidthChange={(w) => setColWidth("salary_range", w)} sortDir={sort?.col === "salary_range" ? sort.dir : null} onSortClick={() => toggleSort("salary_range")} />
+                <ResizableFilterHeader label="Target Hire Date" value={colFilters.target_hire_date} options={colOptions("target_hire_date")} onChange={(v) => setColFilter("target_hire_date", v)} width={colWidths.target_hire_date} onWidthChange={(w) => setColWidth("target_hire_date", w)} sortDir={sort?.col === "target_hire_date" ? sort.dir : null} onSortClick={() => toggleSort("target_hire_date")} />
+                <ResizableFilterHeader label="Status" value={colFilters.status} options={colOptions("status")} onChange={(v) => setColFilter("status", v)} width={colWidths.status} onWidthChange={(w) => setColWidth("status", w)} sortDir={sort?.col === "status" ? sort.dir : null} onSortClick={() => toggleSort("status")} />
+                <ResizableFilterHeader label="Checklist" value={colFilters.checklist} options={colOptions("checklist")} onChange={(v) => setColFilter("checklist", v)} width={colWidths.checklist} onWidthChange={(w) => setColWidth("checklist", w)} sortDir={sort?.col === "checklist" ? sort.dir : null} onSortClick={() => toggleSort("checklist")} />
+                <ResizableFilterHeader label="Hiring Manager" value={colFilters.hiring_manager} options={colOptions("hiring_manager")} onChange={(v) => setColFilter("hiring_manager", v)} width={colWidths.hiring_manager} onWidthChange={(w) => setColWidth("hiring_manager", w)} sortDir={sort?.col === "hiring_manager" ? sort.dir : null} onSortClick={() => toggleSort("hiring_manager")} />
+                <ResizableFilterHeader label="Applications" value={colFilters.application_count} options={colOptions("application_count")} onChange={(v) => setColFilter("application_count", v)} align="center" width={colWidths.application_count} onWidthChange={(w) => setColWidth("application_count", w)} sortDir={sort?.col === "application_count" ? sort.dir : null} onSortClick={() => toggleSort("application_count")} />
                 <th style={{ width: 90 }}>Actions</th>
               </tr>
             </thead>
@@ -990,7 +995,7 @@ export default function RequisitionsPage() {
                       onChange={(e) => handlePriorityChange(r.id, e.target.value)}
                       style={{
                         fontSize: 11, fontWeight: 700, padding: "3px 20px 3px 8px", borderRadius: 999, border: "none",
-                        background: `${PRIORITY_COLORS[r.priority]}20`, color: PRIORITY_COLORS[r.priority], appearance: "none", cursor: "pointer",
+                        background: `${PRIORITY_COLORS[r.priority]}20`, color: PRIORITY_COLORS[r.priority], appearance: "none", WebkitAppearance: "none", MozAppearance: "none", cursor: "pointer",
                       }}
                     >
                       {PRIORITIES.map((p) => <option key={p} value={p}>{p}</option>)}
@@ -1013,7 +1018,7 @@ export default function RequisitionsPage() {
                         onChange={(e) => handleStatusChange(r.id, e.target.value)}
                         style={{
                           fontSize: 11, fontWeight: 700, padding: "3px 20px 3px 8px", borderRadius: 999, border: "none",
-                          background: STATUS_COLORS[r.status]?.bg, color: STATUS_COLORS[r.status]?.fg, appearance: "none", cursor: "pointer",
+                          background: STATUS_COLORS[r.status]?.bg, color: STATUS_COLORS[r.status]?.fg, appearance: "none", WebkitAppearance: "none", MozAppearance: "none", cursor: "pointer",
                         }}
                       >
                         {STATUS_FLOW.map((s) => <option key={s} value={s}>{s}</option>)}
@@ -1344,15 +1349,19 @@ export default function RequisitionsPage() {
 
             <div className="tiq-grid-2">
               <div className="tiq-form-group"><label className="tiq-label">Client</label>
-                <select className="tiq-select" value={form.client_id} onChange={(e) => setForm({ ...form, client_id: e.target.value, hiring_manager_contact_id: "" })}>
-                  <option value="">— None —</option>
-                  {clients.map((c: any) => <option key={c.id} value={c.id}>{c.name}</option>)}
-                </select></div>
+                <SearchableSelect
+                  value={String(form.client_id || "")}
+                  onChange={(v) => setForm({ ...form, client_id: v, hiring_manager_contact_id: "" })}
+                  placeholder="— None —"
+                  options={clients.map((c: any) => ({ value: String(c.id), label: c.name }))}
+                /></div>
               <div className="tiq-form-group"><label className="tiq-label">Linked JD</label>
-                <select className="tiq-select" value={form.jd_record_id} onChange={(e) => setForm({ ...form, jd_record_id: e.target.value })}>
-                  <option value="">— None —</option>
-                  {jds.map((j: any) => <option key={j.id} value={j.id}>{j.jd_title}</option>)}
-                </select></div>
+                <SearchableSelect
+                  value={String(form.jd_record_id || "")}
+                  onChange={(v) => setForm({ ...form, jd_record_id: v })}
+                  placeholder="— None —"
+                  options={jds.map((j: any) => ({ value: String(j.id), label: j.jd_title }))}
+                /></div>
               <div className="tiq-form-group"><label className="tiq-label">Priority</label>
                 <select className="tiq-select" value={form.priority} onChange={(e) => setForm({ ...form, priority: e.target.value })}>
                   {PRIORITIES.map((p) => <option key={p} value={p}>{p}</option>)}
@@ -1380,13 +1389,14 @@ export default function RequisitionsPage() {
             </div>
 
             <div className="tiq-form-group"><label className="tiq-label">Hiring Manager Contact (from Client)</label>
-              <select className="tiq-select" value={form.hiring_manager_contact_id}
-                      onChange={(e) => setForm({ ...form, hiring_manager_contact_id: e.target.value })}>
-                <option value="">— None / use name+email below —</option>
-                {contacts.filter((c: any) => !form.client_id || c.client_id === Number(form.client_id)).map((c: any) => (
-                  <option key={c.id} value={c.id}>{c.name}{c.title ? ` — ${c.title}` : ""}</option>
-                ))}
-              </select>
+              <SearchableSelect
+                value={String(form.hiring_manager_contact_id || "")}
+                onChange={(v) => setForm({ ...form, hiring_manager_contact_id: v })}
+                placeholder="— None / use name+email below —"
+                options={contacts
+                  .filter((c: any) => !form.client_id || c.client_id === Number(form.client_id))
+                  .map((c: any) => ({ value: String(c.id), label: c.name, sublabel: c.title || "" }))}
+              />
             </div>
             <div className="tiq-grid-2">
               <div className="tiq-form-group"><label className="tiq-label">Hiring Manager Name (fallback)</label>
@@ -1407,8 +1417,9 @@ export default function RequisitionsPage() {
 
       {/* ── Add/Edit Client Modal ─────────────────────────────────── */}
       {clientFormState && (
-        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center" }}>
-          <div style={{ background: "#fff", color: "#111827", borderRadius: 14, padding: 24, maxWidth: 480, width: "94%" }}>
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center" }}
+             onMouseDown={(e) => { if (e.target === e.currentTarget) setClientFormState(null); }}>
+          <div style={{ background: "#fff", color: "#111827", borderRadius: 14, padding: 24, maxWidth: 480, width: "94%", maxHeight: "88vh", overflowY: "auto" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
               <div style={{ fontWeight: 800, fontSize: 16 }}>{clientFormState.mode === "edit" ? "Edit Client" : "Add Client"}</div>
               <button onClick={() => setClientFormState(null)} style={{ background: "none", border: "none", cursor: "pointer" }}><X size={18} /></button>
@@ -1422,6 +1433,12 @@ export default function RequisitionsPage() {
                 <input className="tiq-input" value={clientForm.address} onChange={(e) => setClientForm({ ...clientForm, address: e.target.value })} /></div>
               <div className="tiq-form-group"><label className="tiq-label">ABN</label>
                 <input className="tiq-input" value={clientForm.abn} onChange={(e) => setClientForm({ ...clientForm, abn: e.target.value })} /></div>
+            </div>
+            <div className="tiq-grid-2">
+              <div className="tiq-form-group"><label className="tiq-label">Phone</label>
+                <input className="tiq-input" value={clientForm.phone} onChange={(e) => setClientForm({ ...clientForm, phone: e.target.value })} /></div>
+              <div className="tiq-form-group"><label className="tiq-label">Email</label>
+                <input className="tiq-input" value={clientForm.email} onChange={(e) => setClientForm({ ...clientForm, email: e.target.value })} /></div>
             </div>
             <div className="tiq-form-group"><label className="tiq-label">Area of Work</label>
               <input className="tiq-input" value={clientForm.area_of_work} onChange={(e) => setClientForm({ ...clientForm, area_of_work: e.target.value })}
@@ -1472,20 +1489,7 @@ export default function RequisitionsPage() {
       {showBulkJd && (
         <BulkJdUploadModal onClose={() => setShowBulkJd(false)} onDone={load} />
       )}
-
-      {/* ── Bulk Import Clients (CSV) — kept here too, not just buried in
-          CandidateLens → Management → Clients, since this is where a
-          recruiter is actually working when they need to add clients
-          before/while building requisitions. ─────────────────────────── */}
-      {showClientCsv && (
-        <CsvImportModal
-          title="Clients"
-          columns={["name", "address", "abn", "area_of_work", "contact_name", "contact_title", "contact_email", "contact_phone"]}
-          sampleRow={["Northwind Group", "Sydney NSW", "51 824 753 556", "Financial Services", "Priya Anand", "Head of Talent", "priya.anand@northwindgroup.example", "0412 555 101"]}
-          onImport={(form) => candidateTrackApi.importClientsCsv(form)}
-          onClose={() => setShowClientCsv(false)}
-          onDone={load}
-        />
+      </>
       )}
     </div>
   );

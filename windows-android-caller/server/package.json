@@ -1,0 +1,17 @@
+{
+  "name": "android-caller-local-api",
+  "version": "1.0.0",
+  "description": "Drives an Android phone's dialer over ADB to place/end real SIM calls — Direct mode (server.js, local HTTP) or Relay mode (agent.js, outbound WebSocket to TalentIQ)",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "start:agent": "node agent.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "ws": "^8.18.0"
+  }
+}

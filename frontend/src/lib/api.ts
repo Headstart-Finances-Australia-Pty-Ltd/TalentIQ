@@ -142,6 +142,10 @@ export const requisitionApi = {
   listContacts: (client_id?: number) =>
     api.get("/api/requisitions/client-contacts", { params: client_id ? { client_id } : {} }).then((r) => r.data),
   createContact: (data: any) => api.post("/api/requisitions/client-contacts", data).then((r) => r.data),
+  // One-time catch-up: pulls hiring managers that only ever existed as
+  // free-text fallback fields on a Requisition into the real
+  // ClientContact directory. See backend docstring — idempotent.
+  pullHiringManagersFromRequisitions: () => api.post("/api/requisitions/client-contacts/pull-from-requisitions").then((r) => r.data),
   updateContact: (id: number, data: any) => api.put(`/api/requisitions/client-contacts/${id}`, data).then((r) => r.data),
   deleteContact: (id: number) => api.delete(`/api/requisitions/client-contacts/${id}`).then((r) => r.data),
 };
@@ -178,6 +182,36 @@ export const interviewApi = {
     api.post(`/api/interviews/interviews/${id}/calendly-link/email`, data || {}).then((r) => r.data),
   calendlyStatus: () => api.get("/api/interviews/calendly/status").then((r) => r.data),
   calendlyEventTypes: () => api.get("/api/interviews/calendly/event-types").then((r) => r.data),
+
+  // Panel Interviewers directory — a roster of experts, separate from the
+  // per-round interviewers JSON snapshot; assignments are derived server
+  // side from feedback links, not stored on this record.
+  listPanelInterviewers: () => api.get("/api/interviews/panel-interviewers").then((r) => r.data),
+  createPanelInterviewer: (data: any) => api.post("/api/interviews/panel-interviewers", data).then((r) => r.data),
+  updatePanelInterviewer: (id: number, data: any) => api.put(`/api/interviews/panel-interviewers/${id}`, data).then((r) => r.data),
+  deletePanelInterviewer: (id: number) => api.delete(`/api/interviews/panel-interviewers/${id}`).then((r) => r.data),
+
+  // Interview Panel Setups — a named/numbered group of Panel
+  // Interviewers, reused across rounds instead of re-picking the same
+  // people each time. Interview Scheduling shows just the panel NUMBER;
+  // clicking it fetches the member list for a popup.
+  listInterviewPanels: () => api.get("/api/interviews/panels").then((r) => r.data),
+  getInterviewPanel: (id: number) => api.get(`/api/interviews/panels/${id}`).then((r) => r.data),
+  createInterviewPanel: (data: any) => api.post("/api/interviews/panels", data).then((r) => r.data),
+  updateInterviewPanel: (id: number, data: any) => api.put(`/api/interviews/panels/${id}`, data).then((r) => r.data),
+  deleteInterviewPanel: (id: number) => api.delete(`/api/interviews/panels/${id}`).then((r) => r.data),
+  // Automatic booking sync — a candidate booking a slot through this
+  // recruiter's Calendly link flips the matching Interview Scheduling
+  // row to Scheduled automatically, via a Calendly webhook subscription.
+  calendlyWebhookStatus: () => api.get("/api/interviews/calendly/webhook-status").then((r) => r.data),
+  connectCalendlyWebhook: () => api.post("/api/interviews/calendly/connect-webhook").then((r) => r.data),
+  disconnectCalendlyWebhook: () => api.post("/api/interviews/calendly/disconnect-webhook").then((r) => r.data),
+
+  // Telephony (click-to-call + SMS scheduling) — Settings > API Keys > Telephony
+  telephonyStatus: () => api.get("/api/interviews/telephony/status").then((r) => r.data),
+  callCandidate: (id: number) => api.post(`/api/interviews/interviews/${id}/call`).then((r) => r.data),
+  smsSchedule: (id: number, data: { scheduled_at: string; message?: string }) =>
+    api.post(`/api/interviews/interviews/${id}/sms-schedule`, data).then((r) => r.data),
 
   listScorecards: (interviewId: number) => api.get(`/api/interviews/interviews/${interviewId}/scorecards`).then((r) => r.data),
   createScorecard: (interviewId: number, data: any) =>
@@ -410,6 +444,10 @@ export const systemApi = {
     api.post("/api/admin/system/database/test", { connection_url }).then((r) => r.data),
   testS3Connection: (data: { access_key_id: string; secret_access_key: string; bucket_name: string; region?: string; endpoint_url?: string }) =>
     api.post("/api/admin/system/s3/test", data).then((r) => r.data),
+  // Stripe panel's "Test Connection" — same never-persists shape as
+  // Database/S3 above, validates via Stripe's own Balance.retrieve().
+  testStripeConnection: (secret_key: string) =>
+    api.post("/api/admin/system/stripe/test", { secret_key }).then((r) => r.data),
   // Allocated storage quota (GB) that the Storage panel's used % is
   // calculated against — a validated dedicated setter, not routed
   // through the generic api-keys upsert.
@@ -549,4 +587,26 @@ export const candidateTrackApi = {
     form.append("file", file);
     return api.post(`/api/candidatetrack/candidates/${id}/cover-letter`, form, { headers: { "Content-Type": "multipart/form-data" } }).then(r => r.data);
   },
+};
+// Billing — public pricing, Stripe checkout (opened as a popup), free
+// demo, and Admin Console plan management.
+export const billingApi = {
+  listPlans: () => api.get("/api/billing/plans").then((r) => r.data),
+  mySubscription: () => api.get("/api/billing/my-subscription").then((r) => r.data),
+  startFreeDemo: () => api.post("/api/billing/start-free-demo").then((r) => r.data),
+  createCheckout: (plan_slug: string, billing_period: "monthly" | "yearly") =>
+    api.post("/api/billing/create-checkout", { plan_slug, billing_period }).then((r) => r.data),
+  adminListPlans: () => api.get("/api/billing/admin/plans").then((r) => r.data),
+  adminCreatePlan: (data: any) => api.post("/api/billing/admin/plans", data).then((r) => r.data),
+  adminUpdatePlan: (id: number, data: any) => api.put(`/api/billing/admin/plans/${id}`, data).then((r) => r.data),
+  adminDeletePlan: (id: number) => api.delete(`/api/billing/admin/plans/${id}`).then((r) => r.data),
+};
+
+// Job Ads — create a job posting once, push to LinkedIn/Seek.
+export const jobAdsApi = {
+  list: () => api.get("/api/job-ads").then((r) => r.data),
+  create: (data: any) => api.post("/api/job-ads", data).then((r) => r.data),
+  delete: (id: number) => api.delete(`/api/job-ads/${id}`).then((r) => r.data),
+  postLinkedIn: (id: number) => api.post(`/api/job-ads/${id}/post-linkedin`).then((r) => r.data),
+  postSeek: (id: number) => api.post(`/api/job-ads/${id}/post-seek`).then((r) => r.data),
 };

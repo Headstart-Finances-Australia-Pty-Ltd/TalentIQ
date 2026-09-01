@@ -5,9 +5,9 @@ import { ResizableFilterHeader } from "../components/ResizableFilterHeader";
 import { useLatestMutation } from "../hooks/useLatestMutation";
 import {
   Users, Upload, FileText, Play, Download, ChevronDown, ChevronUp,
-  CheckCircle, Clock, XCircle, Star, Video, RefreshCw, Sparkles, BarChart2,
-  Trash2, Mail, Building2, AlertTriangle, Phone, CalendarClock } from "lucide-react";
-import { api } from "../lib/api";
+  CheckCircle, Clock, XCircle, Star, Video, RefreshCw, Sparkles, BarChart2, Gavel,
+  Trash2, Mail, Building2, AlertTriangle, Phone, CalendarClock, PhoneCall, MessageSquare, X, Search } from "lucide-react";
+import { api, interviewApi, authApi } from "../lib/api";
 import { useAuth } from "../hooks/useAuth";
 
 // Same fixed per-stage colors as the sidebar (see capabilities.ts) — kept
@@ -210,8 +210,28 @@ const jobLensApi = {
   // can self-schedule the initial HR phone screening. Also registers/
   // updates this candidate's Interview Scheduling row (Phone Interview
   // round) — see backend _get_or_create_joblens_interview.
-  sendPhoneCalendlyLink: (cid: number, data?: { to_email?: string; subject?: string; body_html?: string }) =>
+  sendPhoneCalendlyLink: (cid: number, data?: { to_email?: string; subject?: string; body_html?: string; booking_url?: string }) =>
     api.post(`/api/joblens/candidates/${cid}/phone-interview/send-calendly-link`, data || {}).then(r => r.data),
+  // Resolves/mints the real booking link WITHOUT emailing anything, so
+  // the compose modal can show a working link in the editable message
+  // body before Send — same shape as prepareInvite for Video Interview.
+  preparePhoneCalendlyLink: (cid: number) =>
+    api.post(`/api/joblens/candidates/${cid}/phone-interview/prepare-calendly-link`).then(r => r.data),
+  // Click-to-call: bridges the recruiter's own Telephony caller number
+  // (Settings > API Keys > Telephony) to this candidate's phone.
+  callPhoneCandidate: (cid: number) =>
+    api.post(`/api/joblens/candidates/${cid}/phone-interview/call`).then(r => r.data),
+  // Pulls the Twilio recording for the most recent call to this
+  // candidate and transcribes it — on-demand (no webhook), since Twilio
+  // recordings usually take a few seconds to a minute to become
+  // available. Only works for Twilio calls, not Windows/Android Caller
+  // ones (no access to that call's audio at all — see backend docstring).
+  fetchPhoneTranscript: (cid: number) =>
+    api.post(`/api/joblens/candidates/${cid}/phone-interview/fetch-transcript`).then(r => r.data),
+  // Texts the candidate the time they'll be called, and sets that time
+  // on this candidate's Interview Scheduling row (scheduled_at/status).
+  sendPhoneScheduleSms: (cid: number, data: { scheduled_at: string; message?: string }) =>
+    api.post(`/api/joblens/candidates/${cid}/phone-interview/send-sms-schedule`, data).then(r => r.data),
   updateStatus: (cid: number, status: string) =>
     api.put(`/api/joblens/candidates/${cid}/status`, { status }).then(r => r.data),
   savePhoneResult: (cid: number, data: { recommendation: string; notes: string }) =>
@@ -227,6 +247,12 @@ const jobLensApi = {
   },
   reanalyzeVideo: (cid: number) =>
     api.post(`/api/joblens/candidates/${cid}/reanalyze-video`).then(r => r.data),
+  // Backfill: queues analysis for every one of the recruiter's OWN
+  // candidates who has a stored video but no completed analysis yet
+  // (never ran, failed, or stuck Pending) — see the backend endpoint's
+  // docstring for the exact criteria.
+  analyzeUnanalyzedVideos: () =>
+    api.post(`/api/joblens/candidates/analyze-unanalyzed-videos`).then(r => r.data),
   requisitionOptions: () =>
     api.get(`/api/joblens/requisition-options`).then(r => r.data),
   requisitionCandidates: (requisitionId: number) =>
@@ -242,6 +268,7 @@ function StatusBadge({ status }: { status: string }) {
     "Review":        "tiq-badge-amber",
     "Not Qualified": "tiq-badge-rose",
     "Pending":       "tiq-badge-slate",
+    "Not Started":   "tiq-badge-slate",
     "Completed":     "tiq-badge-teal",
   };
   return <span className={`tiq-badge ${map[status] || "tiq-badge-slate"}`}>{status}</span>;
@@ -417,6 +444,20 @@ function VideoInterviewModal({
   const [licenseKey, setLicenseKey] = useState("");
   const [keyChecked, setKeyChecked] = useState(false);
   const ttsAudioRef = useRef<HTMLAudioElement | null>(null);
+  // Prefetch cache: question text -> already-fetched audio Blob. Edge-TTS
+  // is a real network round-trip per question (see utils/tts.py) — with
+  // no prefetch, that latency landed right when the recruiter/candidate
+  // was waiting to hear the NEXT question, which is what "question
+  // reading is also taking time" actually is. Fetching question i+1's
+  // audio while question i is still being answered hides that latency
+  // almost entirely, since it's usually done well before the timer ends.
+  const ttsCacheRef = useRef<Map<string, Blob>>(new Map());
+  const prefetchTts = (q: string) => {
+    if (!q || ttsCacheRef.current.has(q)) return;
+    jobLensApi.synthesizeSpeech(q)
+      .then((blob: Blob) => { ttsCacheRef.current.set(q, blob); })
+      .catch(() => { /* best-effort — speakQuestion() will just fetch it fresh if this never lands */ });
+  };
   // Same recording/storage/review consent gate as the candidate's public
   // interview page — shown first, every time this modal opens; camera/mic
   // access is never requested until it's explicitly accepted.
@@ -579,7 +620,8 @@ function VideoInterviewModal({
     if (!q) { startRecording(); return; }
     setIsSpeaking(true);
     try {
-      const audioBlob: Blob = await jobLensApi.synthesizeSpeech(q);
+      const audioBlob: Blob = ttsCacheRef.current.get(q) || await jobLensApi.synthesizeSpeech(q);
+      ttsCacheRef.current.delete(q); // one-shot — don't hold every question's audio in memory for the whole interview
       const url = URL.createObjectURL(audioBlob);
       const audio = new Audio(url);
       ttsAudioRef.current = audio;
@@ -606,6 +648,9 @@ function VideoInterviewModal({
     // per-question UI (timer, REC indicator).
     setRecording(true);
     setTimeLeft(answerSeconds);
+    // Kick off the NEXT question's TTS now, in the background, instead of
+    // waiting until nextQuestion() actually needs it — see ttsCacheRef.
+    prefetchTts(questions[qIdx + 1] || "");
   };
 
   // Countdown timer — pauses while TTS is speaking
@@ -884,6 +929,175 @@ HR Team`
   );
 }
 
+// ─── ANALYZE UNANALYZED VIDEOS (backfill) ───────────────────────────────────
+// Page-header action on Video Interview: queues analysis for every one of
+// the recruiter's own candidates who has a stored recording but no
+// completed analysis on file — never ran, failed earlier (e.g. before
+// the Groq Key Pool bug fix), or got stuck "Pending". A recruiter
+// shouldn't have to click "Reanalyze" on each candidate one at a time
+// after fixing something like a missing/broken Groq key.
+function AnalyzeUnanalyzedVideosButton() {
+  const [state, setState] = useState<"idle" | "running" | "done" | "error">("idle");
+  const [message, setMessage] = useState("");
+
+  const run = async () => {
+    setState("running"); setMessage("");
+    try {
+      const r = await jobLensApi.analyzeUnanalyzedVideos();
+      setState("done");
+      setMessage(
+        r.queued > 0
+          ? `Queued ${r.queued} candidate${r.queued === 1 ? "" : "s"} for analysis — refresh in a bit to see results.`
+          : "Nothing to do — every candidate with a stored video already has a completed analysis."
+      );
+    } catch (e: any) {
+      setState("error");
+      setMessage(e?.response?.data?.detail || "Failed to queue analysis.");
+    }
+  };
+
+  return (
+    <div style={{ textAlign: "right" }}>
+      <button className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={run} disabled={state === "running"}
+        title="Analyze every stored interview video that hasn't been successfully analysed yet">
+        <Sparkles size={13} /> {state === "running" ? "Queuing…" : "Analyze Unanalyzed Videos"}
+      </button>
+      {message && (
+        <div style={{ fontSize: 11, color: state === "error" ? "var(--rose-500)" : "var(--text-muted)", marginTop: 4, maxWidth: 260 }}>
+          {message}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── SEND CALENDLY LINK MODAL ───────────────────────────────────────────────
+// Mirrors ContactModal above exactly (To/Subject/Message compose UI,
+// Send/Cancel) — clicking "Send Calendly Link" used to fire the email
+// immediately with a fixed template and no chance to review/edit it,
+// unlike Video Interview's "Send Interview Invite", which always opens
+// this same kind of compose modal first. prepare-calendly-link resolves
+// a real, working booking link up front (same idea as prepareInvite's
+// token) so the editable message body already has a working link in it
+// before Send is ever clicked.
+function CalendlyModal({
+  candidate, onClose, onSent,
+}: { candidate: any; onClose: () => void; onSent: () => void }) {
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  const [bookingUrl, setBookingUrl] = useState("");
+  const [toEmail, setToEmail] = useState(candidate.email || "");
+  const [subject, setSubject] = useState("Schedule your phone screening interview");
+  const [body, setBody] = useState("");
+  const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState("");
+  const [sent, setSent] = useState(false);
+
+  useEffect(() => {
+    jobLensApi.preparePhoneCalendlyLink(candidate.id)
+      .then(r => {
+        setBookingUrl(r.booking_url);
+        setToEmail(r.candidate_email || candidate.email || "");
+        setBody(
+`Hi ${candidate.name || "there"},
+
+Thanks for your interest — we'd like to set up a quick initial phone screening interview with you.
+
+Please use the link below to pick a time that works for you:
+
+${r.booking_url}
+
+Looking forward to speaking with you.`
+        );
+      })
+      .catch((e: any) => setLoadError(e?.response?.data?.detail || "Failed to prepare the Calendly link."))
+      .finally(() => setLoading(false));
+  }, [candidate.id]);
+
+  const handleSend = async () => {
+    setSending(true);
+    setSendError("");
+    try {
+      let html = escapeHtmlForEmail(body);
+      if (bookingUrl) {
+        const escapedLink = escapeHtmlForEmail(bookingUrl);
+        html = html.split(escapedLink).join(`<a href="${bookingUrl}" target="_blank" rel="noopener noreferrer">${bookingUrl}</a>`);
+      }
+      html = html.replace(/\n/g, "<br/>");
+      const body_html = `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.6;color:#111827;">${html}</div>`;
+
+      await jobLensApi.sendPhoneCalendlyLink(candidate.id, { to_email: toEmail, subject, body_html, booking_url: bookingUrl });
+      setSent(true);
+      onSent();
+    } catch (e: any) {
+      setSendError(e?.response?.data?.detail || "Failed to send. Check your SMTP settings under Settings > API Keys.");
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center" }}
+      onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div style={{ background: "#ffffff", color: "#111827", borderRadius: 14, padding: 24, maxWidth: 560, width: "94%", maxHeight: "90vh", overflowY: "auto", boxShadow: "0 25px 60px rgba(0,0,0,.4)" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+          <div style={{ fontWeight: 800, fontSize: 16 }}>
+            <CalendarClock size={15} style={{ display: "inline", marginRight: 6, color: STAGE_ICON_COLOR.phone }} />
+            Send Calendly Link — {candidate.name}
+          </div>
+          <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 20, color: "#6b7280" }}>×</button>
+        </div>
+
+        {loading ? (
+          <div style={{ padding: "24px 0", textAlign: "center", color: "#6b7280", fontSize: 13 }}>Preparing your Calendly link…</div>
+        ) : loadError ? (
+          <div style={{ padding: "12px 0" }}>
+            <div style={{ fontSize: 13, color: "#ef4444", marginBottom: 14 }}>{loadError}</div>
+            <button className="tiq-btn tiq-btn-outline" onClick={onClose}>Close</button>
+          </div>
+        ) : sent ? (
+          <div style={{ padding: "20px 0", textAlign: "center" }}>
+            <div style={{ fontSize: 15, fontWeight: 700, color: "#0d9488", marginBottom: 8 }}>
+              ✅ Calendly link sent to {toEmail}
+            </div>
+            <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 12 }}>
+              Sent via your SMTP settings from Settings &gt; API Keys.
+            </div>
+            <button className="tiq-btn tiq-btn-outline" onClick={onClose}>Close</button>
+          </div>
+        ) : (
+          <>
+            <div className="tiq-form-group">
+              <label className="tiq-label" style={{ color: "#374151" }}>To</label>
+              <input className="tiq-input" value={toEmail} onChange={e => setToEmail(e.target.value)} />
+            </div>
+            <div className="tiq-form-group">
+              <label className="tiq-label" style={{ color: "#374151" }}>Subject</label>
+              <input className="tiq-input" value={subject} onChange={e => setSubject(e.target.value)} />
+            </div>
+            <div className="tiq-form-group">
+              <label className="tiq-label" style={{ color: "#374151" }}>Message</label>
+              <textarea className="tiq-input" style={{ minHeight: 200, fontFamily: "inherit", fontSize: 13, whiteSpace: "pre-wrap" }}
+                value={body} onChange={e => setBody(e.target.value)} />
+            </div>
+            {sendError && (
+              <div style={{ fontSize: 12, color: "#ef4444", marginBottom: 10, padding: "8px 12px", borderRadius: 6, background: "rgba(239,68,68,.08)" }}>
+                {sendError}
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 8 }}>
+              <button className="tiq-btn tiq-btn-primary" onClick={handleSend} disabled={!toEmail || sending}>
+                {sending ? "Sending…" : "Send"}
+              </button>
+              <button className="tiq-btn tiq-btn-ghost" onClick={onClose} disabled={sending}>Cancel</button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── SCORE DETAILS MODAL ────────────────────────────────────────────────────
 // Backs the Resume Screening table's "Details" column — a centered popup
 // with the candidate's full score breakdown (ScoreBreakdownGrid),
@@ -949,8 +1163,135 @@ function ScoreDetailsModal({
   );
 }
 
+// ─── CALL CANDIDATE POPUP ───────────────────────────────────────────────────
+// Phone Interview's "Call Candidate" button opens this: shows who's about
+// to be called and from what number, then places a click-to-call via the
+// recruiter's own Telephony credentials (Settings > API Keys > Telephony)
+// — Twilio rings the recruiter's own caller number first, then bridges
+// to the candidate the moment it's answered (see backend
+// utils/telephony.place_click_to_call). No dialer UI here — the actual
+// audio call happens over the recruiter's own phone line, not in-browser.
+function CallCandidatePopup({
+  candidateName, candidatePhone, callerNumber, telephonyConfigured, callMut, onClose, androidCaller,
+}: { candidateName: string; candidatePhone: string; callerNumber: string; telephonyConfigured: boolean; callMut: any; onClose: () => void; androidCaller: { enabled: boolean; apiBase: string; mode: "direct" | "relay" } }) {
+  // Windows/Android Caller path — entirely separate from callMut (Twilio),
+  // only offered when enabled in Settings. Two ways it reaches the
+  // recruiter's laptop, matching Settings → Phone Connection:
+  //  - Relay mode: goes through TalentIQ's OWN backend
+  //    (/api/android-caller/*), which forwards to whichever laptop agent
+  //    is connected for this user — works from any device.
+  //  - Direct mode: this browser tab calls the Local API on
+  //    127.0.0.1 directly — only works on the same laptop as the phone.
+  const [androidCallState, setAndroidCallState] = useState<"idle" | "dialing" | "active" | "error">("idle");
+  const [androidCallError, setAndroidCallError] = useState("");
+  const base = (androidCaller.apiBase || "http://127.0.0.1:4000").replace(/\/$/, "");
+  const startAndroidCall = async () => {
+    setAndroidCallError(""); setAndroidCallState("dialing");
+    try {
+      if (androidCaller.mode === "relay") {
+        await api.post("/api/android-caller/call", { to_number: candidatePhone });
+      } else {
+        const res = await fetch(`${base}/api/call`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ toNumber: candidatePhone }),
+        });
+        const data = await res.json();
+        if (!res.ok) { setAndroidCallError(data.message || "Failed to start call."); setAndroidCallState("error"); return; }
+      }
+      setAndroidCallState("active");
+    } catch (e: any) {
+      setAndroidCallError(
+        androidCaller.mode === "relay"
+          ? (e?.response?.data?.detail || "Failed to start call — is the agent (npm run start:agent) running and connected?")
+          : "Could not reach the Local API — is the Local API (npm start in server/) running on this laptop?"
+      );
+      setAndroidCallState("error");
+    }
+  };
+  const hangUpAndroidCall = async () => {
+    try {
+      if (androidCaller.mode === "relay") await api.post("/api/android-caller/hangup");
+      else await fetch(`${base}/api/hangup`, { method: "POST" });
+    } catch { /* best-effort */ }
+    setAndroidCallState("idle");
+  };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", zIndex: 1200, display: "flex", alignItems: "center", justifyContent: "center" }}
+      onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div style={{ background: "#ffffff", color: "#111827", borderRadius: 14, padding: 24, maxWidth: 380, width: "92%", boxShadow: "0 25px 60px rgba(0,0,0,.4)" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+          <div style={{ fontWeight: 800, fontSize: 16 }}>
+            <PhoneCall size={16} style={{ display: "inline", marginRight: 8, color: "#ec4899" }} />
+            Call {candidateName}
+          </div>
+          <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 20, color: "#6b7280" }}><X size={18} /></button>
+        </div>
+
+        {!candidatePhone ? (
+          <div style={{ fontSize: 13, color: "#374151", lineHeight: 1.6 }}>
+            This candidate has no phone number on file.
+          </div>
+        ) : androidCaller.enabled ? (
+          <div>
+            <div style={{ fontSize: 13, color: "#374151", lineHeight: 1.6, marginBottom: 16 }}>
+              This dials <strong>{candidatePhone}</strong> on your own Android phone over ADB (Settings → Phone
+              Connection).{" "}
+              {androidCaller.mode === "relay"
+                ? "Make sure the agent (npm run start:agent) is running on your laptop and shows \"connected\"."
+                : "Make sure the Local API (npm start in server/) is running on this laptop and the phone shows \"connected\"."}
+            </div>
+            {androidCallError && (
+              <div style={{ fontSize: 12, color: "#ef4444", marginBottom: 12 }}>{androidCallError}</div>
+            )}
+            {androidCallState === "active" ? (
+              <div>
+                <div style={{ fontSize: 11, color: "#10b981", fontWeight: 700, marginBottom: 12 }}>Dialing on your phone now</div>
+                <button className="tiq-btn tiq-btn-outline" style={{ width: "100%" }} onClick={hangUpAndroidCall}>Hang Up</button>
+              </div>
+            ) : (
+              <button className="tiq-btn tiq-btn-primary" style={{ width: "100%" }} disabled={androidCallState === "dialing"} onClick={startAndroidCall}>
+                {androidCallState === "dialing" ? "Placing call…" : "Start Call (my phone)"}
+              </button>
+            )}
+          </div>
+        ) : !telephonyConfigured ? (
+          <div style={{ fontSize: 13, color: "#374151", lineHeight: 1.6 }}>
+            Telephony isn't set up yet. Add your Twilio Account SID, Auth Token, and Caller Number, or enable the
+            Windows/Android Caller, under <strong>Settings → API Keys</strong> first.
+          </div>
+        ) : callMut.isSuccess ? (
+          <div>
+            <div style={{ fontSize: 13, color: "#374151", lineHeight: 1.6, marginBottom: 12 }}>
+              Calling your phone (<strong>{callMut.data?.caller_number}</strong>) now — once you pick up, you'll be
+              connected straight through to <strong>{candidateName}</strong> at {callMut.data?.candidate_number}.
+            </div>
+            <div style={{ fontSize: 11, color: "#10b981", fontWeight: 700 }}>Call status: {callMut.data?.status}</div>
+          </div>
+        ) : (
+          <div>
+            <div style={{ fontSize: 13, color: "#374151", lineHeight: 1.6, marginBottom: 16 }}>
+              This will call <strong>your</strong> caller number (<strong>{callerNumber}</strong>) first — once you
+              answer, it connects you straight through to <strong>{candidateName}</strong> at{" "}
+              <strong>{candidatePhone}</strong>.
+            </div>
+            {callMut.isError && (
+              <div style={{ fontSize: 12, color: "#ef4444", marginBottom: 12 }}>
+                {callMut.error?.response?.data?.detail || "Failed to place the call."}
+              </div>
+            )}
+            <button className="tiq-btn tiq-btn-primary" style={{ width: "100%" }} disabled={callMut.isPending} onClick={() => callMut.mutate()}>
+              {callMut.isPending ? "Placing call…" : "Start Call"}
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── CANDIDATE ROW ─────────────────────────────────────────────────────────
-type PopoverKind = "resume" | "matched" | "missing" | "questions" | "videoAnalysis" | "scoreBreakdown";
+type PopoverKind = "resume" | "matched" | "missing" | "questions" | "videoAnalysis" | "videoTranscript" | "scoreBreakdown";
 type PopoverState = { kind: PopoverKind; x: number; y: number; width: number; anchor: HTMLElement; openAbove: boolean } | null;
 
 function CandidateRow({
@@ -998,6 +1339,7 @@ function CandidateRow({
   const [interviewOpen, setInterviewOpen] = useState(false);
   const [questions, setQuestions] = useState<string[]>(c.interview_questions || []);
   const [genLoading, setGenLoading] = useState(false);
+  const [genError, setGenError] = useState("");
   const [contactOpen, setContactOpen] = useState(false);
   const [contacted, setContacted] = useState(!!c.contacted);
   const [inviteToken, setInviteToken] = useState<string | null>(c.interview_token || null);
@@ -1031,18 +1373,67 @@ function CandidateRow({
   const phoneContactMut = useMutation({
     mutationFn: () => jobLensApi.markPhoneContacted(c.id),
     onSuccess: () => { onRefresh(); },
+    onError: () => { setPhoneContactedOptimistic(null); },
   });
-  const [calendlySendError, setCalendlySendError] = useState("");
+  // Checkbox used to only ever read c.phone_screening_status — a prop
+  // that only updates once BOTH the mutation finishes AND the full
+  // candidate list refetch triggered by onRefresh() completes. That
+  // round-trip is what made ticking it feel slow/unresponsive: the
+  // click did nothing visually until a full list refetch landed.
+  // Ticking immediately on click and only falling back to the server
+  // value once it actually reflects "contacted" removes that lag —
+  // errors revert it via onError above.
+  const [phoneContactedOptimistic, setPhoneContactedOptimistic] = useState<boolean | null>(null);
+  const [phoneScreeningPopupOpen, setPhoneScreeningPopupOpen] = useState(false);
+  // "Send Calendly Link" now opens CalendlyModal (compose UI, same
+  // pattern as Video Interview's ContactModal) instead of firing the
+  // email immediately with a fixed template — calendlySent just tracks
+  // whether it's been sent at least once, for the cell's quick-glance line.
+  const [calendlyModalOpen, setCalendlyModalOpen] = useState(false);
   const [calendlySent, setCalendlySent] = useState(false);
-  const sendCalendlyMut = useMutation({
-    mutationFn: () => jobLensApi.sendPhoneCalendlyLink(c.id),
-    onSuccess: () => { setCalendlySendError(""); setCalendlySent(true); onRefresh(); },
-    onError: (err: any) => { setCalendlySendError(err?.response?.data?.detail || "Failed to send Calendly link."); },
+
+  // ── Telephony: click-to-call popup + SMS-schedule (Settings > API
+  // Keys > Telephony) ─────────────────────────────────────────────────
+  const [showCallPopup, setShowCallPopup] = useState(false);
+  const [smsScheduleAt, setSmsScheduleAt] = useState("");
+  const [smsError, setSmsError] = useState("");
+  const [smsSent, setSmsSent] = useState(false);
+  const callMut = useMutation({
+    mutationFn: () => jobLensApi.callPhoneCandidate(c.id),
+    onSuccess: () => { onRefresh(); },
+  });
+  // Pulls + transcribes the Twilio recording for the last call — see
+  // backend fetch_phone_transcript's docstring on why this is an
+  // on-demand button rather than automatic (no webhook dependency).
+  const [showPhoneTranscript, setShowPhoneTranscript] = useState(false);
+  const phoneTranscriptMut = useMutation({
+    mutationFn: () => jobLensApi.fetchPhoneTranscript(c.id),
+    onSuccess: () => { setShowPhoneTranscript(true); onRefresh(); },
+  });
+  const smsScheduleMut = useMutation({
+    mutationFn: () => jobLensApi.sendPhoneScheduleSms(c.id, { scheduled_at: new Date(smsScheduleAt).toISOString() }),
+    onSuccess: () => { setSmsError(""); setSmsSent(true); onRefresh(); },
+    onError: (err: any) => { setSmsError(err?.response?.data?.detail || "Failed to send SMS."); },
   });
   const statusMut = useMutation({
     mutationFn: (status: string) => jobLensApi.updateStatus(c.id, status),
     onSuccess: () => { onRefresh(); },
   });
+  const { data: telephonyStatus } = useQuery({
+    queryKey: ["telephony-status"], queryFn: interviewApi.telephonyStatus, staleTime: 60_000,
+  });
+  const telephonyConfigured = !!telephonyStatus?.configured;
+  // Windows/Android Caller settings — same api-keys query SettingsPage
+  // uses (shared cache under this queryKey), so enabling it there is
+  // reflected here without any extra endpoint.
+  const { data: savedApiKeys = [] } = useQuery({ queryKey: ["api-keys"], queryFn: authApi.listApiKeys, staleTime: 30_000 });
+  const androidCallerKeys = savedApiKeys.filter((k: any) => k.service === "android_caller");
+  const androidCaller = {
+    enabled: androidCallerKeys.find((k: any) => k.key_name === "enabled")?.key_preview === "true",
+    apiBase: androidCallerKeys.find((k: any) => k.key_name === "api_base")?.key_preview || "http://127.0.0.1:4000",
+    mode: (androidCallerKeys.find((k: any) => k.key_name === "mode")?.key_preview === "direct" ? "direct" : "relay") as "direct" | "relay",
+  };
+
   const phoneResultMut = useMutation({
     mutationFn: (payload?: { recommendation?: string; notes?: string }) =>
       jobLensApi.savePhoneResult(c.id, {
@@ -1065,22 +1456,48 @@ function CandidateRow({
   });
 
   const genQuestions = async (regenerate = false) => {
-    setGenLoading(true);
+    setGenLoading(true); setGenError("");
     try {
       const r = await jobLensApi.generateQuestions(sessionId, c.id, regenerate);
       setQuestions(r.questions || []);
+      // Surfaced so "Regenerate keeps giving the same questions" is
+      // recognisable as "AI generation is failing, here's why" instead
+      // of looking like a silent no-op — see generate_questions()'s
+      // docstring on the backend for the full story.
+      setGenError(r.error || "");
     } finally {
       setGenLoading(false);
     }
   };
 
   const handleInterviewDone = async (emotions: any, videoBlob: Blob | null) => {
-    await jobLensApi.saveInterviewResult(c.id, emotions);
+    // Always close the modal and refresh, even if a step below fails —
+    // this used to run these calls with no outer try/catch, so if
+    // saveInterviewResult ever threw (a network hiccup, a 500, etc.) the
+    // whole function threw right there and setInterviewOpen(false)/
+    // onRefresh() below it never ran: the modal was stuck open with the
+    // recording already gone and no way out except reloading the page.
+    // uploadVideo failing was ALSO silently swallowed with zero feedback,
+    // so a failed upload looked identical to a successful one — no error,
+    // just a missing video later with no clue why.
+    let warning = "";
+    try {
+      await jobLensApi.saveInterviewResult(c.id, emotions);
+    } catch (e: any) {
+      warning = e?.response?.data?.detail || "Failed to save interview result.";
+    }
     if (videoBlob) {
-      try { await jobLensApi.uploadVideo(c.id, videoBlob); } catch { /* score/result already saved; video upload failure is non-fatal */ }
+      try {
+        await jobLensApi.uploadVideo(c.id, videoBlob);
+      } catch (e: any) {
+        warning = warning
+          ? `${warning} Video upload also failed: ${e?.response?.data?.detail || e?.message || "unknown error"}.`
+          : `Video upload failed (${e?.response?.data?.detail || e?.message || "unknown error"}) — the interview result was saved, but there's no recording to analyse.`;
+      }
     }
     setInterviewOpen(false);
     onRefresh();
+    if (warning) alert(warning);
   };
 
   const handleContactClick = async () => {
@@ -1294,6 +1711,9 @@ function CandidateRow({
             ) : (
               <div style={{ fontSize: 11, color: "var(--text-muted)" }}>No questions yet</div>
             )}
+            {genError && (
+              <div style={{ fontSize: 10, color: "#f59e0b", marginTop: 4, lineHeight: 1.4 }}>{genError}</div>
+            )}
           </td>
         )}
 
@@ -1321,6 +1741,16 @@ function CandidateRow({
                 ▶ View recorded video
               </button>
             )}
+            {/* Transcript is now saved as soon as transcription succeeds,
+                independent of whether the LLM scoring step after it
+                succeeds or fails — see _run_video_analysis — so this can
+                be available even when analysis itself shows "Failed". */}
+            {c.video_transcript && (
+              <button type="button" onClick={openPopover("videoTranscript")}
+                style={{ background: "none", border: "none", padding: 0, textAlign: "left", cursor: "pointer", fontSize: 10, color: "var(--teal-500)", marginTop: 4, display: "block" }}>
+                📝 View transcript
+              </button>
+            )}
 
             {/* Only show the analysis spinner once there's actually a video
                 to analyse — video_analysis_status defaults to "Pending"
@@ -1335,7 +1765,30 @@ function CandidateRow({
                 {c.video_analysis_status === "Processing" ? "Analysing…" : "Queued…"}
               </div>
             )}
-            {c.has_video && c.video_analysis_status === "Failed" && <div style={{ fontSize: 11, color: "var(--rose-500)", marginTop: 6 }}>Analysis failed</div>}
+            {c.has_video && c.video_analysis_status === "Failed" && (
+              <div style={{ fontSize: 11, color: "var(--rose-500)", marginTop: 6 }}>
+                Analysis failed{c.video_analysis?.error ? ` — ${c.video_analysis.error}` : ""}
+              </div>
+            )}
+            {/* Reanalyze — previously defined (reanalyzeMut) but never
+                actually wired to a button anywhere, so there was no way
+                to retry a Failed/stuck-Pending analysis, or re-run a
+                Completed one (e.g. after fixing a Groq key) without
+                re-recording the whole interview. Visible for ANY status
+                except while one is actively Processing, to avoid
+                double-triggering the same in-flight run. */}
+            {c.has_video && c.video_analysis_status !== "Processing" && (
+              <button type="button" onClick={() => reanalyzeMut.mutate()} disabled={reanalyzeMut.isPending}
+                style={{ background: "none", border: "none", padding: 0, textAlign: "left", cursor: "pointer", fontSize: 10, color: "var(--text-muted)", marginTop: 4, display: "block" }}>
+                <RefreshCw size={10} style={{ display: "inline", marginRight: 3 }} />
+                {reanalyzeMut.isPending ? "Queuing…" : c.video_analysis_status === "Completed" ? "Re-run analysis" : "Retry analysis"}
+              </button>
+            )}
+            {reanalyzeMut.isError && (
+              <div style={{ fontSize: 10, color: "var(--rose-500)", marginTop: 2 }}>
+                {(reanalyzeMut.error as any)?.response?.data?.detail || "Failed to queue analysis."}
+              </div>
+            )}
 
             {(c.dominant_emotion || c.emotion_happy != null) && (
               <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid var(--border)" }}>
@@ -1404,7 +1857,7 @@ function CandidateRow({
             icons already used for these stages elsewhere (sidebar,
             column headers) — no extra emoji glyph layered on top of them. */}
         {mode === "resume" && (
-          <td style={{ minWidth: 160 }}>
+          <td style={{ minWidth: 200 }}>
             {(shortlisted || c.status === "Qualified") ? (
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                 <button className="tiq-btn tiq-btn-outline tiq-btn-sm" style={{ width: "100%", justifyContent: "flex-start", textAlign: "left" }}
@@ -1433,60 +1886,57 @@ function CandidateRow({
             had no UI trigger anywhere, so a candidate's status could never
             move off "Not Started" — this checkbox is that missing trigger. */}
         {mode === "phone" && (
-          <td style={{ minWidth: 220 }}>
-            <div style={{ fontSize: 11, fontWeight: 700, marginBottom: 6, color: c.phone_screening_status === "Completed" ? "#10b981" : "var(--text-muted)" }}>
-              {c.phone_screening_status || "Not Started"}
-            </div>
-            {/* Emails the recruiter's Calendly booking link to the candidate
-                so they can self-schedule the initial HR phone screening.
-                Also registers/updates this candidate's row in Interview
-                Scheduling (see backend send-calendly-link endpoint). */}
-            <button className="tiq-btn tiq-btn-outline tiq-btn-sm" style={{ width: "100%", justifyContent: "flex-start", textAlign: "left", marginBottom: 6, fontSize: 10.5 }}
-              onClick={() => { setCalendlySendError(""); setCalendlySent(false); sendCalendlyMut.mutate(); }}
-              disabled={sendCalendlyMut.isPending || !c.email}>
-              <CalendarClock size={13} strokeWidth={2.5} color={STAGE_ICON_COLOR.phone} />
-              {sendCalendlyMut.isPending ? "Sending…" : "Send Calendly Link"}
+          <td style={{ minWidth: 160 }}>
+            {/* "Send Calendly Link" now sits above the Phone Interview
+                trigger, as its own direct action — it used to be tucked
+                inside the popup below, one extra click away from what's
+                usually the very first thing a recruiter does for a new
+                candidate. Opens CalendlyModal (compose UI) instead of
+                firing an email immediately with a fixed template. */}
+            <button type="button" onClick={() => setCalendlyModalOpen(true)}
+              className="tiq-btn tiq-btn-outline tiq-btn-sm" style={{ width: "100%", justifyContent: "flex-start", marginBottom: 6 }}
+              disabled={!c.email} title={!c.email ? "No candidate email on file" : ""}>
+              <CalendarClock size={13} strokeWidth={2.5} color={STAGE_ICON_COLOR.phone} /> Send Calendly Link
             </button>
-            {!c.email && (
-              <div style={{ fontSize: 9.5, color: "var(--text-muted)", marginBottom: 6 }}>No candidate email on file</div>
-            )}
-            {calendlySent && (
-              <div style={{ fontSize: 9.5, color: "#10b981", marginBottom: 6 }}>Calendly link sent</div>
-            )}
-            {calendlySendError && (
-              <div style={{ fontSize: 9.5, color: "#ef4444", marginBottom: 6 }}>{calendlySendError}</div>
-            )}
-            <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, marginBottom: 8, cursor: c.phone_screening_status && c.phone_screening_status !== "Not Started" ? "default" : "pointer" }}>
-              <input type="checkbox"
-                checked={!!c.phone_screening_status && c.phone_screening_status !== "Not Started"}
-                disabled={phoneContactMut.isPending || (!!c.phone_screening_status && c.phone_screening_status !== "Not Started")}
-                onChange={() => phoneContactMut.mutate()} />
-              Candidate reached by phone
-            </label>
-            <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 8 }}>
-              {["Proceed", "Hold", "Reject"].map((r) => (
-                <button key={r} type="button"
-                  onClick={() => { setPhoneRecommendation(r); phoneResultMut.mutate({ recommendation: r }); }}
-                  style={{
-                    padding: "4px 9px", borderRadius: 999, fontSize: 10, fontWeight: 700, cursor: "pointer",
-                    border: phoneRecommendation === r ? "1.5px solid var(--violet-500)" : "1px solid var(--border)",
-                    color: phoneRecommendation === r ? "var(--violet-500)" : "var(--text-muted)",
-                    background: phoneRecommendation === r ? "rgba(139,92,246,.08)" : "transparent",
-                  }}>
-                  {r}
-                </button>
-              ))}
-            </div>
-            <textarea className="tiq-input" rows={2} style={{ fontSize: 11 }}
-              placeholder="Notes…" value={phoneNotes} onChange={(e) => setPhoneNotes(e.target.value)} />
-            <button className="tiq-btn tiq-btn-outline tiq-btn-sm" style={{ marginTop: 4, fontSize: 10 }}
-              onClick={() => phoneResultMut.mutate({})} disabled={phoneResultMut.isPending}>
-              {phoneResultMut.isPending ? "Saving…" : "Save"}
+            {/* Clicking opens the Phone Screening popup — Call, Text Call
+                Time, "reached" checkbox, recommendation and notes all
+                live there. Button label is fixed ("Phone Interview",
+                matching the Video Interview column's fixed "Start"/
+                "Re-run" label) instead of doubling as the status text —
+                the status has its own badge below now, same as Video
+                Interview's StatusBadge under its Start button. */}
+            <button type="button" onClick={() => setPhoneScreeningPopupOpen(true)}
+              className="tiq-btn tiq-btn-primary tiq-btn-sm" style={{ width: "100%", justifyContent: "flex-start" }}>
+              <Phone size={13} strokeWidth={2.5} /> Phone Interview
             </button>
-            {c.phone_screening_at && (
-              <div style={{ fontSize: 9.5, color: "var(--text-muted)", marginTop: 4 }}>
-                {new Date(c.phone_screening_at).toLocaleDateString()}
-              </div>
+            <div style={{ marginTop: 6 }}><StatusBadge status={c.phone_screening_status || "Not Started"} /></div>
+            {/* Direct, always-visible transcript access — same placement
+                pattern as Video Interview's "▶ View recorded video" link
+                right in the cell, rather than only reachable inside the
+                Phone Interview popup. Opens the popup pre-scrolled to
+                the transcript toggle would be nicer, but simplest and
+                least fragile is just opening the popup itself, where the
+                fetch/view controls already live. */}
+            {c.phone_transcript && (
+              <button type="button" onClick={() => setPhoneScreeningPopupOpen(true)}
+                style={{ background: "none", border: "none", padding: 0, textAlign: "left", cursor: "pointer", fontSize: 10, color: "var(--teal-500)", marginTop: 4, display: "block" }}>
+                📝 View transcript
+              </button>
+            )}
+            {/* Quick-glance summary so recruiters don't have to open the
+                popup just to see what's already happened. */}
+            <div style={{ fontSize: 9.5, color: "var(--text-muted)", marginTop: 4, lineHeight: 1.5 }}>
+              {calendlySent && <div style={{ color: "#10b981" }}>Calendly link sent</div>}
+              {c.phone_call_status && <div>Last call: {c.phone_call_status}</div>}
+              {c.phone_interview_scheduled_at && <div>Scheduled: {new Date(c.phone_interview_scheduled_at).toLocaleString()}</div>}
+              {c.phone_screening_at && <div>Updated {new Date(c.phone_screening_at).toLocaleDateString()}</div>}
+            </div>
+            {calendlyModalOpen && (
+              <CalendlyModal
+                candidate={c}
+                onClose={() => setCalendlyModalOpen(false)}
+                onSent={() => { setCalendlySent(true); onRefresh(); }}
+              />
             )}
           </td>
         )}
@@ -1496,7 +1946,7 @@ function CandidateRow({
             past the Qualified/shortlisted gate just by being on this
             page, so offered unconditionally. */}
         {mode === "phone" && (
-          <td style={{ minWidth: 160 }}>
+          <td style={{ minWidth: 200 }}>
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               <button className="tiq-btn tiq-btn-outline tiq-btn-sm" style={{ width: "100%", justifyContent: "flex-start", textAlign: "left" }}
                       onClick={() => navigate(`/app/videointerview?session=${sessionId}&candidate=${c.id}`)}>
@@ -1569,7 +2019,7 @@ function CandidateRow({
         {/* Next Steps — Video Interview offers Screening Decision only;
             nothing further after it in the pipeline. */}
         {mode === "video" && (
-          <td style={{ minWidth: 150 }}>
+          <td style={{ minWidth: 200 }}>
             <button className="tiq-btn tiq-btn-outline tiq-btn-sm" style={{ width: "100%", justifyContent: "flex-start", textAlign: "left" }}
                     onClick={() => navigate(`/app/finaldecision?session=${sessionId}&candidate=${c.id}`)}>
               <CheckCircle size={14} strokeWidth={2.5} color={STAGE_ICON_COLOR.decision} /> Screening Decision
@@ -1592,6 +2042,160 @@ function CandidateRow({
           </td>
         )}
       </tr>
+
+      {phoneScreeningPopupOpen && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", zIndex: 1150, display: "flex", alignItems: "center", justifyContent: "center" }}
+          onMouseDown={(e) => { if (e.target === e.currentTarget) setPhoneScreeningPopupOpen(false); }}>
+          <div style={{ background: "#ffffff", color: "#111827", borderRadius: 14, padding: 24, maxWidth: 420, width: "92%", maxHeight: "85vh", overflowY: "auto", boxShadow: "0 25px 60px rgba(0,0,0,.4)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+              <div style={{ fontWeight: 800, fontSize: 16 }}>
+                <Phone size={16} style={{ display: "inline", marginRight: 8, color: STAGE_ICON_COLOR.phone }} />
+                Phone Screening — {c.name}
+              </div>
+              <button onClick={() => setPhoneScreeningPopupOpen(false)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 20, color: "#6b7280" }}><X size={18} /></button>
+            </div>
+
+            <div style={{ fontSize: 11, fontWeight: 700, marginBottom: 12, color: c.phone_screening_status === "Completed" ? "#10b981" : "var(--text-muted)" }}>
+              Status: {c.phone_screening_status || "Not Started"}
+            </div>
+
+            {/* Send Calendly Link moved out to its own button directly in
+                the table cell (above Phone Interview) — see the compose
+                modal (CalendlyModal) it now opens instead of living here. */}
+            {calendlySent && (
+              <div style={{ fontSize: 9.5, color: "#10b981", marginBottom: 6 }}>Calendly link sent</div>
+            )}
+
+            {/* Call — click-to-call popup, bridges the recruiter's own
+                configured caller number (Settings > API Keys > Telephony,
+                or a paired Windows/Android device — see Settings > Phone
+                Connection) to this candidate's phone. */}
+            <button className="tiq-btn tiq-btn-outline tiq-btn-sm" style={{ width: "100%", justifyContent: "flex-start", textAlign: "left", marginBottom: 6, fontSize: 11 }}
+              onClick={() => setShowCallPopup(true)}
+              disabled={!c.phone}
+              title={!c.phone ? "No candidate phone number on file" : telephonyConfigured ? "" : "Set up Telephony in Settings first"}>
+              <PhoneCall size={13} strokeWidth={2.5} color={STAGE_ICON_COLOR.phone} /> Call Candidate
+            </button>
+            {c.phone_call_status && (
+              <div style={{ fontSize: 9.5, color: "var(--text-muted)", marginBottom: 6 }}>
+                Last call: {c.phone_call_status}{c.phone_called_at ? ` · ${new Date(c.phone_called_at).toLocaleString()}` : ""}
+              </div>
+            )}
+
+            {/* Call transcript — Twilio calls only (the click-to-call
+                bridge above now records the conversation; see
+                utils/telephony.place_click_to_call). A call placed via
+                the Windows/Android Caller instead dials on the
+                recruiter's own phone's native SIM — a real cellular call
+                TalentIQ has no access to the audio of, so there's
+                nothing to transcribe for that path. */}
+            {c.phone_call_status && (
+              <>
+                <button type="button" onClick={() => phoneTranscriptMut.mutate()} disabled={phoneTranscriptMut.isPending}
+                  style={{ background: "none", border: "none", padding: 0, textAlign: "left", cursor: "pointer", fontSize: 10.5, color: "var(--teal-500)", marginBottom: 4, display: "block" }}>
+                  🎙 {phoneTranscriptMut.isPending ? "Fetching…" : c.phone_transcript ? "Refresh call transcript" : "Fetch Call Transcript"}
+                </button>
+                {phoneTranscriptMut.isError && (
+                  <div style={{ fontSize: 9.5, color: "var(--rose-500)", marginBottom: 6 }}>
+                    {(phoneTranscriptMut.error as any)?.response?.data?.detail || "Failed to fetch transcript."}
+                  </div>
+                )}
+                {c.phone_transcript && (
+                  <>
+                    <button type="button" onClick={() => setShowPhoneTranscript(t => !t)}
+                      style={{ background: "none", border: "none", padding: 0, textAlign: "left", cursor: "pointer", fontSize: 10.5, color: "var(--teal-500)", marginBottom: 6, display: "block" }}>
+                      📝 {showPhoneTranscript ? "Hide transcript ▲" : "View transcript ▼"}
+                    </button>
+                    {showPhoneTranscript && (
+                      <div style={{ padding: 10, background: "#f8fafc", borderRadius: 8, fontSize: 11, lineHeight: 1.6, whiteSpace: "pre-wrap", maxHeight: 220, overflowY: "auto", marginBottom: 8, color: "#111827" }}>
+                        {c.phone_transcript}
+                      </div>
+                    )}
+                  </>
+                )}
+              </>
+            )}
+
+            {/* Text-schedule — the interviewer picks a time and TalentIQ
+                texts the candidate, setting that same time on the
+                Interview Scheduling row (calendar + table) — the
+                alternative to letting the candidate self-schedule via
+                Calendly above. */}
+            <div style={{ display: "flex", gap: 4, marginBottom: 4 }}>
+              <input type="datetime-local" className="tiq-input" style={{ fontSize: 11, padding: "4px 6px", flex: 1 }}
+                value={smsScheduleAt} onChange={e => { setSmsScheduleAt(e.target.value); setSmsSent(false); setSmsError(""); }} />
+            </div>
+            <button className="tiq-btn tiq-btn-outline tiq-btn-sm" style={{ width: "100%", justifyContent: "flex-start", textAlign: "left", marginBottom: 6, fontSize: 11 }}
+              onClick={() => { setSmsError(""); setSmsSent(false); smsScheduleMut.mutate(); }}
+              disabled={!c.phone || !smsScheduleAt || smsScheduleMut.isPending}>
+              <MessageSquare size={13} strokeWidth={2.5} color={STAGE_ICON_COLOR.phone} />
+              {smsScheduleMut.isPending ? "Sending…" : "Text Call Time"}
+            </button>
+            {smsSent && <div style={{ fontSize: 9.5, color: "#10b981", marginBottom: 6 }}>Text sent — time saved to schedule</div>}
+            {smsError && <div style={{ fontSize: 9.5, color: "#ef4444", marginBottom: 6 }}>{smsError}</div>}
+            {c.phone_interview_scheduled_at && (
+              <div style={{ fontSize: 9.5, color: "var(--text-muted)", marginBottom: 6 }}>
+                Scheduled: {new Date(c.phone_interview_scheduled_at).toLocaleString()}
+              </div>
+            )}
+            {!telephonyConfigured && (
+              <div style={{ fontSize: 9.5, color: "var(--text-muted)", marginBottom: 6 }}>
+                Set up Telephony under Settings → API Keys (or pair a device under Settings → Phone Connection) to enable calling/texting.
+              </div>
+            )}
+
+            <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, marginBottom: 8, cursor: (phoneContactedOptimistic ?? (!!c.phone_screening_status && c.phone_screening_status !== "Not Started")) ? "default" : "pointer" }}>
+              <input type="checkbox"
+                checked={phoneContactedOptimistic ?? (!!c.phone_screening_status && c.phone_screening_status !== "Not Started")}
+                disabled={phoneContactMut.isPending || (phoneContactedOptimistic ?? (!!c.phone_screening_status && c.phone_screening_status !== "Not Started"))}
+                onChange={() => { setPhoneContactedOptimistic(true); phoneContactMut.mutate(); }} />
+              Candidate reached by phone
+            </label>
+            {phoneContactMut.isError && (
+              <div style={{ fontSize: 9.5, color: "var(--rose-500)", marginBottom: 6 }}>
+                {(phoneContactMut.error as any)?.response?.data?.detail || "Failed to mark as contacted — try again."}
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 8 }}>
+              {["Proceed", "Hold", "Reject"].map((r) => (
+                <button key={r} type="button"
+                  onClick={() => { setPhoneRecommendation(r); phoneResultMut.mutate({ recommendation: r }); }}
+                  style={{
+                    padding: "4px 9px", borderRadius: 999, fontSize: 10, fontWeight: 700, cursor: "pointer",
+                    border: phoneRecommendation === r ? "1.5px solid var(--violet-500)" : "1px solid var(--border)",
+                    color: phoneRecommendation === r ? "var(--violet-500)" : "var(--text-muted)",
+                    background: phoneRecommendation === r ? "rgba(139,92,246,.08)" : "transparent",
+                  }}>
+                  {r}
+                </button>
+              ))}
+            </div>
+            <textarea className="tiq-input" rows={2} style={{ fontSize: 11, width: "100%" }}
+              placeholder="Notes…" value={phoneNotes} onChange={(e) => setPhoneNotes(e.target.value)} />
+            <button className="tiq-btn tiq-btn-outline tiq-btn-sm" style={{ marginTop: 4, fontSize: 11 }}
+              onClick={() => phoneResultMut.mutate({})} disabled={phoneResultMut.isPending}>
+              {phoneResultMut.isPending ? "Saving…" : "Save"}
+            </button>
+            {c.phone_screening_at && (
+              <div style={{ fontSize: 9.5, color: "var(--text-muted)", marginTop: 4 }}>
+                {new Date(c.phone_screening_at).toLocaleDateString()}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {showCallPopup && (
+        <CallCandidatePopup
+          candidateName={c.name}
+          candidatePhone={c.phone}
+          callerNumber={telephonyStatus?.caller_number || ""}
+          telephonyConfigured={telephonyConfigured}
+          callMut={callMut}
+          onClose={() => setShowCallPopup(false)}
+          androidCaller={androidCaller}
+        />
+      )}
 
       {showDetailsModal && (
         <ScoreDetailsModal
@@ -1719,6 +2323,14 @@ function CandidateRow({
           {c.video_analysis.summary && (
             <p style={{ fontSize: 11.5, color: "#374151", marginBottom: 10, lineHeight: 1.6 }}>{c.video_analysis.summary}</p>
           )}
+          {c.video_analysis.auto_decision && (
+            <div style={{ fontSize: 11, marginBottom: 10, padding: "8px 10px", borderRadius: 8, background: "#f8fafc", color: "#374151" }}>
+              <Gavel size={11} style={{ display: "inline", marginRight: 5, verticalAlign: -1 }} />
+              Auto-decided <strong>{c.video_analysis.auto_decision}</strong> from a weighted score of{" "}
+              <strong>{c.video_analysis.auto_decision_score}</strong> (Settings → Adjust Auto-Decision) — change it
+              manually below if you disagree.
+            </div>
+          )}
           {c.video_analysis.strengths?.length > 0 && (
             <div style={{ marginBottom: 8 }}>
               <div style={{ fontSize: 10, fontWeight: 700, color: "#0d9488", marginBottom: 4 }}>STRENGTHS</div>
@@ -1733,6 +2345,26 @@ function CandidateRow({
               <ul style={{ margin: 0, paddingLeft: 14, fontSize: 11.5 }}>
                 {c.video_analysis.concerns.map((s: string, i: number) => <li key={i}>{s}</li>)}
               </ul>
+            </div>
+          )}
+          {c.video_analysis.qa_pairs?.length > 0 && (
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: "#374151", marginBottom: 6 }}>QUESTION-BY-QUESTION</div>
+              {/* The recording is one continuous file with no built-in
+                  boundaries between questions — this breakdown is the
+                  LLM's best-effort alignment of the transcript to each
+                  question actually asked (see _analyze_transcript's
+                  prompt), not a hard timestamp split. An empty answer
+                  means it looks like that question went unanswered
+                  (skipped, cut off, inaudible), not that something broke. */}
+              {c.video_analysis.qa_pairs.map((qa: { question: string; answer_transcript: string }, i: number) => (
+                <div key={i} style={{ marginBottom: 8, paddingBottom: 8, borderBottom: i < c.video_analysis.qa_pairs.length - 1 ? "1px solid #e5e7eb" : "none" }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: "#111827", marginBottom: 3 }}>Q{i + 1}: {qa.question}</div>
+                  <div style={{ fontSize: 11, color: qa.answer_transcript ? "#374151" : "#9ca3af", lineHeight: 1.5 }}>
+                    {qa.answer_transcript || "(no answer detected for this question)"}
+                  </div>
+                </div>
+              ))}
             </div>
           )}
           {c.video_transcript && (
@@ -1750,12 +2382,67 @@ function CandidateRow({
           )}
         </AnchoredPopover>
       )}
+
+      {/* Standalone transcript popover — reachable directly via "View
+          transcript" in the cell, independent of whether AI analysis
+          (scoring) ever completed. See _run_video_analysis: the
+          transcript is now saved the moment transcription succeeds,
+          even if the LLM scoring step after it fails. */}
+      {popover?.kind === "videoTranscript" && c.video_transcript && (
+        <AnchoredPopover x={popover.x} y={popover.y} width={Math.max(popover.width, 340)} openAbove={popover.openAbove} onClose={() => setPopover(null)}>
+          <div style={{ fontWeight: 700, fontSize: 12, marginBottom: 10 }}>Interview Transcript</div>
+          <div style={{ padding: 10, background: "#f8fafc", borderRadius: 8, fontSize: 11.5, lineHeight: 1.6, whiteSpace: "pre-wrap", maxHeight: 360, overflowY: "auto" }}>
+            {c.video_transcript}
+          </div>
+        </AnchoredPopover>
+      )}
     </>
   );
 }
 
 // ─── MAIN PAGE ─────────────────────────────────────────────────────────────
-export default function JobLensWorkspace({ mode = "resume" }: { mode?: "resume" | "phone" | "video" | "final" }) {
+// Raw, sortable/filterable value behind each column of the main
+// candidate table, keyed the same as colWidths above — used for the
+// header dropdown filters, the global search box, and column sorting.
+// This is deliberately separate from how CandidateRow actually renders
+// each cell (badges, buttons, progress bars…): filtering/sorting always
+// compares the underlying data, never the JSX.
+const CANDIDATE_TABLE_COLS: Record<string, "text" | "number"> = {
+  candidate: "text", email: "text", phone: "text", vendor: "text", resumeSummary: "text",
+  atsScore: "number", keyStrength: "text", considerations: "text", status: "text",
+  interviewQuestions: "text", videoInterview: "text", phoneScreeningDecision: "text",
+  videoInterviewScore: "number", phoneScreening: "text", decision: "text", comments: "text",
+  candidateContact: "text", shortlist: "text",
+};
+
+function getCandidateColValue(c: any, key: string): string | number | null {
+  switch (key) {
+    case "candidate": return c.name || "";
+    case "email": return c.email || "";
+    case "phone": return c.phone || "";
+    case "vendor": return c.source_vendor_name || "";
+    case "resumeSummary": {
+      const rs = c.resume_summary || {};
+      return [...(rs.experience || []), ...(rs.skills || []), ...(rs.education || []), ...(rs.achievements || []), ...(rs.availability_work_rights || [])].join(", ");
+    }
+    case "atsScore": return c.ats_score ?? null;
+    case "keyStrength": return (c.matched_skills || []).join(", ");
+    case "considerations": return (c.missing_skills || []).join(", ");
+    case "status": return c.status || "";
+    case "interviewQuestions": return (c.interview_questions || []).join(" | ");
+    case "videoInterview": return c.video_status || "";
+    case "phoneScreeningDecision": return c.phone_screening_recommendation || "";
+    case "videoInterviewScore": return c.video_analysis?.overall_score ?? null;
+    case "phoneScreening": return c.phone_screening_status || "";
+    case "decision": return c.video_screening_recommendation || "";
+    case "comments": return c.video_screening_notes || "";
+    case "candidateContact": return c.contacted ? "Sent" : "Not Sent";
+    case "shortlist": return c.shortlisted ? "Yes" : "No";
+    default: return null;
+  }
+}
+
+export default function JobLensWorkspace({ mode = "resume", embedded = false }: { mode?: "resume" | "phone" | "video" | "final"; embedded?: boolean }) {
     const { user } = useAuth();
     const isAdmin = user?.role === "admin";
     const qc = useQueryClient();
@@ -1809,6 +2496,48 @@ export default function JobLensWorkspace({ mode = "resume" }: { mode?: "resume" 
     const fromUrl = searchParams.get("session");
     return fromUrl ? Number(fromUrl) : null;
   });
+
+  // ── Video Interview auto-decision: weights + threshold constraints ───
+  // Same "configurable, re-appliable, never silently overwrites a manual
+  // choice unless explicitly re-applied" idea as the resume-screening
+  // weights above, applied to the AI analysis's three sub-scores instead.
+  // Placed after activeSessionId's declaration on purpose — this used to
+  // sit BEFORE it (right after reweightMut), and the useEffect's
+  // dependency array referenced activeSessionId at that point in the
+  // component body, before its `const` had actually run: a genuine
+  // temporal-dead-zone crash ("Cannot access 'activeSessionId' before
+  // initialization") on every single render of this page, not just
+  // video mode — dependency arrays are evaluated immediately as part of
+  // the useEffect(...) call itself, unlike the effect body/callbacks
+  // below, which only run later and were never the actual problem.
+  const [showVideoDecisionPanel, setShowVideoDecisionPanel] = useState(false);
+  const [vdWeights, setVdWeights] = useState({ communication: 30, relevance: 40, confidence: 30 });
+  const [vdThresholds, setVdThresholds] = useState({ proceed_min: 70, reject_max: 40 });
+  const [vdLoaded, setVdLoaded] = useState<number | null>(null);
+  useEffect(() => {
+    if (mode === "video" && activeSessionId && showVideoDecisionPanel && vdLoaded !== activeSessionId) {
+      api.get(`/api/joblens/sessions/${activeSessionId}/video-decision-settings`).then(({ data }) => {
+        setVdWeights({
+          communication: Math.round((data.weights.communication ?? 0.3) * 100),
+          relevance: Math.round((data.weights.relevance ?? 0.4) * 100),
+          confidence: Math.round((data.weights.confidence ?? 0.3) * 100),
+        });
+        setVdThresholds(data.thresholds);
+        setVdLoaded(activeSessionId);
+      });
+    }
+  }, [mode, activeSessionId, showVideoDecisionPanel, vdLoaded]);
+  const videoReweightMut = useMutation({
+    mutationFn: (sessionId: number) => api.post(`/api/joblens/sessions/${sessionId}/video-decision-settings`, {
+      weights: { communication: vdWeights.communication / 100, relevance: vdWeights.relevance / 100, confidence: vdWeights.confidence / 100 },
+      thresholds: vdThresholds,
+    }).then(r => r.data),
+    onSuccess: () => {
+      if (activeSessionId) qc.invalidateQueries({ queryKey: ["joblens-session", activeSessionId] });
+    },
+  });
+  const vdWeightTotal = vdWeights.communication + vdWeights.relevance + vdWeights.confidence;
+
   const [tab, setTab] = useState<"new"|"history">(
     mode === "resume" && !searchParams.get("session") ? "new" : "history"
   );
@@ -1860,10 +2589,32 @@ export default function JobLensWorkspace({ mode = "resume" }: { mode?: "resume" 
   const [colWidths, setColWidths] = useState<Record<string, number>>({
     rank: 50, candidate: 170, email: 190, phone: 130, vendor: 130, resumeSummary: 220,
     atsScore: 130, keyStrength: 180, considerations: 170, status: 110, interviewQuestions: 220,
-    videoInterview: 200, phoneScreeningDecision: 150, videoInterviewScore: 150, nextSteps: 170,
+    videoInterview: 200, phoneScreeningDecision: 150, videoInterviewScore: 150, nextSteps: 210,
     phoneScreening: 230, decision: 160, comments: 190, candidateContact: 180, details: 90, shortlist: 100,
   });
   const setColWidth = (key: string, w: number) => setColWidths((prev) => ({ ...prev, [key]: w }));
+
+  // Per-column dropdown filter (Excel-style, single value + built-in
+  // search — see ResizableFilterHeader), a global search box above the
+  // table, and click-to-sort headers, for the main candidate table.
+  // Reset whenever the mode tab or the active session changes so a
+  // filter/sort left on from a different table/session doesn't silently
+  // hide rows on the next one.
+  const [candColFilters, setCandColFilters] = useState<Record<string, Set<string>>>({});
+  const [candSort, setCandSort] = useState<{ col: string; dir: "asc" | "desc" } | null>(null);
+  const [candSearch, setCandSearch] = useState("");
+  useEffect(() => {
+    setCandColFilters({});
+    setCandSort(null);
+    setCandSearch("");
+  }, [mode, activeSessionId]);
+  const setCandColFilter = (key: string, next: Set<string> | undefined) =>
+    setCandColFilters((prev) => { const n = { ...prev }; if (next) n[key] = next; else delete n[key]; return n; });
+  const toggleCandSort = (col: string) => setCandSort((prev) => {
+    if (!prev || prev.col !== col) return { col, dir: "asc" };
+    if (prev.dir === "asc") return { col, dir: "desc" };
+    return null;
+  });
   useEffect(() => {
     if (activeSessionId || userPickedSession || searchParams.get("session")) return;
     if (sessions.length > 0) {
@@ -1991,6 +2742,42 @@ export default function JobLensWorkspace({ mode = "resume" }: { mode?: "resume" 
   const finalShortlisted = candidates.filter(c => c.shortlisted).length;
   const finalPending     = candidates.length - finalShortlisted;
 
+  // Unique values per column (for the filter dropdown options) always
+  // come from the full `candidates` list, not the already-filtered one —
+  // otherwise picking a value in one column would shrink the choices
+  // available in every other column's dropdown.
+  const candColOptions = (key: string): string[] =>
+    Array.from(new Set(candidates.map(c => String(getCandidateColValue(c, key) ?? "")).filter(v => v !== ""))).sort();
+
+  const displayCandidates = (() => {
+    let out = candidates;
+    if (candSearch.trim()) {
+      const q = candSearch.trim().toLowerCase();
+      out = out.filter(c => Object.keys(CANDIDATE_TABLE_COLS).some(k =>
+        String(getCandidateColValue(c, k) ?? "").toLowerCase().includes(q)));
+    }
+    for (const [key, val] of Object.entries(candColFilters)) {
+      if (!val) continue;
+      out = out.filter(c => val.has(String(getCandidateColValue(c, key) ?? "")));
+    }
+    if (candSort) {
+      const { col, dir } = candSort;
+      out = [...out].sort((a, b) => {
+        const av = getCandidateColValue(a, col), bv = getCandidateColValue(b, col);
+        if (av === null || av === "" || av === undefined) return 1;
+        if (bv === null || bv === "" || bv === undefined) return -1;
+        let cmp: number;
+        if (CANDIDATE_TABLE_COLS[col] === "number") {
+          cmp = Number(av) - Number(bv);
+        } else {
+          cmp = String(av).localeCompare(String(bv));
+        }
+        return dir === "asc" ? cmp : -cmp;
+      });
+    }
+    return out;
+  })();
+
   const MODE_META = {
     resume: { title: "Resume Screening", sub: "AI-ranked CVs — score, shortlist, and export candidates against a JD.", icon: Users, color: "#8b5cf6" },
     phone:  { title: "Phone Interview",  sub: "AI-generated call questions and logged outcomes for Qualified/shortlisted candidates.", icon: Users, color: "#ec4899" },
@@ -2000,13 +2787,21 @@ export default function JobLensWorkspace({ mode = "resume" }: { mode?: "resume" 
   const meta = MODE_META[mode];
 
   return (
-    <div>
-      <div className="tiq-page-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 8 }}>
-        <h1 className="tiq-page-title" style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <meta.icon size={22} color={meta.color} /> {meta.title}
-        </h1>
-        <p className="tiq-page-sub">{meta.sub}</p>
-      </div>
+    <div className={embedded ? "" : "tiq-content"}>
+      {!embedded && (
+        <div className="tiq-page-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 8 }}>
+          <div>
+            <div className="tiq-page-title">{meta.title}</div>
+            <div className="tiq-page-sub">{meta.sub}</div>
+          </div>
+          {mode === "video" && <AnalyzeUnanalyzedVideosButton />}
+        </div>
+      )}
+      {embedded && mode === "video" && (
+        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 8 }}>
+          <AnalyzeUnanalyzedVideosButton />
+        </div>
+      )}
 
       {/* Tabs row — session dropdown sits left-aligned on its own row below */}
       <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
@@ -2396,7 +3191,7 @@ export default function JobLensWorkspace({ mode = "resume" }: { mode?: "resume" 
 
               {/* Table — full pane width */}
               <div className="tiq-card" style={{ padding: 0 }}>
-                <div style={{ padding: "12px 16px", borderBottom: "1px solid var(--border)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div style={{ padding: "12px 16px", borderBottom: "1px solid var(--border)", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
                   <div style={{ fontWeight: 700, fontSize: 14 }}>
                     Ranked Candidates
                     <span style={{ fontSize: 12, color: "var(--text-muted)", fontWeight: 400, marginLeft: 8 }}>
@@ -2407,6 +3202,11 @@ export default function JobLensWorkspace({ mode = "resume" }: { mode?: "resume" 
                     <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" onClick={() => refetchSession()}>
                       <RefreshCw size={12} />
                     </button>
+                    {mode === "video" && (
+                      <button className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={() => setShowVideoDecisionPanel(o => !o)}>
+                        <Gavel size={12} /> {showVideoDecisionPanel ? "Hide Auto-Decision" : "Adjust Auto-Decision"}
+                      </button>
+                    )}
                     <button className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={() => setShowReweightPanel(o => !o)}>
                       <BarChart2 size={12} /> {showReweightPanel ? "Hide Weights" : "Adjust Weights"}
                     </button>
@@ -2416,6 +3216,78 @@ export default function JobLensWorkspace({ mode = "resume" }: { mode?: "resume" 
                     </button>
                   </div>
                 </div>
+                {/* Global search — matches against every filterable column
+                    (name, email, phone, status, scores, notes…), on top
+                    of the per-column dropdown filters in the header. */}
+                <div style={{ padding: "10px 16px", borderBottom: "1px solid var(--border)" }}>
+                  <div style={{ position: "relative", maxWidth: 300 }}>
+                    <Search size={13} style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", color: "var(--text-muted)" }} />
+                    <input
+                      value={candSearch}
+                      onChange={e => setCandSearch(e.target.value)}
+                      placeholder="Search candidates…"
+                      className="tiq-input"
+                      style={{ paddingLeft: 28, fontSize: 12, height: 32, width: "100%", boxSizing: "border-box" }}
+                    />
+                    {candSearch && (
+                      <X size={13} onClick={() => setCandSearch("")}
+                        style={{ position: "absolute", right: 9, top: "50%", transform: "translateY(-50%)", color: "var(--text-muted)", cursor: "pointer" }} />
+                    )}
+                  </div>
+                  <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 6 }}>
+                    {displayCandidates.length}{displayCandidates.length !== candidates.length ? ` / ${candidates.length}` : ""} candidates
+                  </div>
+                </div>
+                {mode === "video" && showVideoDecisionPanel && (
+                  <div style={{ padding: "14px 16px", borderBottom: "1px solid var(--border)" }}>
+                    <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginBottom: 14, lineHeight: 1.5 }}>
+                      Every completed video analysis auto-sets a Proceed / Hold / Reject recommendation from these
+                      weights and thresholds — recruiters can still change it manually afterward, and a manual
+                      change is never silently overwritten by a later re-analysis. Use "Apply" below to instantly
+                      recompute the recommendation for every already-analyzed candidate in this session with new
+                      settings, the same way Resume Screening's weights can be re-applied without re-scoring from
+                      scratch.
+                    </div>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: vdWeightTotal === 100 ? "var(--text-muted)" : "#f59e0b", marginBottom: 8 }}>
+                      Weights total: {vdWeightTotal}%{vdWeightTotal !== 100 && " (doesn't need to be exactly 100 — just shown for reference)"}
+                    </div>
+                    <SliderRow label="Communication" value={vdWeights.communication}
+                      onChange={v => setVdWeights({ ...vdWeights, communication: v })} />
+                    <SliderRow label="Relevance to questions asked" value={vdWeights.relevance}
+                      onChange={v => setVdWeights({ ...vdWeights, relevance: v })} />
+                    <SliderRow label="Confidence" value={vdWeights.confidence}
+                      onChange={v => setVdWeights({ ...vdWeights, confidence: v })} />
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 14, marginBottom: 4 }}>
+                      <div>
+                        <label style={{ fontSize: 11, color: "var(--text-muted)", fontWeight: 600 }}>Proceed if score ≥</label>
+                        <input type="number" min={0} max={100} className="tiq-input" value={vdThresholds.proceed_min}
+                          onChange={e => setVdThresholds({ ...vdThresholds, proceed_min: Number(e.target.value) })} />
+                      </div>
+                      <div>
+                        <label style={{ fontSize: 11, color: "var(--text-muted)", fontWeight: 600 }}>Reject if score ≤</label>
+                        <input type="number" min={0} max={100} className="tiq-input" value={vdThresholds.reject_max}
+                          onChange={e => setVdThresholds({ ...vdThresholds, reject_max: Number(e.target.value) })} />
+                      </div>
+                    </div>
+                    <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 14 }}>
+                      Score ≥ {vdThresholds.proceed_min} → Proceed · {vdThresholds.reject_max}–{vdThresholds.proceed_min} → Hold · ≤ {vdThresholds.reject_max} → Reject
+                    </div>
+                    <div style={{ textAlign: "right" }}>
+                      <button className="tiq-btn tiq-btn-primary tiq-btn-sm"
+                        onClick={() => videoReweightMut.mutate(activeSessionId!)}
+                        disabled={videoReweightMut.isPending || !activeSessionId}>
+                        {videoReweightMut.isPending
+                          ? <><span className="tiq-spinner" style={{ width: 12, height: 12, borderWidth: 2 }} /> Applying…</>
+                          : <><Sparkles size={12} /> Apply to Already-Analyzed Candidates</>}
+                      </button>
+                      {videoReweightMut.isSuccess && (
+                        <div style={{ fontSize: 10.5, color: "#10b981", marginTop: 4 }}>
+                          Updated {videoReweightMut.data?.updated ?? 0} candidate(s).
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
                 {showReweightPanel && (
                   <div style={{ padding: "0 16px" }}>
                     <CandidateLensWeightsPanel
@@ -2444,33 +3316,75 @@ export default function JobLensWorkspace({ mode = "resume" }: { mode?: "resume" 
                   <table className="tiq-table" style={{ minWidth: mode === "resume" ? 1200 : mode === "video" ? 1150 : mode === "phone" ? 900 : 850, width: "100%", tableLayout: "fixed" }}>
                     <thead ref={theadRef}>
                       <tr>
+                        {/* # is the row's rank in the current view (after
+                            any sort/filter), not a data field, so it's
+                            neither filterable nor sortable itself. */}
                         <ResizableFilterHeader label="#" filterable={false} width={colWidths.rank} onWidthChange={(w) => setColWidth("rank", w)} align="center" />
-                        <ResizableFilterHeader label="Candidate" filterable={false} width={colWidths.candidate} onWidthChange={(w) => setColWidth("candidate", w)} />
-                        {mode === "resume" && <ResizableFilterHeader label="Email" filterable={false} width={colWidths.email} onWidthChange={(w) => setColWidth("email", w)} />}
-                        <ResizableFilterHeader label="Phone" filterable={false} width={colWidths.phone} onWidthChange={(w) => setColWidth("phone", w)} />
-                        {mode === "resume" && <ResizableFilterHeader label="Vendor" filterable={false} width={colWidths.vendor} onWidthChange={(w) => setColWidth("vendor", w)} />}
-                        {mode === "resume" && <ResizableFilterHeader label="Resume Summary" filterable={false} width={colWidths.resumeSummary} onWidthChange={(w) => setColWidth("resumeSummary", w)} />}
-                        <ResizableFilterHeader label={mode === "final" ? "Resume Screening Score" : "ATS Score"} filterable={false} width={colWidths.atsScore} onWidthChange={(w) => setColWidth("atsScore", w)} />
-                        {mode === "resume" && <ResizableFilterHeader label="Key Strength" filterable={false} width={colWidths.keyStrength} onWidthChange={(w) => setColWidth("keyStrength", w)} />}
-                        {mode === "resume" && <ResizableFilterHeader label="Considerations" filterable={false} width={colWidths.considerations} onWidthChange={(w) => setColWidth("considerations", w)} />}
-                        {mode === "resume" && <ResizableFilterHeader label="Status" filterable={false} width={colWidths.status} onWidthChange={(w) => setColWidth("status", w)} />}
-                        {(mode === "phone" || mode === "video") && <ResizableFilterHeader label="Interview Questions" filterable={false} width={colWidths.interviewQuestions} onWidthChange={(w) => setColWidth("interviewQuestions", w)} />}
-                        {mode === "video" && <ResizableFilterHeader label="Video Interview" filterable={false} width={colWidths.videoInterview} onWidthChange={(w) => setColWidth("videoInterview", w)} />}
-                        {mode === "final" && <ResizableFilterHeader label="Phone Screening Decision" filterable={false} width={colWidths.phoneScreeningDecision} onWidthChange={(w) => setColWidth("phoneScreeningDecision", w)} />}
-                        {mode === "final" && <ResizableFilterHeader label="Video Interview Score" filterable={false} width={colWidths.videoInterviewScore} onWidthChange={(w) => setColWidth("videoInterviewScore", w)} />}
+                        <ResizableFilterHeader label="Candidate" width={colWidths.candidate} onWidthChange={(w) => setColWidth("candidate", w)}
+                          value={candColFilters.candidate} options={candColOptions("candidate")} onChange={(v) => setCandColFilter("candidate", v)}
+                          sortDir={candSort?.col === "candidate" ? candSort.dir : null} onSortClick={() => toggleCandSort("candidate")} />
+                        {mode === "resume" && <ResizableFilterHeader label="Email" width={colWidths.email} onWidthChange={(w) => setColWidth("email", w)}
+                          value={candColFilters.email} options={candColOptions("email")} onChange={(v) => setCandColFilter("email", v)}
+                          sortDir={candSort?.col === "email" ? candSort.dir : null} onSortClick={() => toggleCandSort("email")} />}
+                        <ResizableFilterHeader label="Phone" width={colWidths.phone} onWidthChange={(w) => setColWidth("phone", w)}
+                          value={candColFilters.phone} options={candColOptions("phone")} onChange={(v) => setCandColFilter("phone", v)}
+                          sortDir={candSort?.col === "phone" ? candSort.dir : null} onSortClick={() => toggleCandSort("phone")} />
+                        {mode === "resume" && <ResizableFilterHeader label="Vendor" width={colWidths.vendor} onWidthChange={(w) => setColWidth("vendor", w)}
+                          value={candColFilters.vendor} options={candColOptions("vendor")} onChange={(v) => setCandColFilter("vendor", v)}
+                          sortDir={candSort?.col === "vendor" ? candSort.dir : null} onSortClick={() => toggleCandSort("vendor")} />}
+                        {mode === "resume" && <ResizableFilterHeader label="Resume Summary" width={colWidths.resumeSummary} onWidthChange={(w) => setColWidth("resumeSummary", w)}
+                          value={candColFilters.resumeSummary} options={candColOptions("resumeSummary")} onChange={(v) => setCandColFilter("resumeSummary", v)}
+                          sortDir={candSort?.col === "resumeSummary" ? candSort.dir : null} onSortClick={() => toggleCandSort("resumeSummary")} />}
+                        <ResizableFilterHeader label={mode === "final" ? "Resume Screening Score" : "ATS Score"} width={colWidths.atsScore} onWidthChange={(w) => setColWidth("atsScore", w)}
+                          value={candColFilters.atsScore} options={candColOptions("atsScore")} onChange={(v) => setCandColFilter("atsScore", v)}
+                          sortDir={candSort?.col === "atsScore" ? candSort.dir : null} onSortClick={() => toggleCandSort("atsScore")} />
+                        {mode === "resume" && <ResizableFilterHeader label="Key Strength" width={colWidths.keyStrength} onWidthChange={(w) => setColWidth("keyStrength", w)}
+                          value={candColFilters.keyStrength} options={candColOptions("keyStrength")} onChange={(v) => setCandColFilter("keyStrength", v)}
+                          sortDir={candSort?.col === "keyStrength" ? candSort.dir : null} onSortClick={() => toggleCandSort("keyStrength")} />}
+                        {mode === "resume" && <ResizableFilterHeader label="Considerations" width={colWidths.considerations} onWidthChange={(w) => setColWidth("considerations", w)}
+                          value={candColFilters.considerations} options={candColOptions("considerations")} onChange={(v) => setCandColFilter("considerations", v)}
+                          sortDir={candSort?.col === "considerations" ? candSort.dir : null} onSortClick={() => toggleCandSort("considerations")} />}
+                        {mode === "resume" && <ResizableFilterHeader label="Status" width={colWidths.status} onWidthChange={(w) => setColWidth("status", w)}
+                          value={candColFilters.status} options={candColOptions("status")} onChange={(v) => setCandColFilter("status", v)}
+                          sortDir={candSort?.col === "status" ? candSort.dir : null} onSortClick={() => toggleCandSort("status")} />}
+                        {(mode === "phone" || mode === "video") && <ResizableFilterHeader label="Interview Questions" width={colWidths.interviewQuestions} onWidthChange={(w) => setColWidth("interviewQuestions", w)}
+                          value={candColFilters.interviewQuestions} options={candColOptions("interviewQuestions")} onChange={(v) => setCandColFilter("interviewQuestions", v)}
+                          sortDir={candSort?.col === "interviewQuestions" ? candSort.dir : null} onSortClick={() => toggleCandSort("interviewQuestions")} />}
+                        {mode === "video" && <ResizableFilterHeader label="Video Interview" width={colWidths.videoInterview} onWidthChange={(w) => setColWidth("videoInterview", w)}
+                          value={candColFilters.videoInterview} options={candColOptions("videoInterview")} onChange={(v) => setCandColFilter("videoInterview", v)}
+                          sortDir={candSort?.col === "videoInterview" ? candSort.dir : null} onSortClick={() => toggleCandSort("videoInterview")} />}
+                        {mode === "final" && <ResizableFilterHeader label="Phone Screening Decision" width={colWidths.phoneScreeningDecision} onWidthChange={(w) => setColWidth("phoneScreeningDecision", w)}
+                          value={candColFilters.phoneScreeningDecision} options={candColOptions("phoneScreeningDecision")} onChange={(v) => setCandColFilter("phoneScreeningDecision", v)}
+                          sortDir={candSort?.col === "phoneScreeningDecision" ? candSort.dir : null} onSortClick={() => toggleCandSort("phoneScreeningDecision")} />}
+                        {mode === "final" && <ResizableFilterHeader label="Video Interview Score" width={colWidths.videoInterviewScore} onWidthChange={(w) => setColWidth("videoInterviewScore", w)}
+                          value={candColFilters.videoInterviewScore} options={candColOptions("videoInterviewScore")} onChange={(v) => setCandColFilter("videoInterviewScore", v)}
+                          sortDir={candSort?.col === "videoInterviewScore" ? candSort.dir : null} onSortClick={() => toggleCandSort("videoInterviewScore")} />}
+                        {/* Next Steps is just navigation buttons — no
+                            underlying data, so it stays non-filterable and
+                            non-sortable like # and Details/Shortlist below. */}
                         {mode === "resume" && <ResizableFilterHeader label="Next Steps" filterable={false} width={colWidths.nextSteps} onWidthChange={(w) => setColWidth("nextSteps", w)} />}
-                        {mode === "phone" && <ResizableFilterHeader label="Manual Phone Screening" filterable={false} width={colWidths.phoneScreening} onWidthChange={(w) => setColWidth("phoneScreening", w)} />}
+                        {mode === "phone" && <ResizableFilterHeader label="Manual Phone Screening" width={colWidths.phoneScreening} onWidthChange={(w) => setColWidth("phoneScreening", w)}
+                          value={candColFilters.phoneScreening} options={candColOptions("phoneScreening")} onChange={(v) => setCandColFilter("phoneScreening", v)}
+                          sortDir={candSort?.col === "phoneScreening" ? candSort.dir : null} onSortClick={() => toggleCandSort("phoneScreening")} />}
                         {mode === "phone" && <ResizableFilterHeader label="Next Steps" filterable={false} width={colWidths.nextSteps} onWidthChange={(w) => setColWidth("nextSteps", w)} />}
-                        {mode === "video" && <ResizableFilterHeader label="Decision" filterable={false} width={colWidths.decision} onWidthChange={(w) => setColWidth("decision", w)} />}
-                        {mode === "video" && <ResizableFilterHeader label="Comments" filterable={false} width={colWidths.comments} onWidthChange={(w) => setColWidth("comments", w)} />}
-                        {mode === "video" && <ResizableFilterHeader label="Candidate Contact" filterable={false} width={colWidths.candidateContact} onWidthChange={(w) => setColWidth("candidateContact", w)} />}
+                        {mode === "video" && <ResizableFilterHeader label="Decision" width={colWidths.decision} onWidthChange={(w) => setColWidth("decision", w)}
+                          value={candColFilters.decision} options={candColOptions("decision")} onChange={(v) => setCandColFilter("decision", v)}
+                          sortDir={candSort?.col === "decision" ? candSort.dir : null} onSortClick={() => toggleCandSort("decision")} />}
+                        {mode === "video" && <ResizableFilterHeader label="Comments" width={colWidths.comments} onWidthChange={(w) => setColWidth("comments", w)}
+                          value={candColFilters.comments} options={candColOptions("comments")} onChange={(v) => setCandColFilter("comments", v)}
+                          sortDir={candSort?.col === "comments" ? candSort.dir : null} onSortClick={() => toggleCandSort("comments")} />}
+                        {mode === "video" && <ResizableFilterHeader label="Candidate Contact" width={colWidths.candidateContact} onWidthChange={(w) => setColWidth("candidateContact", w)}
+                          value={candColFilters.candidateContact} options={candColOptions("candidateContact")} onChange={(v) => setCandColFilter("candidateContact", v)}
+                          sortDir={candSort?.col === "candidateContact" ? candSort.dir : null} onSortClick={() => toggleCandSort("candidateContact")} />}
                         {mode === "video" && <ResizableFilterHeader label="Next Steps" filterable={false} width={colWidths.nextSteps} onWidthChange={(w) => setColWidth("nextSteps", w)} />}
                         {mode === "resume" && <ResizableFilterHeader label="Details" filterable={false} width={colWidths.details} onWidthChange={(w) => setColWidth("details", w)} />}
-                        {mode === "final" && <ResizableFilterHeader label="Shortlist" filterable={false} width={colWidths.shortlist} onWidthChange={(w) => setColWidth("shortlist", w)} />}
+                        {mode === "final" && <ResizableFilterHeader label="Shortlist" width={colWidths.shortlist} onWidthChange={(w) => setColWidth("shortlist", w)}
+                          value={candColFilters.shortlist} options={candColOptions("shortlist")} onChange={(v) => setCandColFilter("shortlist", v)}
+                          sortDir={candSort?.col === "shortlist" ? candSort.dir : null} onSortClick={() => toggleCandSort("shortlist")} />}
                       </tr>
                     </thead>
                     <tbody>
-                      {candidates.map((c, i) => (
+                      {displayCandidates.map((c, i) => (
                         <CandidateRow
                           key={c.id}
                           c={c}
@@ -2487,6 +3401,13 @@ export default function JobLensWorkspace({ mode = "resume" }: { mode?: "resume" 
                           focusCandidateId={focusCandidateId}
                         />
                       ))}
+                      {displayCandidates.length === 0 && (
+                        <tr>
+                          <td colSpan={20} style={{ textAlign: "center", padding: 28, color: "var(--text-muted)" }}>
+                            No candidates match the current search/filters.
+                          </td>
+                        </tr>
+                      )}
                     </tbody>
                   </table>
                 </div>

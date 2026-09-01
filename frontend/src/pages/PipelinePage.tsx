@@ -4,6 +4,7 @@ import {
   CheckCircle2, AlertTriangle,
 } from "lucide-react";
 import { pipelineApi, acquisitionApi, requisitionApi } from "../lib/api";
+import DataTable from "../components/DataTable";
 
 const OFFER_STATUSES = ["Draft", "Pending Approval", "Approved", "Sent", "Accepted", "Rejected", "Withdrawn", "Expired"];
 const OFFER_STATUS_COLORS: Record<string, { fg: string; bg: string }> = {
@@ -43,7 +44,7 @@ export default function PipelinePage({ embedded = false }: { embedded?: boolean 
   }, []);
 
   return (
-    <div className="tiq-content">
+    <div className={embedded ? "" : "tiq-content"}>
       {!embedded && (
         <div className="tiq-page-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
           <div>
@@ -377,49 +378,47 @@ function OffersTab() {
 
   return (
     <div>
-      <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
-        <button className={`tiq-btn tiq-btn-sm ${statusFilter === "" ? "tiq-btn-primary" : "tiq-btn-outline"}`} onClick={() => setStatusFilter("")}>All</button>
-        {OFFER_STATUSES.map((s) => (
-          <button key={s} className={`tiq-btn tiq-btn-sm ${statusFilter === s ? "tiq-btn-primary" : "tiq-btn-outline"}`} onClick={() => setStatusFilter(s)}>{s}</button>
-        ))}
+      <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap", alignItems: "center" }}>
+        <label style={{ fontSize: 12, color: "var(--text-muted)", fontWeight: 600 }}>Status:</label>
+        <select className="tiq-select" style={{ fontSize: 12, padding: "5px 10px" }} value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+          <option value="">All</option>
+          {OFFER_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+        </select>
       </div>
       {loading ? (
         <div className="tiq-spinner-wrap"><div className="tiq-spinner" /></div>
       ) : offers.length === 0 ? (
         <div className="tiq-empty">No offers yet — create one from a candidate's pipeline card.</div>
       ) : (
-        <div className="tiq-table-wrap">
-          <table className="tiq-table">
-            <thead>
-              <tr>
-                <th>Candidate</th><th>Requisition</th><th>Salary</th><th>Start Date</th><th>Expiry</th><th>Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {offers.map((o) => {
-                const colors = OFFER_STATUS_COLORS[o.status] || OFFER_STATUS_COLORS.Draft;
-                return (
-                  <tr key={o.id}>
-                    <td style={{ fontWeight: 600, fontSize: 13 }}>{o.candidate_name}</td>
-                    <td style={{ fontSize: 12 }}>{o.requisition_title}</td>
-                    <td style={{ fontSize: 12 }}>{o.salary_offered ? `${o.salary_currency} ${o.salary_offered.toLocaleString()}` : "—"}</td>
-                    <td style={{ fontSize: 12 }}>{o.start_date ? new Date(o.start_date).toLocaleDateString() : "—"}</td>
-                    <td style={{ fontSize: 12 }}>{o.expiry_date ? new Date(o.expiry_date).toLocaleDateString() : "—"}</td>
-                    <td>
-                      <div style={{ position: "relative", display: "inline-block" }}>
-                        <select value={o.status} onChange={(e) => changeStatus(o.id, e.target.value)}
-                                style={{ fontSize: 11, fontWeight: 700, padding: "4px 22px 4px 10px", borderRadius: 999, border: "none", color: colors.fg, background: colors.bg, appearance: "none", cursor: "pointer" }}>
-                          {OFFER_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
-                        </select>
-                        <ChevronDown size={11} style={{ position: "absolute", right: 6, top: 6, pointerEvents: "none", color: colors.fg }} />
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+        <DataTable
+          columns={["candidate_name", "requisition_title", "salary", "start_date", "expiry_date", "status"]}
+          columnLabels={{ candidate_name: "Candidate", requisition_title: "Requisition", salary: "Salary", start_date: "Start Date", expiry_date: "Expiry", status: "Status" }}
+          rows={offers.map((o: any) => ({
+            ...o,
+            salary: o.salary_offered ? `${o.salary_currency} ${o.salary_offered.toLocaleString()}` : "—",
+          }))}
+          getRowKey={(o: any) => o.id}
+          renderCell={(o: any, col: string) => {
+            const colors = OFFER_STATUS_COLORS[o.status] || OFFER_STATUS_COLORS.Draft;
+            switch (col) {
+              case "candidate_name": return <span style={{ fontWeight: 600, fontSize: 13 }}>{o.candidate_name}</span>;
+              case "requisition_title": return <span style={{ fontSize: 12 }}>{o.requisition_title}</span>;
+              case "salary": return <span style={{ fontSize: 12 }}>{o.salary}</span>;
+              case "start_date": return <span style={{ fontSize: 12 }}>{o.start_date ? new Date(o.start_date).toLocaleDateString() : "—"}</span>;
+              case "expiry_date": return <span style={{ fontSize: 12 }}>{o.expiry_date ? new Date(o.expiry_date).toLocaleDateString() : "—"}</span>;
+              case "status": return (
+                <div style={{ position: "relative", display: "inline-block" }}>
+                  <select value={o.status} onChange={(e) => changeStatus(o.id, e.target.value)}
+                          style={{ fontSize: 11, fontWeight: 700, padding: "4px 22px 4px 10px", borderRadius: 999, border: "none", color: colors.fg, background: colors.bg, appearance: "none", WebkitAppearance: "none", MozAppearance: "none", cursor: "pointer" }}>
+                    {OFFER_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+                  </select>
+                  <ChevronDown size={11} style={{ position: "absolute", right: 6, top: 6, pointerEvents: "none", color: colors.fg }} />
+                </div>
+              );
+              default: return null;
+            }
+          }}
+        />
       )}
     </div>
   );
@@ -467,57 +466,58 @@ function PlacementsTab() {
 
   return (
     <div>
-      <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
-        <button className={`tiq-btn tiq-btn-sm ${statusFilter === "" ? "tiq-btn-primary" : "tiq-btn-outline"}`} onClick={() => setStatusFilter("")}>All</button>
-        {PLACEMENT_STATUSES.map((s) => (
-          <button key={s} className={`tiq-btn tiq-btn-sm ${statusFilter === s ? "tiq-btn-primary" : "tiq-btn-outline"}`} onClick={() => setStatusFilter(s)}>{s}</button>
-        ))}
+      <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap", alignItems: "center" }}>
+        <label style={{ fontSize: 12, color: "var(--text-muted)", fontWeight: 600 }}>Status:</label>
+        <select className="tiq-select" style={{ fontSize: 12, padding: "5px 10px" }} value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+          <option value="">All</option>
+          {PLACEMENT_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+        </select>
       </div>
       {loading ? (
         <div className="tiq-spinner-wrap"><div className="tiq-spinner" /></div>
       ) : placements.length === 0 ? (
         <div className="tiq-empty">No placements yet — these are created automatically when an offer is marked Accepted.</div>
       ) : (
-        <div className="tiq-table-wrap">
-          <table className="tiq-table">
-            <thead>
-              <tr>
-                <th>Candidate</th><th>Requisition</th><th>Start Date</th><th>Fee</th><th>Guarantee Period</th><th>Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {placements.map((p) => {
-                const colors = PLACEMENT_STATUS_COLORS[p.status] || PLACEMENT_STATUS_COLORS.Active;
-                const daysLeft = guaranteeDaysLeft(p);
-                return (
-                  <tr key={p.id}>
-                    <td style={{ fontWeight: 600, fontSize: 13 }}>{p.candidate_name}</td>
-                    <td style={{ fontSize: 12 }}>{p.requisition_title}</td>
-                    <td style={{ fontSize: 12 }}>{p.start_date ? new Date(p.start_date).toLocaleDateString() : "—"}</td>
-                    <td style={{ fontSize: 12 }}>{p.fee_amount ? `${p.fee_currency} ${p.fee_amount.toLocaleString()}` : "—"}</td>
-                    <td style={{ fontSize: 12 }}>
-                      {p.guarantee_period_days} days
-                      {daysLeft !== null && daysLeft >= 0 && p.status !== "Completed" && (
-                        <div style={{ fontSize: 11, color: daysLeft <= 14 ? "#f59e0b" : "var(--text-muted)", display: "flex", alignItems: "center", gap: 3 }}>
-                          {daysLeft <= 14 && <AlertTriangle size={10} />} <Clock size={10} /> {daysLeft} day{daysLeft !== 1 ? "s" : ""} left
-                        </div>
-                      )}
-                    </td>
-                    <td>
-                      <div style={{ position: "relative", display: "inline-block" }}>
-                        <select value={p.status} onChange={(e) => changeStatus(p.id, e.target.value)}
-                                style={{ fontSize: 11, fontWeight: 700, padding: "4px 22px 4px 10px", borderRadius: 999, border: "none", color: colors.fg, background: colors.bg, appearance: "none", cursor: "pointer" }}>
-                          {PLACEMENT_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
-                        </select>
-                        <ChevronDown size={11} style={{ position: "absolute", right: 6, top: 6, pointerEvents: "none", color: colors.fg }} />
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+        <DataTable
+          columns={["candidate_name", "requisition_title", "start_date", "fee", "guarantee", "status"]}
+          columnLabels={{ candidate_name: "Candidate", requisition_title: "Requisition", start_date: "Start Date", fee: "Fee", guarantee: "Guarantee Period", status: "Status" }}
+          rows={placements.map((p: any) => ({
+            ...p,
+            fee: p.fee_amount ? `${p.fee_currency} ${p.fee_amount.toLocaleString()}` : "—",
+            guarantee: `${p.guarantee_period_days} days`,
+          }))}
+          getRowKey={(p: any) => p.id}
+          renderCell={(p: any, col: string) => {
+            const colors = PLACEMENT_STATUS_COLORS[p.status] || PLACEMENT_STATUS_COLORS.Active;
+            const daysLeft = guaranteeDaysLeft(p);
+            switch (col) {
+              case "candidate_name": return <span style={{ fontWeight: 600, fontSize: 13 }}>{p.candidate_name}</span>;
+              case "requisition_title": return <span style={{ fontSize: 12 }}>{p.requisition_title}</span>;
+              case "start_date": return <span style={{ fontSize: 12 }}>{p.start_date ? new Date(p.start_date).toLocaleDateString() : "—"}</span>;
+              case "fee": return <span style={{ fontSize: 12 }}>{p.fee}</span>;
+              case "guarantee": return (
+                <div style={{ fontSize: 12 }}>
+                  {p.guarantee_period_days} days
+                  {daysLeft !== null && daysLeft >= 0 && p.status !== "Completed" && (
+                    <div style={{ fontSize: 11, color: daysLeft <= 14 ? "#f59e0b" : "var(--text-muted)", display: "flex", alignItems: "center", gap: 3 }}>
+                      {daysLeft <= 14 && <AlertTriangle size={10} />} <Clock size={10} /> {daysLeft} day{daysLeft !== 1 ? "s" : ""} left
+                    </div>
+                  )}
+                </div>
+              );
+              case "status": return (
+                <div style={{ position: "relative", display: "inline-block" }}>
+                  <select value={p.status} onChange={(e) => changeStatus(p.id, e.target.value)}
+                          style={{ fontSize: 11, fontWeight: 700, padding: "4px 22px 4px 10px", borderRadius: 999, border: "none", color: colors.fg, background: colors.bg, appearance: "none", WebkitAppearance: "none", MozAppearance: "none", cursor: "pointer" }}>
+                    {PLACEMENT_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+                  </select>
+                  <ChevronDown size={11} style={{ position: "absolute", right: 6, top: 6, pointerEvents: "none", color: colors.fg }} />
+                </div>
+              );
+              default: return null;
+            }
+          }}
+        />
       )}
     </div>
   );

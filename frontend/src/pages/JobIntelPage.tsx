@@ -2,6 +2,7 @@ import { } from "react-router-dom";
 import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { BarChart2, Play, RefreshCw, ExternalLink, Trash2, TrendingUp, Award } from "lucide-react";
+import DataTable from "../components/DataTable";
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell, Legend,
@@ -319,94 +320,60 @@ export default function MarketIntelPage() {
                 <div className="tiq-card" style={{ padding: 0, overflow: "hidden" }}>
                   <div className="tiq-card-title" style={{ padding: "14px 16px 0" }}>Market Intelligence Data</div>
                   <div className="tiq-table-wrap" style={{ border: "none", overflowX: "auto" }}>
-                    <table className="tiq-table">
-                      <thead>
-                        <tr>
-                          <th>Job Group</th>
-                          <th>Standard Skills</th>
-                          <th>Job Title</th>
-                          <th>Company</th>
-                          <th>Company Type</th>
-                          <th>Location</th>
-                          <th>Experience</th>
-                          <th>Key Skills</th>
-                          <th>Soft Skills</th>
-                          <th>Tools &amp; Tech</th>
-                          <th>Certifications</th>
-                          <th>Job Type</th>
-                          <th>Source</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {(() => {
-                          // Build groups exactly like the reference CSV: Job Group + Standard Skills
-                          // shown only on the first row of each consecutive group, blank thereafter.
-                          let lastGroup = "";
-                          return records.map((r: any) => {
-                            const g = r.job_group || "General Roles";
-                            const isNewGroup = g !== lastGroup;
-                            lastGroup = g;
-
-                            // Standard Skills = the set of unique key skills across the whole group
-                            const groupItems = records.filter((x: any) => (x.job_group || "General Roles") === g);
-                            const standardSkills = Array.from(new Set(groupItems.flatMap((it: any) => it.key_skills || []))).slice(0, 8);
-
-                            return (
-                              <tr key={r.id}>
-                                <td style={{ fontWeight: 700, fontSize: 12, color: "var(--violet-500)", whiteSpace: "nowrap" }}>
-                                  {isNewGroup ? g : ""}
-                                </td>
-                                <td style={{ minWidth: 180 }}>
-                                  {isNewGroup && (
-                                    <div style={{ display: "flex", flexWrap: "wrap", gap: 3 }}>
-                                      {standardSkills.map((s: any) => (
-                                        <span key={s} className="tiq-badge tiq-badge-violet" style={{ fontSize: 9 }}>{s}</span>
-                                      ))}
-                                    </div>
-                                  )}
-                                </td>
-                                <td style={{ fontWeight: 600, fontSize: 12, whiteSpace: "nowrap" }}>
-                                  {r.title}
-                                  <div style={{ fontSize: 10, color: "var(--text-muted)" }}>{r.published_date}</div>
-                                </td>
-                                <td style={{ fontSize: 12 }}>{r.company}</td>
-                                <td style={{ fontSize: 11, color: "var(--text-muted)" }}>{r.company_type}</td>
-                                <td style={{ fontSize: 12, whiteSpace: "nowrap" }}>{r.location}</td>
-                                <td style={{ fontSize: 11, whiteSpace: "nowrap" }}>
-                                  {r.experience_years} ({r.experience_level})
-                                </td>
-                                <td style={{ minWidth: 160 }}>
-                                  <div style={{ display: "flex", flexWrap: "wrap", gap: 3 }}>
-                                    {(r.key_skills || []).map((s: string) => (
-                                      <span key={s} className="tiq-badge tiq-badge-teal" style={{ fontSize: 9 }}>{s}</span>
-                                    ))}
-                                  </div>
-                                </td>
-                                <td style={{ minWidth: 140 }}>
-                                  <div style={{ display: "flex", flexWrap: "wrap", gap: 3 }}>
-                                    {(r.soft_skills || []).map((s: string) => (
-                                      <span key={s} className="tiq-badge tiq-badge-rose" style={{ fontSize: 9 }}>{s}</span>
-                                    ))}
-                                  </div>
-                                </td>
-                                <td style={{ minWidth: 140 }}>
-                                  <div style={{ display: "flex", flexWrap: "wrap", gap: 3 }}>
-                                    {(r.tools || []).map((s: string) => (
-                                      <span key={s} className="tiq-badge tiq-badge-slate" style={{ fontSize: 9 }}>{s}</span>
-                                    ))}
-                                  </div>
-                                </td>
-                                <td style={{ fontSize: 10, color: "var(--text-muted)", minWidth: 120, whiteSpace: "nowrap" }}>
-                                  {(r.certifications || []).join("; ")}
-                                </td>
-                                <td><span className="tiq-badge tiq-badge-violet" style={{ fontSize: 10 }}>{r.job_type || "—"}</span></td>
-                                <td style={{ fontSize: 11, color: "var(--text-muted)", whiteSpace: "nowrap" }}>{r.source}</td>
-                              </tr>
-                            );
-                          });
-                        })()}
-                      </tbody>
-                    </table>
+                    <DataTable
+                      columns={["job_group", "standard_skills", "title", "company", "company_type", "location", "experience", "key_skills", "soft_skills", "tools", "certifications", "job_type", "source"]}
+                      columnLabels={{
+                        job_group: "Job Group", standard_skills: "Standard Skills", title: "Job Title", company: "Company",
+                        company_type: "Company Type", location: "Location", experience: "Experience", key_skills: "Key Skills",
+                        soft_skills: "Soft Skills", tools: "Tools & Tech", certifications: "Certifications", job_type: "Job Type", source: "Source",
+                      }}
+                      rows={records.map((r: any) => {
+                        const g = r.job_group || "General Roles";
+                        const groupItems = records.filter((x: any) => (x.job_group || "General Roles") === g);
+                        const standardSkills = Array.from(new Set(groupItems.flatMap((it: any) => it.key_skills || []))).slice(0, 8);
+                        return { ...r, job_group: g, standard_skills: standardSkills, experience: `${r.experience_years} (${r.experience_level})` };
+                      })}
+                      getRowKey={(r: any) => r.id}
+                      renderCell={(r: any, col: string) => {
+                        switch (col) {
+                          case "job_group": return <span style={{ fontWeight: 700, fontSize: 12, color: "var(--violet-500)", whiteSpace: "nowrap" }}>{r.job_group}</span>;
+                          case "standard_skills": return (
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: 3, minWidth: 180 }}>
+                              {r.standard_skills.map((s: any) => <span key={s} className="tiq-badge tiq-badge-violet" style={{ fontSize: 9 }}>{s}</span>)}
+                            </div>
+                          );
+                          case "title": return (
+                            <div style={{ fontWeight: 600, fontSize: 12, whiteSpace: "nowrap" }}>
+                              {r.title}
+                              <div style={{ fontSize: 10, color: "var(--text-muted)" }}>{r.published_date}</div>
+                            </div>
+                          );
+                          case "company": return <span style={{ fontSize: 12 }}>{r.company}</span>;
+                          case "company_type": return <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{r.company_type}</span>;
+                          case "location": return <span style={{ fontSize: 12, whiteSpace: "nowrap" }}>{r.location}</span>;
+                          case "experience": return <span style={{ fontSize: 11, whiteSpace: "nowrap" }}>{r.experience}</span>;
+                          case "key_skills": return (
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: 3, minWidth: 160 }}>
+                              {(r.key_skills || []).map((s: string) => <span key={s} className="tiq-badge tiq-badge-teal" style={{ fontSize: 9 }}>{s}</span>)}
+                            </div>
+                          );
+                          case "soft_skills": return (
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: 3, minWidth: 140 }}>
+                              {(r.soft_skills || []).map((s: string) => <span key={s} className="tiq-badge tiq-badge-rose" style={{ fontSize: 9 }}>{s}</span>)}
+                            </div>
+                          );
+                          case "tools": return (
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: 3, minWidth: 140 }}>
+                              {(r.tools || []).map((s: string) => <span key={s} className="tiq-badge tiq-badge-slate" style={{ fontSize: 9 }}>{s}</span>)}
+                            </div>
+                          );
+                          case "certifications": return <span style={{ fontSize: 10, color: "var(--text-muted)", whiteSpace: "nowrap" }}>{(r.certifications || []).join("; ")}</span>;
+                          case "job_type": return <span className="tiq-badge tiq-badge-violet" style={{ fontSize: 10 }}>{r.job_type || "—"}</span>;
+                          case "source": return <span style={{ fontSize: 11, color: "var(--text-muted)", whiteSpace: "nowrap" }}>{r.source}</span>;
+                          default: return null;
+                        }
+                      }}
+                    />
                   </div>
                 </div>
               )}

@@ -3,6 +3,7 @@ import {
   LineChart, Users, Clock, Filter, Award, Trash2, UserPlus, X, Shield,
 } from "lucide-react";
 import { governanceApi } from "../lib/api";
+import DataTable from "../components/DataTable";
 
 const ROLE_COLORS: Record<string, { fg: string; bg: string }> = {
   Owner: { fg: "#8b5cf6", bg: "rgba(139,92,246,.12)" },
@@ -139,28 +140,41 @@ function ReportingTab({ orgId }: { orgId: number }) {
         <div className="tiq-card" style={{ padding: 16 }}>
           <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 10 }}>Recruiter Performance</div>
           {recruiterPerf.length === 0 ? <Empty text="No candidates owned yet." /> : (
-            <table className="tiq-table" style={{ fontSize: 12 }}>
-              <thead><tr><th>Recruiter</th><th style={{ textAlign: "center" }}>Candidates</th><th style={{ textAlign: "center" }}>Placements</th></tr></thead>
-              <tbody>
-                {recruiterPerf.map((r: any) => (
-                  <tr key={r.user_id}><td>{r.name}</td><td style={{ textAlign: "center" }}>{r.candidates_owned}</td><td style={{ textAlign: "center", fontWeight: 700 }}>{r.placements}</td></tr>
-                ))}
-              </tbody>
-            </table>
+            <DataTable
+              columns={["name", "candidates_owned", "placements"]}
+              columnLabels={{ name: "Recruiter", candidates_owned: "Candidates", placements: "Placements" }}
+              rows={recruiterPerf}
+              getRowKey={(r: any) => r.user_id}
+              renderCell={(r: any, col: string) => {
+                switch (col) {
+                  case "name": return r.name;
+                  case "candidates_owned": return <div style={{ textAlign: "center" }}>{r.candidates_owned}</div>;
+                  case "placements": return <div style={{ textAlign: "center", fontWeight: 700 }}>{r.placements}</div>;
+                  default: return null;
+                }
+              }}
+            />
           )}
         </div>
 
         <div className="tiq-card" style={{ padding: 16 }}>
           <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 10 }}>Vendor Performance</div>
           {vendorPerf.length === 0 ? <Empty text="No vendor submissions yet." /> : (
-            <table className="tiq-table" style={{ fontSize: 12 }}>
-              <thead><tr><th>Vendor</th><th style={{ textAlign: "center" }}>Submitted</th><th style={{ textAlign: "center" }}>Accepted</th><th style={{ textAlign: "center" }}>Placements</th></tr></thead>
-              <tbody>
-                {vendorPerf.map((v: any) => (
-                  <tr key={v.vendor_id}><td>{v.vendor_name}</td><td style={{ textAlign: "center" }}>{v.submitted}</td><td style={{ textAlign: "center" }}>{v.accepted} ({v.acceptance_rate_pct}%)</td><td style={{ textAlign: "center", fontWeight: 700 }}>{v.placements}</td></tr>
-                ))}
-              </tbody>
-            </table>
+            <DataTable
+              columns={["vendor_name", "submitted", "accepted", "placements"]}
+              columnLabels={{ vendor_name: "Vendor", submitted: "Submitted", accepted: "Accepted", placements: "Placements" }}
+              rows={vendorPerf}
+              getRowKey={(v: any) => v.vendor_id}
+              renderCell={(v: any, col: string) => {
+                switch (col) {
+                  case "vendor_name": return v.vendor_name;
+                  case "submitted": return <div style={{ textAlign: "center" }}>{v.submitted}</div>;
+                  case "accepted": return <div style={{ textAlign: "center" }}>{v.accepted} ({v.acceptance_rate_pct}%)</div>;
+                  case "placements": return <div style={{ textAlign: "center", fontWeight: 700 }}>{v.placements}</div>;
+                  default: return null;
+                }
+              }}
+            />
           )}
         </div>
       </div>
@@ -235,37 +249,35 @@ function TeamTab({ myRole, orgId }: { myRole: string | null; orgId: number }) {
         <div className="tiq-spinner-wrap"><div className="tiq-spinner" /></div>
       ) : (
         <div className="tiq-table-wrap">
-          <table className="tiq-table">
-            <thead><tr><th>Name</th><th>Email</th><th>Role</th>{canManage && <th style={{ width: 140 }}>Actions</th>}</tr></thead>
-            <tbody>
-              {team.map((m: any) => {
-                const colors = ROLE_COLORS[m.role] || ROLE_COLORS.Recruiter;
-                return (
-                  <tr key={m.user_id}>
-                    <td style={{ fontWeight: 600, fontSize: 13 }}>{m.name || "—"}</td>
-                    <td style={{ fontSize: 12 }}>{m.email}</td>
-                    <td>
-                      {m.role === "Owner" || !canManage ? (
-                        <span style={{ fontSize: 11, fontWeight: 700, color: colors.fg, background: colors.bg, padding: "3px 10px", borderRadius: 999 }}>{m.role}</span>
-                      ) : (
-                        <select className="tiq-select" style={{ fontSize: 12 }} value={m.role} onChange={(e) => changeRole(m.membership_id, e.target.value)}>
-                          <option value="Manager">Manager</option>
-                          <option value="Recruiter">Recruiter</option>
-                        </select>
-                      )}
-                    </td>
-                    {canManage && (
-                      <td>
-                        {m.role !== "Owner" && (
-                          <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" onClick={() => remove(m.membership_id, m.name || m.email)}><Trash2 size={12} /></button>
-                        )}
-                      </td>
-                    )}
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+        <DataTable
+          columns={["name", "email", "role"]}
+          columnLabels={{ name: "Name", email: "Email", role: "Role" }}
+          rows={team.map((m: any) => ({ ...m, role: m.role }))}
+          getRowKey={(m: any) => m.user_id}
+          actionsLabel={canManage ? "Actions" : undefined}
+          actionsWidth={140}
+          renderActions={canManage ? (m: any) => (
+            m.role !== "Owner" ? (
+              <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" onClick={() => remove(m.membership_id, m.name || m.email)}><Trash2 size={12} /></button>
+            ) : null
+          ) : undefined}
+          renderCell={(m: any, col: string) => {
+            const colors = ROLE_COLORS[m.role] || ROLE_COLORS.Recruiter;
+            switch (col) {
+              case "name": return <span style={{ fontWeight: 600, fontSize: 13 }}>{m.name || "—"}</span>;
+              case "email": return <span style={{ fontSize: 12 }}>{m.email}</span>;
+              case "role": return m.role === "Owner" || !canManage ? (
+                <span style={{ fontSize: 11, fontWeight: 700, color: colors.fg, background: colors.bg, padding: "3px 10px", borderRadius: 999 }}>{m.role}</span>
+              ) : (
+                <select className="tiq-select" style={{ fontSize: 12 }} value={m.role} onChange={(e) => changeRole(m.membership_id, e.target.value)}>
+                  <option value="Manager">Manager</option>
+                  <option value="Recruiter">Recruiter</option>
+                </select>
+              );
+              default: return null;
+            }
+          }}
+        />
         </div>
       )}
 

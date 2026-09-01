@@ -81,9 +81,20 @@ export default function AppLayout() {
   // this same map rather than each fetching its own copy. Defaults to
   // {} (nothing hidden) while loading, so the sidebar renders fully
   // populated immediately rather than flashing empty first.
+  //
+  // Uses the PUBLIC endpoint (routers/public_config.py), not the
+  // admin-only /api/admin/module-toggles — the toggle map itself isn't
+  // sensitive, and every logged-in user's sidebar needs to read it, not
+  // just admins'. (Using the admin-only endpoint here used to mean a
+  // non-admin's sidebar fetch silently 403'd, fell back to the {}
+  // default, and so never actually hid anything an admin had toggled
+  // off — this fixes that.) Polled every 60s so a module an admin
+  // toggles shows/hides for every already-logged-in user's sidebar
+  // shortly after, not just on next full page load.
   const { data: moduleToggles = {} } = useQuery({
     queryKey: ["module-toggles"],
-    queryFn: () => api.get("/api/admin/module-toggles").then(r => r.data as Record<string, boolean>),
+    queryFn: () => api.get("/api/public/config/module-toggles").then(r => r.data as Record<string, boolean>),
+    refetchInterval: 60_000,
   });
 
   return (

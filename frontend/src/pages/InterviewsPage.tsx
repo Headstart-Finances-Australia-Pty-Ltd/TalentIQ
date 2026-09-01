@@ -1,9 +1,47 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import {
   Plus, X, Trash2, Link2, Copy, Check, Calendar, ClipboardList,
-  ChevronDown, Star, ExternalLink, Bot, RefreshCw, ShieldCheck, Gavel, Mail,
+  ChevronDown, Star, ExternalLink, Bot, RefreshCw, ShieldCheck, Gavel, Mail, Search,
 } from "lucide-react";
-import { interviewApi, acquisitionApi, requisitionApi, avatarInterviewApi } from "../lib/api";
+import { interviewApi, acquisitionApi, requisitionApi, avatarInterviewApi, api } from "../lib/api";
+import { ResizableFilterHeader } from "../components/ResizableFilterHeader";
+
+// Default column widths for the pipeline table — same resizable-column
+// pattern as Requisitions/Screening, keyed by the same names used in
+// getGroupColValue() below.
+const INTERVIEWS_DEFAULT_COL_WIDTHS: Record<string, number> = {
+  candidate: 160, requisition: 170, resume: 120, phoneLink: 120, phone: 150,
+  videoEmail: 120, video: 150, panelSchedule: 140, panelInterviewers: 140,
+  panelStatus: 110, panelDecision: 170,
+};
+
+// Raw, sortable/filterable value behind each column of the consolidated
+// pipeline table — kept separate from the cell JSX (badges, buttons,
+// stacked dates) below, since filtering/sorting always compares the
+// underlying data, not the rendered markup.
+function getGroupColValue(g: any, key: string): string {
+  const r = g.resume, p = g.phone, v = g.video, pan = g.panel;
+  switch (key) {
+    case "candidate": return g.candidate_name || "";
+    case "requisition": return [g.requisition_role, g.company].filter(Boolean).join(" · ");
+    case "resume": return r?.status || "";
+    case "phoneLink": return p?.calendly_link_sent_at ? "Sent" : "Not sent";
+    case "phone": return p?.status || "";
+    case "videoEmail": return v?.video_invite_sent_at ? "Sent" : "Not sent";
+    case "video": return v?.status || "";
+    case "panelSchedule": return pan?.scheduled_at ? new Date(pan.scheduled_at).toLocaleString() : "";
+    case "panelInterviewers": return pan?.panel_number != null ? `Panel #${pan.panel_number}` : (pan?.interviewers || []).map((x: any) => x.name).join(", ");
+    case "panelStatus": return pan?.status || "";
+    case "panelDecision": return pan?.decision || (pan ? "Pending" : "");
+    default: return "";
+  }
+}
+
+// Must match the key AdminConsolePage.tsx's Modules Management > System
+// Tools section toggles — that's what actually hides/shows this button,
+// same pattern FileManagerPage.tsx uses for its Force Delete button.
+const SYNC_CANDIDATELENS_MODULE_ROUTE = "interviews/sync-candidatelens-completions";
 
 const STATUS_FLOW = ["Requested", "Scheduled", "Completed", "Cancelled", "No-Show", "Rescheduled"];
 // Exactly three round classes. Resume Screening now lives entirely in
@@ -28,6 +66,31 @@ const STATUS_COLORS: Record<string, { fg: string; bg: string }> = {
   "No-Show": { fg: "#f59e0b", bg: "rgba(245,158,11,.12)" },
   Rescheduled: { fg: "#8b5cf6", bg: "rgba(139,92,246,.12)" },
 };
+
+// Small colored status pill, editable — used in every one of the four
+// per-round column groups (Resume Screening / Phone / Video / Panel) in
+// the consolidated per-candidate row below.
+function MiniBadge({ status, onChange }: { status: string; onChange: (s: string) => void }) {
+  const colors = STATUS_COLORS[status] || STATUS_COLORS.Requested;
+  return (
+    <div style={{ position: "relative", display: "inline-block" }}>
+      <select
+        value={status}
+        onChange={(e) => onChange(e.target.value)}
+        style={{
+          fontSize: 11, fontWeight: 700, padding: "4px 20px 4px 9px", borderRadius: 999,
+          border: "none", color: colors.fg, background: colors.bg, appearance: "none", WebkitAppearance: "none", MozAppearance: "none", cursor: "pointer",
+        }}
+      >
+        {STATUS_FLOW.map((s) => <option key={s} value={s}>{s}</option>)}
+      </select>
+      <ChevronDown size={10} style={{ position: "absolute", right: 5, top: 6, pointerEvents: "none", color: colors.fg }} />
+    </div>
+  );
+}
+function Muted() {
+  return <span style={{ color: "var(--text-muted)", fontSize: 12 }}>Not started</span>;
+}
 const DECISION_COLORS: Record<string, { fg: string; bg: string }> = {
   Pending: { fg: "#64748b", bg: "rgba(100,116,139,.12)" },
   Selected: { fg: "#10b981", bg: "rgba(16,185,129,.12)" },
@@ -96,15 +159,40 @@ const emptyForm = {
   proposed_slots: [""] as string[],
   notes: "",
   approver_name: "", approver_email: "",
+  panel_id: "" as string | number,
 };
 
 export default function InterviewsPage({ embedded = false }: { embedded?: boolean } = {}) {
+  // Same query key AppLayout.tsx/AdminConsolePage.tsx use — shares the
+  // cached result rather than re-fetching, and picks up a Modules
+  // Management change immediately once that page's Save invalidates it.
+  const { data: moduleToggles = {} } = useQuery({
+    queryKey: ["module-toggles"],
+    queryFn: () => api.get("/api/admin/module-toggles").then((r) => r.data as Record<string, boolean>),
+  });
+  const syncCandidateLensEnabled = moduleToggles[SYNC_CANDIDATELENS_MODULE_ROUTE] ?? true;
+
   const [interviews, setInterviews] = useState<any[]>([]);
   const [candidates, setCandidates] = useState<any[]>([]);
   const [requisitions, setRequisitions] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState("");
   const [selected, setSelected] = useState<Set<number>>(new Set());
+
+  // Per-column dropdown filter + sort + a global search box for the
+  // pipeline table below — same pattern as RequisitionsPage/ScreeningPage.
+  const [colWidths, setColWidths] = useState<Record<string, number>>(INTERVIEWS_DEFAULT_COL_WIDTHS);
+  const setColWidth = (key: string, w: number) => setColWidths((prev) => ({ ...prev, [key]: w }));
+  const [pipelineColFilters, setPipelineColFilters] = useState<Record<string, Set<string>>>({});
+  const setPipelineColFilter = (key: string, next: Set<string> | undefined) =>
+    setPipelineColFilters((prev) => { const n = { ...prev }; if (next) n[key] = next; else delete n[key]; return n; });
+  const [pipelineSort, setPipelineSort] = useState<{ col: string; dir: "asc" | "desc" } | null>(null);
+  const togglePipelineSort = (col: string) => setPipelineSort((prev) => {
+    if (!prev || prev.col !== col) return { col, dir: "asc" };
+    if (prev.dir === "asc") return { col, dir: "desc" };
+    return null;
+  });
+  const [pipelineSearch, setPipelineSearch] = useState("");
 
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -159,11 +247,116 @@ export default function InterviewsPage({ embedded = false }: { embedded?: boolea
 
   useEffect(() => { load(); }, [statusFilter]);
 
+  // One-time catch-up: creates Interview Scheduling rows for CandidateLens
+  // candidates who completed Resume Screening / Phone / Video Interview
+  // BEFORE that auto-logging existed — see backend backfill_interview_scheduling's
+  // docstring. Not needed for anything completed going forward (that
+  // logs itself in real time now); this is only for pre-existing gaps.
+  const [backfillBusy, setBackfillBusy] = useState(false);
+  const [backfillMsg, setBackfillMsg] = useState("");
+  const runBackfill = async () => {
+    setBackfillBusy(true); setBackfillMsg("");
+    try {
+      const { data } = await api.post("/api/joblens/candidates/backfill-interview-scheduling");
+      setBackfillMsg(`Added/updated ${data.resume} Resume Screening, ${data.phone} Phone Interview, ${data.video} Video Interview row(s).`);
+      load();
+    } catch (e: any) {
+      setBackfillMsg(e?.response?.data?.detail || "Backfill failed.");
+    } finally {
+      setBackfillBusy(false);
+    }
+  };
+
   useEffect(() => {
     interviewApi.calendlyStatus().then((s) => setCalendlyConfigured(s.configured)).catch(() => setCalendlyConfigured(false));
   }, []);
 
   const candidateName = (id: number) => candidates.find((c) => c.id === id)?.full_name || "";
+
+  // Consolidates the flat interviews list into ONE row per (candidate,
+  // role) — previously every CandidateLens round (Resume Screening,
+  // Phone Interview, Video Interview) for the same candidate showed as
+  // its OWN separate row with no easy way to see all three stages for
+  // one candidate/role at a glance, and a candidate considered for two
+  // different roles had no way to tell those apart either. Grouping key:
+  // joblens_candidate_id for CandidateLens-sourced rows (each JobLens
+  // candidate belongs to exactly one session = one role, so this alone
+  // already means "one candidate, one role"); candidate_id+requisition_id
+  // for Talent-Pool-sourced rows, since the same Talent-Pool candidate
+  // CAN legitimately be in multiple requisitions' pipelines at once.
+  // Panel-members popup — Interview Scheduling shows only the panel
+  // NUMBER; clicking it fetches the full member list fresh rather than
+  // duplicating it into every interview row's payload.
+  const [panelPopup, setPanelPopup] = useState<{ loading: boolean; data: any | null; error: string } | null>(null);
+  const openPanelPopup = async (panelId: number) => {
+    setPanelPopup({ loading: true, data: null, error: "" });
+    try {
+      const data = await interviewApi.getInterviewPanel(panelId);
+      setPanelPopup({ loading: false, data, error: "" });
+    } catch (e: any) {
+      setPanelPopup({ loading: false, data: null, error: e?.response?.data?.detail || "Failed to load panel." });
+    }
+  };
+
+  const groupedRows = useMemo(() => {
+    const groups = new Map<string, any>();
+    for (const i of interviews) {
+      const key = i.joblens_candidate_id
+        ? `jl-${i.joblens_candidate_id}`
+        : `tp-${i.candidate_id}-${i.requisition_id || "none"}`;
+      if (!groups.has(key)) {
+        groups.set(key, {
+          key, candidate_id: i.candidate_id, candidate_name: i.candidate_name,
+          requisition_number: i.requisition_number, requisition_role: i.requisition_role, company: i.company,
+          resume: null, phone: null, video: null, panel: null,
+        });
+      }
+      const g = groups.get(key);
+      if (i.interview_type === "Resume Screening") g.resume = i;
+      else if (i.interview_type === "Phone Interview") g.phone = i;
+      else if (i.interview_type === "Video Interview") g.video = i;
+      else g.panel = i; // Panel Interview, or any other/legacy custom type
+    }
+    for (const g of groups.values()) {
+      // Whichever round is furthest along gets the shared Actions column
+      // (Edit/Decision/Self-schedule/Scorecards/Delete) — normally the
+      // one actually being worked on right now.
+      g.primary = g.video || g.phone || g.resume || g.panel || null;
+    }
+    return Array.from(groups.values());
+  }, [interviews]);
+
+  const PIPELINE_COLS = ["candidate", "requisition", "resume", "phoneLink", "phone", "videoEmail", "video", "panelSchedule", "panelInterviewers", "panelStatus", "panelDecision"];
+
+  // Unique values per column always come from the full groupedRows list
+  // (not the already-filtered one) so picking a value in one column's
+  // dropdown doesn't shrink the choices available in every other column.
+  const pipelineColOptions = (key: string): string[] =>
+    Array.from(new Set(groupedRows.map((g) => getGroupColValue(g, key)).filter((v) => v !== ""))).sort();
+
+  const displayRows = useMemo(() => {
+    let out = groupedRows;
+    if (pipelineSearch.trim()) {
+      const q = pipelineSearch.trim().toLowerCase();
+      out = out.filter((g) => PIPELINE_COLS.some((k) => getGroupColValue(g, k).toLowerCase().includes(q)));
+    }
+    for (const [key, val] of Object.entries(pipelineColFilters)) {
+      if (!val) continue;
+      out = out.filter((g) => val.has(getGroupColValue(g, key)));
+    }
+    if (pipelineSort) {
+      const { col, dir } = pipelineSort;
+      out = [...out].sort((a, b) => {
+        const av = getGroupColValue(a, col), bv = getGroupColValue(b, col);
+        if (!av) return 1;
+        if (!bv) return -1;
+        const cmp = av.localeCompare(bv);
+        return dir === "asc" ? cmp : -cmp;
+      });
+    }
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [groupedRows, pipelineSearch, pipelineColFilters, pipelineSort]);
 
   const openAdd = () => {
     setForm(emptyForm); setEditingId(null); setFormError(""); setShowForm(true);
@@ -482,39 +675,37 @@ export default function InterviewsPage({ embedded = false }: { embedded?: boolea
   };
 
   return (
-    <div className="tiq-content">
+    <div className={embedded ? "" : "tiq-content"}>
       {!embedded && (
-        <div className="tiq-page-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
-          <div>
-            <div className="tiq-page-title">Interviews</div>
-            <div className="tiq-page-sub">From "let's interview them" to a recorded decision.</div>
-          </div>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <button className="tiq-btn tiq-btn-primary tiq-btn-sm" onClick={openAdd}>
-              <Plus size={14} /> Schedule Interview
-            </button>
-          </div>
-        </div>
-      )}
-      {embedded && (
-        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}>
-          <button className="tiq-btn tiq-btn-primary tiq-btn-sm" onClick={openAdd}>
-            <Plus size={14} /> Schedule Interview
-          </button>
+        <div className="tiq-page-header">
+          <div className="tiq-page-title">Interviews</div>
+          <div className="tiq-page-sub">From "let's interview them" to a recorded decision.</div>
         </div>
       )}
 
-      <div style={{ display: "flex", gap: 8, marginTop: 16, marginBottom: 16, flexWrap: "wrap", alignItems: "center" }}>
-        <button className={`tiq-btn tiq-btn-sm ${statusFilter === "" ? "tiq-btn-primary" : "tiq-btn-outline"}`} onClick={() => setStatusFilter("")}>All</button>
-        {STATUS_FLOW.map((s) => (
-          <button key={s} className={`tiq-btn tiq-btn-sm ${statusFilter === s ? "tiq-btn-primary" : "tiq-btn-outline"}`} onClick={() => setStatusFilter(s)}>{s}</button>
-        ))}
-        {selected.size > 0 && (
-          <button className="tiq-btn tiq-btn-outline tiq-btn-sm" style={{ marginLeft: "auto", color: "#ef4444", borderColor: "#ef4444" }}
-                  onClick={handleBulkDelete}>
-            <Trash2 size={13} /> Delete {selected.size} selected
-          </button>
+      {/* Action buttons + status filter, all left-aligned together in one
+          row flush with the table's left edge below — these used to sit
+          in the page header, pushed to the far right of the page by
+          justify-content: space-between, which visually had nothing to
+          do with the table they act on. */}
+      <div style={{ display: "flex", gap: 8, marginTop: embedded ? 0 : 16, marginBottom: 16, flexWrap: "wrap", alignItems: "center" }}>
+        <button className="tiq-btn tiq-btn-primary tiq-btn-sm" onClick={openAdd}>
+          <Plus size={14} /> Schedule Interview
+        </button>
+        {syncCandidateLensEnabled && (
+          <div>
+            <button className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={runBackfill} disabled={backfillBusy}
+              title="Add Interview Scheduling rows for CandidateLens candidates who completed a stage before this was tracked automatically">
+              {backfillBusy ? "Syncing…" : "Sync CandidateLens Completions"}
+            </button>
+            {backfillMsg && <div style={{ fontSize: 10.5, color: "var(--text-muted)", marginTop: 4, maxWidth: 240 }}>{backfillMsg}</div>}
+          </div>
         )}
+        <label style={{ fontSize: 12, color: "var(--text-muted)", fontWeight: 600, marginLeft: 8 }}>Status:</label>
+        <select className="tiq-select" style={{ fontSize: 12, padding: "5px 10px" }} value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+          <option value="">All</option>
+          {STATUS_FLOW.map((s) => <option key={s} value={s}>{s}</option>)}
+        </select>
       </div>
 
       {loading ? (
@@ -522,114 +713,220 @@ export default function InterviewsPage({ embedded = false }: { embedded?: boolea
       ) : interviews.length === 0 ? (
         <div className="tiq-empty">No interviews scheduled yet. Click "Schedule Interview" to set one up.</div>
       ) : (
+        <div>
+          {/* Global search — matches candidate, requisition, and every
+              per-round status/date column, on top of the per-column
+              dropdown filters in the header below. */}
+          <div style={{ position: "relative", maxWidth: 300, marginBottom: 10 }}>
+            <Search size={13} style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", color: "var(--text-muted)" }} />
+            <input
+              value={pipelineSearch}
+              onChange={(e) => setPipelineSearch(e.target.value)}
+              placeholder="Search pipeline…"
+              className="tiq-input"
+              style={{ paddingLeft: 28, fontSize: 12, height: 32, width: "100%", boxSizing: "border-box" }}
+            />
+            {pipelineSearch && (
+              <X size={13} onClick={() => setPipelineSearch("")}
+                style={{ position: "absolute", right: 9, top: "50%", transform: "translateY(-50%)", color: "var(--text-muted)", cursor: "pointer" }} />
+            )}
+          </div>
+          <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 6 }}>
+            {displayRows.length}{displayRows.length !== groupedRows.length ? ` / ${groupedRows.length}` : ""} rows
+          </div>
         <div className="tiq-table-wrap">
-          <table className="tiq-table">
+          <table className="tiq-table" style={{ tableLayout: "fixed" }}>
             <thead>
               <tr>
-                <th style={{ width: 28 }}>
-                  <input type="checkbox" checked={interviews.length > 0 && selected.size === interviews.length} onChange={toggleSelectAll} />
-                </th>
-                <th>Candidate</th>
-                <th>Round</th>
-                <th>Requisition</th>
-                <th>When</th>
-                <th>Duration</th>
-                <th>Interviewers</th>
-                <th>Location / Link</th>
-                <th>Status</th>
-                <th>Decision</th>
-                <th>Scorecards</th>
-                <th style={{ width: 190 }}>Actions</th>
+                <th style={{ width: 36 }}>#</th>
+                <ResizableFilterHeader label="Candidate" width={colWidths.candidate} onWidthChange={(w) => setColWidth("candidate", w)}
+                  value={pipelineColFilters.candidate} options={pipelineColOptions("candidate")} onChange={(v) => setPipelineColFilter("candidate", v)}
+                  sortDir={pipelineSort?.col === "candidate" ? pipelineSort.dir : null} onSortClick={() => togglePipelineSort("candidate")} />
+                <ResizableFilterHeader label="Requisition" width={colWidths.requisition} onWidthChange={(w) => setColWidth("requisition", w)}
+                  value={pipelineColFilters.requisition} options={pipelineColOptions("requisition")} onChange={(v) => setPipelineColFilter("requisition", v)}
+                  sortDir={pipelineSort?.col === "requisition" ? pipelineSort.dir : null} onSortClick={() => togglePipelineSort("requisition")} />
+                <ResizableFilterHeader label="Resume Screening" width={colWidths.resume} onWidthChange={(w) => setColWidth("resume", w)}
+                  value={pipelineColFilters.resume} options={pipelineColOptions("resume")} onChange={(v) => setPipelineColFilter("resume", v)}
+                  sortDir={pipelineSort?.col === "resume" ? pipelineSort.dir : null} onSortClick={() => togglePipelineSort("resume")} />
+                <ResizableFilterHeader label="Phone Schedule Link" width={colWidths.phoneLink} onWidthChange={(w) => setColWidth("phoneLink", w)}
+                  value={pipelineColFilters.phoneLink} options={pipelineColOptions("phoneLink")} onChange={(v) => setPipelineColFilter("phoneLink", v)}
+                  sortDir={pipelineSort?.col === "phoneLink" ? pipelineSort.dir : null} onSortClick={() => togglePipelineSort("phoneLink")} />
+                <ResizableFilterHeader label="Phone Interview" width={colWidths.phone} onWidthChange={(w) => setColWidth("phone", w)}
+                  value={pipelineColFilters.phone} options={pipelineColOptions("phone")} onChange={(v) => setPipelineColFilter("phone", v)}
+                  sortDir={pipelineSort?.col === "phone" ? pipelineSort.dir : null} onSortClick={() => togglePipelineSort("phone")} />
+                <ResizableFilterHeader label="Video Email" width={colWidths.videoEmail} onWidthChange={(w) => setColWidth("videoEmail", w)}
+                  value={pipelineColFilters.videoEmail} options={pipelineColOptions("videoEmail")} onChange={(v) => setPipelineColFilter("videoEmail", v)}
+                  sortDir={pipelineSort?.col === "videoEmail" ? pipelineSort.dir : null} onSortClick={() => togglePipelineSort("videoEmail")} />
+                <ResizableFilterHeader label="Video Interview" width={colWidths.video} onWidthChange={(w) => setColWidth("video", w)}
+                  value={pipelineColFilters.video} options={pipelineColOptions("video")} onChange={(v) => setPipelineColFilter("video", v)}
+                  sortDir={pipelineSort?.col === "video" ? pipelineSort.dir : null} onSortClick={() => togglePipelineSort("video")} />
+                <ResizableFilterHeader label="Panel Schedule" width={colWidths.panelSchedule} onWidthChange={(w) => setColWidth("panelSchedule", w)}
+                  value={pipelineColFilters.panelSchedule} options={pipelineColOptions("panelSchedule")} onChange={(v) => setPipelineColFilter("panelSchedule", v)}
+                  sortDir={pipelineSort?.col === "panelSchedule" ? pipelineSort.dir : null} onSortClick={() => togglePipelineSort("panelSchedule")} />
+                <ResizableFilterHeader label="Panel Interviewers" width={colWidths.panelInterviewers} onWidthChange={(w) => setColWidth("panelInterviewers", w)}
+                  value={pipelineColFilters.panelInterviewers} options={pipelineColOptions("panelInterviewers")} onChange={(v) => setPipelineColFilter("panelInterviewers", v)}
+                  sortDir={pipelineSort?.col === "panelInterviewers" ? pipelineSort.dir : null} onSortClick={() => togglePipelineSort("panelInterviewers")} />
+                <ResizableFilterHeader label="Panel Status" width={colWidths.panelStatus} onWidthChange={(w) => setColWidth("panelStatus", w)}
+                  value={pipelineColFilters.panelStatus} options={pipelineColOptions("panelStatus")} onChange={(v) => setPipelineColFilter("panelStatus", v)}
+                  sortDir={pipelineSort?.col === "panelStatus" ? pipelineSort.dir : null} onSortClick={() => togglePipelineSort("panelStatus")} />
+                <ResizableFilterHeader label="Panel Feedback & Decision" width={colWidths.panelDecision} onWidthChange={(w) => setColWidth("panelDecision", w)}
+                  value={pipelineColFilters.panelDecision} options={pipelineColOptions("panelDecision")} onChange={(v) => setPipelineColFilter("panelDecision", v)}
+                  sortDir={pipelineSort?.col === "panelDecision" ? pipelineSort.dir : null} onSortClick={() => togglePipelineSort("panelDecision")} />
+                <th style={{ width: 150 }}>Actions</th>
               </tr>
             </thead>
             <tbody>
-              {interviews.map((i) => {
-                const colors = STATUS_COLORS[i.status] || STATUS_COLORS.Requested;
+              {displayRows.length === 0 && (
+                <tr>
+                  <td colSpan={12} style={{ textAlign: "center", padding: 28, color: "var(--text-muted)" }}>
+                    No rows match the current search/filters.
+                  </td>
+                </tr>
+              )}
+              {displayRows.map((g, idx) => {
+                const r = g.resume, p = g.phone, v = g.video, pan = g.panel;
+                const dc = pan ? (DECISION_COLORS[pan.decision] || DECISION_COLORS.Pending) : null;
                 return (
-                  <tr key={i.id}>
-                    <td><input type="checkbox" checked={selected.has(i.id)} onChange={() => toggleSelect(i.id)} /></td>
-                    <td style={{ fontWeight: 600, fontSize: 13 }}>{i.candidate_name || candidateName(i.candidate_id)}</td>
+                  <tr key={g.key}>
+                    <td style={{ fontSize: 12, color: "var(--text-muted)" }}>{idx + 1}</td>
+                    <td style={{ fontWeight: 600, fontSize: 13 }}>{g.candidate_name || candidateName(g.candidate_id)}</td>
+
+                    {/* Requisition — number + role on one line, company
+                        below, instead of three separate columns that
+                        were 90% empty space for any single-line value. */}
                     <td style={{ fontSize: 12 }}>
-                      {i.round_name} <span style={{ color: "var(--text-muted)" }}>#{i.round_number}</span>
-                      <div>
-                        <span className="tiq-badge tiq-badge-slate" style={{ fontSize: 10 }}>{i.interview_type || "Phone Interview"}</span>
+                      {(g.requisition_number != null || g.requisition_role) ? (
+                        <>
+                          <div>{g.requisition_number != null ? `${g.requisition_number}  ` : ""}{g.requisition_role || "—"}</div>
+                          {g.company && <div style={{ color: "var(--text-muted)", fontSize: 11 }}>{g.company}</div>}
+                        </>
+                      ) : "—"}
+                    </td>
+
+                    {/* Resume Screening — status + date stacked in one cell */}
+                    <td>
+                      {r ? (
+                        <>
+                          <MiniBadge status={r.status} onChange={(s) => handleStatusChange(r.id, s)} />
+                          <div style={{ fontSize: 10.5, color: "var(--text-muted)", marginTop: 3 }}>
+                            {r.completed_at ? new Date(r.completed_at).toLocaleDateString() : "—"}
+                          </div>
+                        </>
+                      ) : <Muted />}
+                    </td>
+
+                    {/* Phone Schedule Link — sent/not-sent + date stacked */}
+                    <td>
+                      <div style={{ fontSize: 11.5, fontWeight: 600, color: p?.calendly_link_sent_at ? "#0d9488" : "var(--text-muted)" }}>
+                        {p?.calendly_link_sent_at ? "Sent" : "Not sent"}
+                      </div>
+                      <div style={{ fontSize: 10.5, color: "var(--text-muted)", marginTop: 2 }}>
+                        {p?.calendly_link_sent_at ? new Date(p.calendly_link_sent_at).toLocaleDateString() : "—"}
                       </div>
                     </td>
-                    <td style={{ fontSize: 12 }}>{i.requisition_title || "—"}</td>
-                    <td style={{ fontSize: 12 }}>
-                      {i.scheduled_at ? new Date(i.scheduled_at).toLocaleString() : (
-                        i.calendly_scheduling_url ? (
-                          <a href={i.calendly_scheduling_url} target="_blank" rel="noreferrer"
-                             onClick={(e) => openCalendlyPopup(i.calendly_scheduling_url, e)}
-                             style={{ color: "var(--brand-teal, #0d9488)" }}>
-                            Calendly link sent
-                          </a>
-                        ) : i.self_schedule_token ? <span style={{ color: "var(--text-muted)" }}>Awaiting self-schedule</span> : "—"
-                      )}
-                    </td>
-                    <td style={{ fontSize: 12 }}>{i.duration_minutes} min</td>
-                    <td style={{ fontSize: 12 }}>{(i.interviewers || []).map((x: any) => x.name).join(", ") || "—"}</td>
-                    <td style={{ fontSize: 12, maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={i.location_or_link}>
-                      {i.location_or_link || "—"}
-                    </td>
+
+                    {/* Phone Interview — status + date stacked */}
                     <td>
-                      <div style={{ position: "relative", display: "inline-block" }}>
-                        <select
-                          value={i.status}
-                          onChange={(e) => handleStatusChange(i.id, e.target.value)}
-                          style={{
-                            fontSize: 11, fontWeight: 700, padding: "4px 22px 4px 10px", borderRadius: 999,
-                            border: "none", color: colors.fg, background: colors.bg, appearance: "none", cursor: "pointer",
-                          }}
-                        >
-                          {STATUS_FLOW.map((s) => <option key={s} value={s}>{s}</option>)}
-                        </select>
-                        <ChevronDown size={11} style={{ position: "absolute", right: 6, top: 6, pointerEvents: "none", color: colors.fg }} />
+                      {p ? (
+                        <>
+                          <MiniBadge status={p.status} onChange={(s) => handleStatusChange(p.id, s)} />
+                          <div style={{ fontSize: 10.5, color: "var(--text-muted)", marginTop: 3 }}>
+                            {p.status === "Completed" && p.completed_at ? new Date(p.completed_at).toLocaleDateString()
+                              : p.scheduled_at ? new Date(p.scheduled_at).toLocaleString() : "—"}
+                          </div>
+                        </>
+                      ) : <Muted />}
+                    </td>
+
+                    {/* Video Email — sent/not-sent + date stacked */}
+                    <td>
+                      <div style={{ fontSize: 11.5, fontWeight: 600, color: v?.video_invite_sent_at ? "#0d9488" : "var(--text-muted)" }}>
+                        {v?.video_invite_sent_at ? "Sent" : "Not sent"}
+                      </div>
+                      <div style={{ fontSize: 10.5, color: "var(--text-muted)", marginTop: 2 }}>
+                        {v?.video_invite_sent_at ? new Date(v.video_invite_sent_at).toLocaleDateString() : "—"}
                       </div>
                     </td>
+
+                    {/* Video Interview — status + date stacked */}
                     <td>
-                      {(() => {
-                        const dc = DECISION_COLORS[i.decision] || DECISION_COLORS.Pending;
-                        return (
-                          <span style={{ fontSize: 11, fontWeight: 700, color: dc.fg, background: dc.bg, padding: "4px 10px", borderRadius: 999 }}>
-                            {i.decision || "Pending"}
-                          </span>
-                        );
-                      })()}
-                      {i.approval_status && i.approval_status !== "Pending" && (
-                        <div style={{ marginTop: 4 }}>
-                          {(() => {
-                            const ac = APPROVAL_COLORS[i.approval_status] || APPROVAL_COLORS.Pending;
-                            return <span style={{ fontSize: 9, fontWeight: 700, color: ac.fg }}>{i.approval_status === "Approved" ? "✓ Approved" : "✕ Cancelled"}</span>;
-                          })()}
-                        </div>
-                      )}
+                      {v ? (
+                        <>
+                          <MiniBadge status={v.status} onChange={(s) => handleStatusChange(v.id, s)} />
+                          <div style={{ fontSize: 10.5, color: "var(--text-muted)", marginTop: 3 }}>
+                            {v.status === "Completed" && v.completed_at ? new Date(v.completed_at).toLocaleDateString()
+                              : v.scheduled_at ? new Date(v.scheduled_at).toLocaleString() : "—"}
+                          </div>
+                        </>
+                      ) : <Muted />}
                     </td>
-                    <td>
-                      <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" onClick={() => openScorecards(i)}>
-                        <ClipboardList size={12} /> {i.scorecard_count || 0}
-                      </button>
-                    </td>
-                    <td>
-                      <div style={{ display: "flex", gap: 4 }}>
-                        <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" title="Edit" onClick={() => openEdit(i)}>Edit</button>
-                        <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" title="Decision & Approval" onClick={() => openDecisionPanel(i)}>
-                          <Gavel size={13} />
+
+                    {/* Panel Interview */}
+                    <td style={{ fontSize: 11.5 }}>{pan?.scheduled_at ? new Date(pan.scheduled_at).toLocaleString() : "—"}</td>
+                    <td style={{ fontSize: 11.5 }}>
+                      {pan?.panel_number != null ? (
+                        <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" onClick={() => openPanelPopup(pan.panel_id)}
+                                title="View panel members">
+                          Panel #{pan.panel_number}
                         </button>
-                        {SELF_SCHEDULABLE_TYPES.has(i.interview_type || "Phone Interview") ? (
-                          <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" title="Self-schedule link" onClick={() => openLinkModal(i)}><Link2 size={13} /></button>
-                        ) : (
-                          <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" disabled style={{ opacity: 0.35, cursor: "not-allowed" }}
-                                  title={`${i.interview_type} rounds must be scheduled directly — self-scheduling isn't available`}>
-                            <Link2 size={13} />
-                          </button>
-                        )}
-                        {i.interview_type === AVATAR_INTERVIEW_TYPE && (
-                          <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" title="AI Avatar Interview" onClick={() => openAvatarModal(i)}>
-                            <Bot size={13} />
-                          </button>
-                        )}
-                        <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" title="Delete" onClick={() => handleDelete(i.id)}><Trash2 size={13} /></button>
+                      ) : (
+                        <span style={{ maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "inline-block" }}
+                              title={(pan?.interviewers || []).map((x: any) => x.name).join(", ")}>
+                          {(pan?.interviewers || []).map((x: any) => x.name).join(", ") || "—"}
+                        </span>
+                      )}
+                    </td>
+                    <td>{pan ? <MiniBadge status={pan.status} onChange={(s) => handleStatusChange(pan.id, s)} /> : <Muted />}</td>
+
+                    {/* Panel Feedback & Decision — link(s), decision, and
+                        decision date combined into one cell. */}
+                    <td style={{ fontSize: 11.5 }}>
+                      {pan ? (
+                        <>
+                          {pan.feedback_links_summary?.length ? (
+                            <div style={{ display: "flex", flexDirection: "column", gap: 2, marginBottom: 4 }}>
+                              {pan.feedback_links_summary.map((fl: any, i: number) => (
+                                <a key={i} href={fl.url_path} target="_blank" rel="noreferrer" style={{ color: "var(--brand-teal, #0d9488)" }}>
+                                  {fl.interviewer_name || `Link ${i + 1}`}
+                                </a>
+                              ))}
+                            </div>
+                          ) : <div style={{ color: "var(--text-muted)", marginBottom: 4 }}>No feedback links</div>}
+                          <span style={{ fontSize: 11, fontWeight: 700, color: dc!.fg, background: dc!.bg, padding: "3px 9px", borderRadius: 999 }}>
+                            {pan.decision || "Pending"}
+                          </span>
+                          <div style={{ fontSize: 10.5, color: "var(--text-muted)", marginTop: 3 }}>
+                            {pan.decision_finalized_at ? new Date(pan.decision_finalized_at).toLocaleDateString() : "—"}
+                          </div>
+                        </>
+                      ) : <Muted />}
+                    </td>
+
+                    <td>
+                      {/* Left-aligned — acts on whichever round is
+                          furthest along (video > phone > resume > panel),
+                          normally the one actually being managed right now. */}
+                      <div style={{ display: "flex", gap: 4, justifyContent: "flex-start" }}>
+                        {g.primary ? (
+                          <>
+                            <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" title="Edit" onClick={() => openEdit(g.primary)}>Edit</button>
+                            <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" title="Decision & Approval" onClick={() => openDecisionPanel(g.primary)}>
+                              <Gavel size={13} />
+                            </button>
+                            {SELF_SCHEDULABLE_TYPES.has(g.primary.interview_type || "Phone Interview") && (
+                              <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" title="Self-schedule link" onClick={() => openLinkModal(g.primary)}><Link2 size={13} /></button>
+                            )}
+                            {g.primary.interview_type === AVATAR_INTERVIEW_TYPE && (
+                              <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" title="AI Avatar Interview" onClick={() => openAvatarModal(g.primary)}>
+                                <Bot size={13} />
+                              </button>
+                            )}
+                            <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" title="Scorecards" onClick={() => openScorecards(g.primary)}>
+                              <ClipboardList size={12} /> {g.primary.scorecard_count || 0}
+                            </button>
+                            <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" title="Delete" onClick={() => handleDelete(g.primary.id)}><Trash2 size={13} /></button>
+                          </>
+                        ) : <span style={{ color: "var(--text-muted)", fontSize: 11 }}>—</span>}
                       </div>
                     </td>
                   </tr>
@@ -637,6 +934,7 @@ export default function InterviewsPage({ embedded = false }: { embedded?: boolea
               })}
             </tbody>
           </table>
+        </div>
         </div>
       )}
 
@@ -935,6 +1233,50 @@ export default function InterviewsPage({ embedded = false }: { embedded?: boolea
                 )}
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* ── Panel Members Popup ──────────────────────────────────── */}
+      {panelPopup && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center" }}
+             onMouseDown={(e) => { if (e.target === e.currentTarget) setPanelPopup(null); }}>
+          <div style={{ background: "#fff", color: "#111827", borderRadius: 14, padding: 24, maxWidth: 460, width: "94%", maxHeight: "80vh", overflowY: "auto", boxShadow: "0 25px 60px rgba(0,0,0,.4)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+              <div style={{ fontWeight: 800, fontSize: 16 }}>
+                {panelPopup.data ? `Panel #${panelPopup.data.panel_number}` : "Panel"}
+              </div>
+              <button onClick={() => setPanelPopup(null)} style={{ background: "none", border: "none", cursor: "pointer" }}><X size={18} /></button>
+            </div>
+            {panelPopup.loading ? (
+              <div className="tiq-spinner-wrap"><div className="tiq-spinner" /></div>
+            ) : panelPopup.error ? (
+              <div style={{ fontSize: 13, color: "#ef4444" }}>{panelPopup.error}</div>
+            ) : panelPopup.data ? (
+              <>
+                <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>
+                  {panelPopup.data.role_for}{panelPopup.data.company ? ` — ${panelPopup.data.company}` : ""}
+                  {panelPopup.data.setup_date && <> · Set up {new Date(panelPopup.data.setup_date).toLocaleDateString()}</>}
+                </div>
+                {panelPopup.data.members.length === 0 ? (
+                  <div style={{ fontSize: 13, color: "var(--text-muted)" }}>No interviewers on this panel.</div>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                    {panelPopup.data.members.map((m: any) => (
+                      <div key={m.id} style={{ padding: "10px 12px", border: "1px solid var(--border)", borderRadius: 8 }}>
+                        <div style={{ fontWeight: 700, fontSize: 13 }}>{m.name}</div>
+                        {m.expertise_area && <div style={{ fontSize: 11.5, color: "var(--text-muted)" }}>{m.expertise_area}</div>}
+                        {m.company && <div style={{ fontSize: 11.5, color: "var(--text-muted)" }}>{m.company}</div>}
+                        <div style={{ fontSize: 11.5, marginTop: 4 }}>
+                          {m.email && <div>{m.email}</div>}
+                          {m.phone && <div>{m.phone}</div>}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
+            ) : null}
           </div>
         </div>
       )}

@@ -117,8 +117,21 @@ export default function AcquisitionPage() {
 
   const [colWidths, setColWidths] = useState<Record<string, number>>(DEFAULT_COL_WIDTHS);
   const setColWidth = (key: string, w: number) => setColWidths((prev) => ({ ...prev, [key]: w }));
-  const [colFilters, setColFilters] = useState<Record<string, string>>({});
-  const setColFilter = (key: string, value: string) => setColFilters((f) => ({ ...f, [key]: value }));
+  const [colFilters, setColFilters] = useState<Record<string, Set<string>>>({});
+  const setColFilter = (key: string, next: Set<string> | undefined) => setColFilters((f) => {
+    if (!next) { const n = { ...f }; delete n[key]; return n; }
+    return { ...f, [key]: next };
+  });
+  // Click-to-sort, same column keys as the filters below — "array"
+  // columns (skills, pools, tags…) sort by their joined display text
+  // since there's no single scalar value to compare.
+  const [sort, setSort] = useState<{ col: string; dir: "asc" | "desc" } | null>(null);
+  const toggleSort = (col: string) => setSort((prev) => {
+    if (!prev || prev.col !== col) return { col, dir: "asc" };
+    if (prev.dir === "asc") return { col, dir: "desc" };
+    return null;
+  });
+  const NUMERIC_CAND_COLS = new Set(["sequence_number"]);
 
   // Column filters layer on top of the server-side search/status/pool/
   // has-files filters below — those narrow what gets fetched at all,
@@ -185,13 +198,30 @@ export default function AcquisitionPage() {
   }, [candidates]);
   const colOptions = (key: string) => optionsCache[key] || [];
 
-  const filteredCandidates = useMemo(() => candidates.filter((c) =>
-    Object.entries(colFilters).every(([key, val]) => {
-      if (!val) return true;
-      return ARRAY_COLS.has(key) ? getColArray(c, key).includes(val) : getColValue(c, key) === val;
-    })
+  const filteredCandidates = useMemo(() => {
+    const out = candidates.filter((c) =>
+      Object.entries(colFilters).every(([key, val]) => {
+        if (!val) return true;
+        return ARRAY_COLS.has(key) ? getColArray(c, key).some((v) => val.has(v)) : val.has(getColValue(c, key));
+      })
+    );
+    if (sort) {
+      const { col, dir } = sort;
+      out.sort((a, b) => {
+        let cmp: number;
+        if (NUMERIC_CAND_COLS.has(col)) {
+          cmp = (Number(getColValue(a, col)) || 0) - (Number(getColValue(b, col)) || 0);
+        } else {
+          const av = ARRAY_COLS.has(col) ? getColArray(a, col).join(", ") : getColValue(a, col);
+          const bv = ARRAY_COLS.has(col) ? getColArray(b, col).join(", ") : getColValue(b, col);
+          cmp = av.localeCompare(bv);
+        }
+        return dir === "asc" ? cmp : -cmp;
+      });
+    }
+    return out;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  ), [candidates, colFilters]);
+  }, [candidates, colFilters, sort]);
 
   const allVisibleSelected = filteredCandidates.length > 0 && filteredCandidates.every((c) => selected.has(c.id));
   const someVisibleSelected = filteredCandidates.some((c) => selected.has(c.id));
@@ -559,7 +589,7 @@ export default function AcquisitionPage() {
     <div className="tiq-content">
       <div className="tiq-page-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
         <div>
-          <div className="tiq-page-title">Talent Acquisition &amp; Pool</div>
+          <div className="tiq-page-title">Candidates</div>
           <div className="tiq-page-sub">Every candidate, from every channel — one record, reusable across every future role.</div>
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -693,34 +723,34 @@ export default function AcquisitionPage() {
                         title={allVisibleSelected ? "Deselect all" : "Select all"}
                       />
                     </th>
-                    <ResizableFilterHeader label="Candidate #" value={colFilters.sequence_number} options={colOptions("sequence_number")} onChange={(v) => setColFilter("sequence_number", v)} align="center" width={colWidths.sequence_number} onWidthChange={(w) => setColWidth("sequence_number", w)} />
-                    <ResizableFilterHeader label="Full Name" value={colFilters.full_name} options={colOptions("full_name")} onChange={(v) => setColFilter("full_name", v)} width={colWidths.full_name} onWidthChange={(w) => setColWidth("full_name", w)} />
-                    <ResizableFilterHeader label="Email" value={colFilters.email} options={colOptions("email")} onChange={(v) => setColFilter("email", v)} width={colWidths.email} onWidthChange={(w) => setColWidth("email", w)} />
-                    <ResizableFilterHeader label="Phone" value={colFilters.phone} options={colOptions("phone")} onChange={(v) => setColFilter("phone", v)} width={colWidths.phone} onWidthChange={(w) => setColWidth("phone", w)} />
-                    <ResizableFilterHeader label="Location" value={colFilters.location} options={colOptions("location")} onChange={(v) => setColFilter("location", v)} width={colWidths.location} onWidthChange={(w) => setColWidth("location", w)} />
-                    <ResizableFilterHeader label="Current Title" value={colFilters.current_title} options={colOptions("current_title")} onChange={(v) => setColFilter("current_title", v)} width={colWidths.current_title} onWidthChange={(w) => setColWidth("current_title", w)} />
-                    <ResizableFilterHeader label="Current Employer" value={colFilters.current_employer} options={colOptions("current_employer")} onChange={(v) => setColFilter("current_employer", v)} width={colWidths.current_employer} onWidthChange={(w) => setColWidth("current_employer", w)} />
+                    <ResizableFilterHeader label="Candidate #" value={colFilters.sequence_number} options={colOptions("sequence_number")} onChange={(v) => setColFilter("sequence_number", v)} align="center" width={colWidths.sequence_number} onWidthChange={(w) => setColWidth("sequence_number", w)} sortDir={sort?.col === "sequence_number" ? sort.dir : null} onSortClick={() => toggleSort("sequence_number")} />
+                    <ResizableFilterHeader label="Full Name" value={colFilters.full_name} options={colOptions("full_name")} onChange={(v) => setColFilter("full_name", v)} width={colWidths.full_name} onWidthChange={(w) => setColWidth("full_name", w)} sortDir={sort?.col === "full_name" ? sort.dir : null} onSortClick={() => toggleSort("full_name")} />
+                    <ResizableFilterHeader label="Email" value={colFilters.email} options={colOptions("email")} onChange={(v) => setColFilter("email", v)} width={colWidths.email} onWidthChange={(w) => setColWidth("email", w)} sortDir={sort?.col === "email" ? sort.dir : null} onSortClick={() => toggleSort("email")} />
+                    <ResizableFilterHeader label="Phone" value={colFilters.phone} options={colOptions("phone")} onChange={(v) => setColFilter("phone", v)} width={colWidths.phone} onWidthChange={(w) => setColWidth("phone", w)} sortDir={sort?.col === "phone" ? sort.dir : null} onSortClick={() => toggleSort("phone")} />
+                    <ResizableFilterHeader label="Location" value={colFilters.location} options={colOptions("location")} onChange={(v) => setColFilter("location", v)} width={colWidths.location} onWidthChange={(w) => setColWidth("location", w)} sortDir={sort?.col === "location" ? sort.dir : null} onSortClick={() => toggleSort("location")} />
+                    <ResizableFilterHeader label="Current Title" value={colFilters.current_title} options={colOptions("current_title")} onChange={(v) => setColFilter("current_title", v)} width={colWidths.current_title} onWidthChange={(w) => setColWidth("current_title", w)} sortDir={sort?.col === "current_title" ? sort.dir : null} onSortClick={() => toggleSort("current_title")} />
+                    <ResizableFilterHeader label="Current Employer" value={colFilters.current_employer} options={colOptions("current_employer")} onChange={(v) => setColFilter("current_employer", v)} width={colWidths.current_employer} onWidthChange={(w) => setColWidth("current_employer", w)} sortDir={sort?.col === "current_employer" ? sort.dir : null} onSortClick={() => toggleSort("current_employer")} />
                     <ResizableFilterHeader label="LinkedIn" filterable={false} width={colWidths.linkedin_url} onWidthChange={(w) => setColWidth("linkedin_url", w)} />
-                    <ResizableFilterHeader label="Experience" value={colFilters.total_experience_years} options={colOptions("total_experience_years")} onChange={(v) => setColFilter("total_experience_years", v)} width={colWidths.total_experience_years} onWidthChange={(w) => setColWidth("total_experience_years", w)} />
-                    <ResizableFilterHeader label="Skills" value={colFilters.skills} options={colOptions("skills")} onChange={(v) => setColFilter("skills", v)} width={colWidths.skills} onWidthChange={(w) => setColWidth("skills", w)} />
-                    <ResizableFilterHeader label="Education" value={colFilters.education} options={colOptions("education")} onChange={(v) => setColFilter("education", v)} width={colWidths.education} onWidthChange={(w) => setColWidth("education", w)} />
-                    <ResizableFilterHeader label="Certifications" value={colFilters.certifications} options={colOptions("certifications")} onChange={(v) => setColFilter("certifications", v)} width={colWidths.certifications} onWidthChange={(w) => setColWidth("certifications", w)} />
-                    <ResizableFilterHeader label="Work Rights" value={colFilters.work_rights} options={colOptions("work_rights")} onChange={(v) => setColFilter("work_rights", v)} width={colWidths.work_rights} onWidthChange={(w) => setColWidth("work_rights", w)} />
-                    <ResizableFilterHeader label="Salary Expectation" value={colFilters.salary_expectation} options={colOptions("salary_expectation")} onChange={(v) => setColFilter("salary_expectation", v)} width={colWidths.salary_expectation} onWidthChange={(w) => setColWidth("salary_expectation", w)} />
-                    <ResizableFilterHeader label="Notice Period" value={colFilters.notice_period_days} options={colOptions("notice_period_days")} onChange={(v) => setColFilter("notice_period_days", v)} width={colWidths.notice_period_days} onWidthChange={(w) => setColWidth("notice_period_days", w)} />
-                    <ResizableFilterHeader label="Preferred Locations" value={colFilters.preferred_locations} options={colOptions("preferred_locations")} onChange={(v) => setColFilter("preferred_locations", v)} width={colWidths.preferred_locations} onWidthChange={(w) => setColWidth("preferred_locations", w)} />
-                    <ResizableFilterHeader label="Preferred Employment" value={colFilters.preferred_employment_type} options={colOptions("preferred_employment_type")} onChange={(v) => setColFilter("preferred_employment_type", v)} width={colWidths.preferred_employment_type} onWidthChange={(w) => setColWidth("preferred_employment_type", w)} />
-                    <ResizableFilterHeader label="Availability" value={colFilters.availability} options={colOptions("availability")} onChange={(v) => setColFilter("availability", v)} width={colWidths.availability} onWidthChange={(w) => setColWidth("availability", w)} />
+                    <ResizableFilterHeader label="Experience" value={colFilters.total_experience_years} options={colOptions("total_experience_years")} onChange={(v) => setColFilter("total_experience_years", v)} width={colWidths.total_experience_years} onWidthChange={(w) => setColWidth("total_experience_years", w)} sortDir={sort?.col === "total_experience_years" ? sort.dir : null} onSortClick={() => toggleSort("total_experience_years")} />
+                    <ResizableFilterHeader label="Skills" value={colFilters.skills} options={colOptions("skills")} onChange={(v) => setColFilter("skills", v)} width={colWidths.skills} onWidthChange={(w) => setColWidth("skills", w)} sortDir={sort?.col === "skills" ? sort.dir : null} onSortClick={() => toggleSort("skills")} />
+                    <ResizableFilterHeader label="Education" value={colFilters.education} options={colOptions("education")} onChange={(v) => setColFilter("education", v)} width={colWidths.education} onWidthChange={(w) => setColWidth("education", w)} sortDir={sort?.col === "education" ? sort.dir : null} onSortClick={() => toggleSort("education")} />
+                    <ResizableFilterHeader label="Certifications" value={colFilters.certifications} options={colOptions("certifications")} onChange={(v) => setColFilter("certifications", v)} width={colWidths.certifications} onWidthChange={(w) => setColWidth("certifications", w)} sortDir={sort?.col === "certifications" ? sort.dir : null} onSortClick={() => toggleSort("certifications")} />
+                    <ResizableFilterHeader label="Work Rights" value={colFilters.work_rights} options={colOptions("work_rights")} onChange={(v) => setColFilter("work_rights", v)} width={colWidths.work_rights} onWidthChange={(w) => setColWidth("work_rights", w)} sortDir={sort?.col === "work_rights" ? sort.dir : null} onSortClick={() => toggleSort("work_rights")} />
+                    <ResizableFilterHeader label="Salary Expectation" value={colFilters.salary_expectation} options={colOptions("salary_expectation")} onChange={(v) => setColFilter("salary_expectation", v)} width={colWidths.salary_expectation} onWidthChange={(w) => setColWidth("salary_expectation", w)} sortDir={sort?.col === "salary_expectation" ? sort.dir : null} onSortClick={() => toggleSort("salary_expectation")} />
+                    <ResizableFilterHeader label="Notice Period" value={colFilters.notice_period_days} options={colOptions("notice_period_days")} onChange={(v) => setColFilter("notice_period_days", v)} width={colWidths.notice_period_days} onWidthChange={(w) => setColWidth("notice_period_days", w)} sortDir={sort?.col === "notice_period_days" ? sort.dir : null} onSortClick={() => toggleSort("notice_period_days")} />
+                    <ResizableFilterHeader label="Preferred Locations" value={colFilters.preferred_locations} options={colOptions("preferred_locations")} onChange={(v) => setColFilter("preferred_locations", v)} width={colWidths.preferred_locations} onWidthChange={(w) => setColWidth("preferred_locations", w)} sortDir={sort?.col === "preferred_locations" ? sort.dir : null} onSortClick={() => toggleSort("preferred_locations")} />
+                    <ResizableFilterHeader label="Preferred Employment" value={colFilters.preferred_employment_type} options={colOptions("preferred_employment_type")} onChange={(v) => setColFilter("preferred_employment_type", v)} width={colWidths.preferred_employment_type} onWidthChange={(w) => setColWidth("preferred_employment_type", w)} sortDir={sort?.col === "preferred_employment_type" ? sort.dir : null} onSortClick={() => toggleSort("preferred_employment_type")} />
+                    <ResizableFilterHeader label="Availability" value={colFilters.availability} options={colOptions("availability")} onChange={(v) => setColFilter("availability", v)} width={colWidths.availability} onWidthChange={(w) => setColWidth("availability", w)} sortDir={sort?.col === "availability" ? sort.dir : null} onSortClick={() => toggleSort("availability")} />
                     <ResizableFilterHeader label="Resume" filterable={false} width={colWidths.resume} onWidthChange={(w) => setColWidth("resume", w)} />
                     <ResizableFilterHeader label="Cover Letter" filterable={false} width={colWidths.cover_letter} onWidthChange={(w) => setColWidth("cover_letter", w)} />
-                    <ResizableFilterHeader label="Source" value={colFilters.source} options={colOptions("source")} onChange={(v) => setColFilter("source", v)} width={colWidths.source} onWidthChange={(w) => setColWidth("source", w)} />
-                    <ResizableFilterHeader label="Referral Source" value={colFilters.referral_source} options={colOptions("referral_source")} onChange={(v) => setColFilter("referral_source", v)} width={colWidths.referral_source} onWidthChange={(w) => setColWidth("referral_source", w)} />
-                    <ResizableFilterHeader label="Status" value={colFilters.status} options={colOptions("status")} onChange={(v) => setColFilter("status", v)} width={colWidths.status} onWidthChange={(w) => setColWidth("status", w)} />
-                    <ResizableFilterHeader label="Applicant For" value={colFilters.applicant_for} options={colOptions("applicant_for")} onChange={(v) => setColFilter("applicant_for", v)} align="center" width={colWidths.applicant_for} onWidthChange={(w) => setColWidth("applicant_for", w)} />
-                    <ResizableFilterHeader label="Pools" value={colFilters.pools} options={colOptions("pools")} onChange={(v) => setColFilter("pools", v)} width={colWidths.pools} onWidthChange={(w) => setColWidth("pools", w)} />
-                    <ResizableFilterHeader label="Tags" value={colFilters.tags} options={colOptions("tags")} onChange={(v) => setColFilter("tags", v)} width={colWidths.tags} onWidthChange={(w) => setColWidth("tags", w)} />
-                    <ResizableFilterHeader label="Notes" value={colFilters.notes} options={colOptions("notes")} onChange={(v) => setColFilter("notes", v)} width={colWidths.notes} onWidthChange={(w) => setColWidth("notes", w)} />
-                    <ResizableFilterHeader label="Consent" value={colFilters.consent_given} options={colOptions("consent_given")} onChange={(v) => setColFilter("consent_given", v)} align="center" width={colWidths.consent_given} onWidthChange={(w) => setColWidth("consent_given", w)} />
+                    <ResizableFilterHeader label="Source" value={colFilters.source} options={colOptions("source")} onChange={(v) => setColFilter("source", v)} width={colWidths.source} onWidthChange={(w) => setColWidth("source", w)} sortDir={sort?.col === "source" ? sort.dir : null} onSortClick={() => toggleSort("source")} />
+                    <ResizableFilterHeader label="Referral Source" value={colFilters.referral_source} options={colOptions("referral_source")} onChange={(v) => setColFilter("referral_source", v)} width={colWidths.referral_source} onWidthChange={(w) => setColWidth("referral_source", w)} sortDir={sort?.col === "referral_source" ? sort.dir : null} onSortClick={() => toggleSort("referral_source")} />
+                    <ResizableFilterHeader label="Status" value={colFilters.status} options={colOptions("status")} onChange={(v) => setColFilter("status", v)} width={colWidths.status} onWidthChange={(w) => setColWidth("status", w)} sortDir={sort?.col === "status" ? sort.dir : null} onSortClick={() => toggleSort("status")} />
+                    <ResizableFilterHeader label="Applicant For" value={colFilters.applicant_for} options={colOptions("applicant_for")} onChange={(v) => setColFilter("applicant_for", v)} align="center" width={colWidths.applicant_for} onWidthChange={(w) => setColWidth("applicant_for", w)} sortDir={sort?.col === "applicant_for" ? sort.dir : null} onSortClick={() => toggleSort("applicant_for")} />
+                    <ResizableFilterHeader label="Pools" value={colFilters.pools} options={colOptions("pools")} onChange={(v) => setColFilter("pools", v)} width={colWidths.pools} onWidthChange={(w) => setColWidth("pools", w)} sortDir={sort?.col === "pools" ? sort.dir : null} onSortClick={() => toggleSort("pools")} />
+                    <ResizableFilterHeader label="Tags" value={colFilters.tags} options={colOptions("tags")} onChange={(v) => setColFilter("tags", v)} width={colWidths.tags} onWidthChange={(w) => setColWidth("tags", w)} sortDir={sort?.col === "tags" ? sort.dir : null} onSortClick={() => toggleSort("tags")} />
+                    <ResizableFilterHeader label="Notes" value={colFilters.notes} options={colOptions("notes")} onChange={(v) => setColFilter("notes", v)} width={colWidths.notes} onWidthChange={(w) => setColWidth("notes", w)} sortDir={sort?.col === "notes" ? sort.dir : null} onSortClick={() => toggleSort("notes")} />
+                    <ResizableFilterHeader label="Consent" value={colFilters.consent_given} options={colOptions("consent_given")} onChange={(v) => setColFilter("consent_given", v)} align="center" width={colWidths.consent_given} onWidthChange={(w) => setColWidth("consent_given", w)} sortDir={sort?.col === "consent_given" ? sort.dir : null} onSortClick={() => toggleSort("consent_given")} />
                     <th style={{ width: 110 }}>Actions</th>
                   </tr>
                 </thead>

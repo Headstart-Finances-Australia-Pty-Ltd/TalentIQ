@@ -3,6 +3,7 @@ import {
   Receipt, AlertTriangle, Clock3, TrendingUp, Plus, X, Trash2, ChevronDown,
 } from "lucide-react";
 import { commercialApi, pipelineApi } from "../lib/api";
+import DataTable from "../components/DataTable";
 
 const INVOICE_STATUSES = ["Draft", "Sent", "Paid", "Overdue", "Cancelled"];
 const INVOICE_STATUS_COLORS: Record<string, { fg: string; bg: string }> = {
@@ -115,35 +116,35 @@ function InvoicesTab() {
       ) : invoices.length === 0 ? (
         <div className="tiq-empty">No invoices yet — create one against a placement.</div>
       ) : (
-        <div className="tiq-table-wrap">
-          <table className="tiq-table">
-            <thead><tr><th>Candidate</th><th>Requisition</th><th>Description</th><th>Amount</th><th>Due Date</th><th>Status</th><th style={{ width: 40 }}></th></tr></thead>
-            <tbody>
-              {invoices.map((i: any) => {
-                const colors = INVOICE_STATUS_COLORS[i.status] || INVOICE_STATUS_COLORS.Draft;
-                return (
-                  <tr key={i.id}>
-                    <td style={{ fontWeight: 600, fontSize: 13 }}>{i.candidate_name}</td>
-                    <td style={{ fontSize: 12 }}>{i.requisition_title}</td>
-                    <td style={{ fontSize: 12 }}>{i.description}</td>
-                    <td style={{ fontSize: 12, fontWeight: 600 }}>{i.currency} {i.amount?.toLocaleString()}</td>
-                    <td style={{ fontSize: 12 }}>{i.due_date ? new Date(i.due_date).toLocaleDateString() : "—"}</td>
-                    <td>
-                      <div style={{ position: "relative", display: "inline-block" }}>
-                        <select value={i.status} onChange={(e) => changeStatus(i.id, e.target.value)}
-                                style={{ fontSize: 11, fontWeight: 700, padding: "4px 22px 4px 10px", borderRadius: 999, border: "none", color: colors.fg, background: colors.bg, appearance: "none", cursor: "pointer" }}>
-                          {INVOICE_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
-                        </select>
-                        <ChevronDown size={11} style={{ position: "absolute", right: 6, top: 6, pointerEvents: "none", color: colors.fg }} />
-                      </div>
-                    </td>
-                    <td><button className="tiq-btn tiq-btn-ghost tiq-btn-sm" onClick={() => remove(i.id)}><Trash2 size={12} /></button></td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+        <DataTable
+          columns={["candidate_name", "requisition_title", "description", "amount", "due_date", "status"]}
+          columnLabels={{ candidate_name: "Candidate", requisition_title: "Requisition", description: "Description", amount: "Amount", due_date: "Due Date", status: "Status" }}
+          rows={invoices.map((i: any) => ({ ...i, amount: `${i.currency} ${i.amount?.toLocaleString()}` }))}
+          getRowKey={(i: any) => i.id}
+          actionsLabel=""
+          actionsWidth={50}
+          renderActions={(i: any) => <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" onClick={() => remove(i.id)}><Trash2 size={12} /></button>}
+          renderCell={(i: any, col: string) => {
+            const colors = INVOICE_STATUS_COLORS[i.status] || INVOICE_STATUS_COLORS.Draft;
+            switch (col) {
+              case "candidate_name": return <span style={{ fontWeight: 600, fontSize: 13 }}>{i.candidate_name}</span>;
+              case "requisition_title": return <span style={{ fontSize: 12 }}>{i.requisition_title}</span>;
+              case "description": return <span style={{ fontSize: 12 }}>{i.description}</span>;
+              case "amount": return <span style={{ fontSize: 12, fontWeight: 600 }}>{i.amount}</span>;
+              case "due_date": return <span style={{ fontSize: 12 }}>{i.due_date ? new Date(i.due_date).toLocaleDateString() : "—"}</span>;
+              case "status": return (
+                <div style={{ position: "relative", display: "inline-block" }}>
+                  <select value={i.status} onChange={(e) => changeStatus(i.id, e.target.value)}
+                          style={{ fontSize: 11, fontWeight: 700, padding: "4px 22px 4px 10px", borderRadius: 999, border: "none", color: colors.fg, background: colors.bg, appearance: "none", WebkitAppearance: "none", MozAppearance: "none", cursor: "pointer" }}>
+                    {INVOICE_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+                  </select>
+                  <ChevronDown size={11} style={{ position: "absolute", right: 6, top: 6, pointerEvents: "none", color: colors.fg }} />
+                </div>
+              );
+              default: return null;
+            }
+          }}
+        />
       )}
 
       {showForm && (
@@ -300,30 +301,36 @@ function TimesheetsTab() {
       ) : timesheets.length === 0 ? (
         <div className="tiq-empty">No timesheet entries yet — optional, for contract placements billed by hours.</div>
       ) : (
-        <div className="tiq-table-wrap">
-          <table className="tiq-table">
-            <thead><tr><th style={{ width: 28 }}></th><th>Candidate</th><th>Week Ending</th><th>Hours</th><th>Rate</th><th>Amount</th><th>Status</th><th style={{ width: 90 }}>Actions</th></tr></thead>
-            <tbody>
-              {timesheets.map((t: any) => (
-                <tr key={t.id}>
-                  <td>{t.status === "Approved" && <input type="checkbox" checked={selected.has(t.id)} onChange={() => toggleSelect(t.id)} />}</td>
-                  <td style={{ fontWeight: 600, fontSize: 13 }}>{t.candidate_name}</td>
-                  <td style={{ fontSize: 12 }}>{new Date(t.week_ending).toLocaleDateString()}</td>
-                  <td style={{ fontSize: 12 }}>{t.hours}</td>
-                  <td style={{ fontSize: 12 }}>{t.currency} {t.rate}</td>
-                  <td style={{ fontSize: 12, fontWeight: 600 }}>{t.currency} {t.amount?.toLocaleString()}</td>
-                  <td><span className="tiq-badge tiq-badge-slate">{t.status}</span></td>
-                  <td>
-                    <div style={{ display: "flex", gap: 4 }}>
-                      {t.status === "Submitted" && <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" onClick={() => approve(t.id)}>Approve</button>}
-                      <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" onClick={() => remove(t.id)}><Trash2 size={12} /></button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <DataTable
+          columns={["select", "candidate_name", "week_ending", "hours", "rate", "amount", "status"]}
+          columnLabels={{ select: "", candidate_name: "Candidate", week_ending: "Week Ending", hours: "Hours", rate: "Rate", amount: "Amount", status: "Status" }}
+          rows={timesheets.map((t: any) => ({
+            ...t,
+            rate: `${t.currency} ${t.rate}`,
+            amount: `${t.currency} ${t.amount?.toLocaleString()}`,
+          }))}
+          getRowKey={(t: any) => t.id}
+          actionsLabel="Actions"
+          actionsWidth={90}
+          renderActions={(t: any) => (
+            <div style={{ display: "flex", gap: 4 }}>
+              {t.status === "Submitted" && <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" onClick={() => approve(t.id)}>Approve</button>}
+              <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" onClick={() => remove(t.id)}><Trash2 size={12} /></button>
+            </div>
+          )}
+          renderCell={(t: any, col: string) => {
+            switch (col) {
+              case "select": return t.status === "Approved" ? <input type="checkbox" checked={selected.has(t.id)} onChange={() => toggleSelect(t.id)} /> : null;
+              case "candidate_name": return <span style={{ fontWeight: 600, fontSize: 13 }}>{t.candidate_name}</span>;
+              case "week_ending": return <span style={{ fontSize: 12 }}>{new Date(t.week_ending).toLocaleDateString()}</span>;
+              case "hours": return <span style={{ fontSize: 12 }}>{t.hours}</span>;
+              case "rate": return <span style={{ fontSize: 12 }}>{t.rate}</span>;
+              case "amount": return <span style={{ fontSize: 12, fontWeight: 600 }}>{t.amount}</span>;
+              case "status": return <span className="tiq-badge tiq-badge-slate">{t.status}</span>;
+              default: return null;
+            }
+          }}
+        />
       )}
 
       {showForm && (

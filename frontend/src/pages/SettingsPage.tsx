@@ -1,9 +1,10 @@
 import { useNavigate } from "react-router-dom";
-import { useState, useEffect, useRef, Fragment } from "react";
+import { useState, useEffect, Fragment } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Settings, Key, User, Shield, Trash2, Pencil, Home} from "lucide-react";
-import { authApi, groqPoolApi, interviewApi, candidateLensSettingsApi, api } from "../lib/api";
+import { authApi, candidateLensSettingsApi, api } from "../lib/api";
 import { useAuth } from "../hooks/useAuth";
+import DataTable from "../components/DataTable";
 
 export default function SettingsPage() {
   const navigate = useNavigate();
@@ -38,21 +39,157 @@ export default function SettingsPage() {
   const smtpSavedKeys = savedKeys.filter((k: any) => k.service === "smtp");
 
   // Each service stores its fields independently
-  const [adzuna, setAdzuna] = useState({ app_id: "", app_key: "" });
-  const [groq, setGroq] = useState({ api_key: "", model: "" });
   const [linkedin, setLinkedin] = useState({ email: "", password: "" });
-  const [calendly, setCalendly] = useState({ booking_url: "", api_key: "", event_type_uri: "" });
-  const [navtalk, setNavtalk] = useState({ api_key: "", avatar_persona_id: "" });
-  const [calendlyEventTypes, setCalendlyEventTypes] = useState<any[] | null>(null);
-  const [fetchingCalendlyTypes, setFetchingCalendlyTypes] = useState(false);
-  const [calendlyFetchError, setCalendlyFetchError] = useState("");
   // port starts blank (not pre-filled with "587") so that saving with
   // it left empty never overwrites an already-saved custom port (e.g.
   // 465 for SSL) — the saveKey() call below only sends non-empty
   // fields, so a blank port here means "leave it as whatever's saved".
   const [smtp, setSmtp] = useState({ host: "", port: "", username: "", password: "", from_email: "" });
-  const [ollama, setOllama] = useState({ base_url: "http://localhost:11434", model: "llama3" });
-  const [morphcast, setMorphcast] = useState({ license_key: "" });
+  const [telephony, setTelephony] = useState({ account_sid: "", auth_token: "", caller_number: "" });
+  const telephonySavedKeys = savedKeys.filter((k: any) => k.service === "telephony");
+  // ── Phone Connection (Windows/Android Caller) ───────────────────────
+  // Alternative to Twilio telephony above: a small Local API the
+  // recruiter runs on their own Windows laptop, which drives their own
+  // Android phone's dialer over ADB — real SIM call, no per-minute
+  // Twilio cost, no cloud number. Only the fields needed to reach that
+  // Local API are stored server-side (per-user, never shared); the
+  // pairing/dialing calls themselves go straight from this browser tab
+  // to the Local API on localhost, since only the browser is running on
+  // the same machine as the paired phone.
+  const androidCallerSavedKeys = savedKeys.filter((k: any) => k.service === "android_caller");
+  const savedApiBase = androidCallerSavedKeys.find((k: any) => k.key_name === "api_base")?.key_preview;
+  const savedEnabled = androidCallerSavedKeys.find((k: any) => k.key_name === "enabled")?.key_preview;
+  const savedMode = androidCallerSavedKeys.find((k: any) => k.key_name === "mode")?.key_preview;
+  const savedAgentTokenKey = androidCallerSavedKeys.find((k: any) => k.key_name === "agent_token");
+  const [androidCaller, setAndroidCaller] = useState({ api_base: "http://127.0.0.1:4000" });
+  const [androidCallerMode, setAndroidCallerMode] = useState<"direct" | "relay">("relay");
+  const [androidCallerEnabled, setAndroidCallerEnabled] = useState(false);
+  const [androidCallerLoaded, setAndroidCallerLoaded] = useState(false);
+  useEffect(() => {
+    // api_base/enabled/mode aren't secrets — the backend returns them
+    // back in full (see UNMASKED_PREVIEW_FIELDS), so pre-fill the real
+    // saved values once, the first time they load. agent_token IS a
+    // secret and stays masked — see savedKeysBar for that one.
+    if (!androidCallerLoaded && androidCallerSavedKeys.length > 0) {
+      if (savedApiBase) setAndroidCaller({ api_base: savedApiBase });
+      if (savedEnabled) setAndroidCallerEnabled(savedEnabled === "true");
+      if (savedMode === "direct" || savedMode === "relay") setAndroidCallerMode(savedMode);
+      setAndroidCallerLoaded(true);
+    }
+  }, [androidCallerSavedKeys, savedApiBase, savedEnabled, savedMode, androidCallerLoaded]);
+  // The WebSocket URL the Relay-mode agent needs, derived from wherever
+  // this frontend itself was loaded from — TalentIQ's backend and
+  // frontend are served from the same origin (see main.py's StaticFiles
+  // mount), so this always points at the right place without needing a
+  // separate "API URL" setting anywhere.
+  const relayServerUrl = `${window.location.origin.replace(/^http/, "ws")}/api/android-caller/ws`;
+  const [generatingToken, setGeneratingToken] = useState(false);
+  const [freshAgentToken, setFreshAgentToken] = useState("");
+  const [tokenGenError, setTokenGenError] = useState("");
+  const generateAgentToken = async () => {
+    setGeneratingToken(true); setTokenGenError(""); setFreshAgentToken("");
+    try {
+      const { data } = await api.post("/api/android-caller/generate-token");
+      setFreshAgentToken(data.agent_token);
+      qc.invalidateQueries({ queryKey: ["api-keys"] });
+    } catch (e: any) {
+      setTokenGenError(e?.response?.data?.detail || "Failed to generate a token.");
+    } finally {
+      setGeneratingToken(false);
+    }
+  };
+  const [relayStatus, setRelayStatus] = useState<{ agentConnected: boolean; deviceConnected: boolean; needsAuthorization?: boolean } | null>(null);
+  const [relayStatusChecking, setRelayStatusChecking] = useState(false);
+  const checkRelayStatus = async () => {
+    setRelayStatusChecking(true);
+    try {
+      const { data } = await api.get("/api/android-caller/status");
+      setRelayStatus(data);
+    } catch {
+      setRelayStatus(null);
+    } finally {
+      setRelayStatusChecking(false);
+    }
+  };
+  const [androidHealth, setAndroidHealth] = useState<{ reachable: boolean; deviceConnected: boolean; needsAuthorization?: boolean } | null>(null);
+  const [androidHealthChecking, setAndroidHealthChecking] = useState(false);
+  const checkAndroidHealth = async (base: string) => {
+    setAndroidHealthChecking(true);
+    try {
+      const res = await fetch(`${base.replace(/\/$/, "")}/api/health`);
+      const data = await res.json();
+      setAndroidHealth({ reachable: true, deviceConnected: !!data.deviceConnected, needsAuthorization: !!data.needsAuthorization });
+    } catch {
+      setAndroidHealth({ reachable: false, deviceConnected: false });
+    } finally {
+      setAndroidHealthChecking(false);
+    }
+  };
+  const [pairIp, setPairIp] = useState("");
+  const [pairPort, setPairPort] = useState("");
+  const [pairCode, setPairCode] = useState("");
+  const [pairMsg, setPairMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [pairBusy, setPairBusy] = useState(false);
+  const [connectIp, setConnectIp] = useState("");
+  const [connectPort, setConnectPort] = useState("5555");
+  const [connectMsg, setConnectMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [connectBusy, setConnectBusy] = useState(false);
+  const androidApiBase = () => (androidCaller.api_base || "http://127.0.0.1:4000").replace(/\/$/, "");
+  const runAndroidPair = async () => {
+    setPairBusy(true); setPairMsg(null);
+    try {
+      if (androidCallerMode === "relay") {
+        await api.post("/api/android-caller/pair", { ip: pairIp, port: pairPort, code: pairCode });
+        setPairMsg({ ok: true, text: "Paired. Now connect below." });
+        checkRelayStatus();
+      } else {
+        const res = await fetch(`${androidApiBase()}/api/adb/pair`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ip: pairIp, port: pairPort, code: pairCode }),
+        });
+        const data = await res.json();
+        setPairMsg({ ok: res.ok, text: res.ok ? "Paired. Now connect below." : data.message || "Pairing failed." });
+        if (res.ok) checkAndroidHealth(androidApiBase());
+      }
+    } catch (e: any) {
+      setPairMsg({
+        ok: false,
+        text: androidCallerMode === "relay"
+          ? (e?.response?.data?.detail || "Pairing failed — is the agent (npm run start:agent) running and connected?")
+          : "Could not reach the Local API — is the Local API (npm start in server/) running on this laptop?",
+      });
+    } finally {
+      setPairBusy(false);
+    }
+  };
+  const runAndroidConnect = async () => {
+    setConnectBusy(true); setConnectMsg(null);
+    try {
+      if (androidCallerMode === "relay") {
+        await api.post("/api/android-caller/connect", { ip: connectIp || pairIp, port: connectPort });
+        setConnectMsg({ ok: true, text: "Connected! Check connection below." });
+        checkRelayStatus();
+      } else {
+        const res = await fetch(`${androidApiBase()}/api/adb/connect`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ip: connectIp || pairIp, port: connectPort }),
+        });
+        const data = await res.json();
+        setConnectMsg({ ok: res.ok, text: res.ok ? "Connected! Status below should flip to \"phone connected\"." : data.message || "Connect failed." });
+        if (res.ok) checkAndroidHealth(androidApiBase());
+      }
+    } catch (e: any) {
+      setConnectMsg({
+        ok: false,
+        text: androidCallerMode === "relay"
+          ? (e?.response?.data?.detail || "Connect failed — is the agent (npm run start:agent) running and connected?")
+          : "Could not reach the Local API — is the Local API (npm start in server/) running on this laptop?",
+      });
+    } finally {
+      setConnectBusy(false);
+    }
+  };
+
   const [interviewSettings, setInterviewSettings] = useState({ answer_seconds: "30", tts_voice: "en-US-JennyNeural", tts_engine: "edge" });
   const [keyMsg, setKeyMsg] = useState("");
 
@@ -80,7 +217,7 @@ export default function SettingsPage() {
   const isAdmin = user?.role === "admin";
   const { data: globalKeys = [] } = useQuery({ queryKey: ["global-keys"], queryFn: authApi.listGlobalKeys });
   const globalServiceSet = new Set(globalKeys.map((k: any) => k.service));
-  const SHAREABLE = ["groq", "ollama", "adzuna"];
+  const SHAREABLE = ["groq", "ollama", "apify"];
 
   // Whether non-admins see the "Platform AI & Search Services" status
   // readout below at all — same module-toggles endpoint/query key
@@ -104,108 +241,11 @@ export default function SettingsPage() {
   // pool instead.
   const { data: groqPoolActive } = useQuery({ queryKey: ["groq-pool-active"], queryFn: authApi.groqPoolActive });
 
-  // ── GROQ KEY POOL (admin only) ───────────────────────────────────
-  const { data: poolKeys = [], refetch: refetchPool } = useQuery({
-    queryKey: ["groq-pool"], queryFn: groqPoolApi.list, enabled: isAdmin,
-  });
-  const [newPoolKey, setNewPoolKey] = useState({ key_value: "", model: "" });
-  // Pulled live from Groq's own API using the key just typed in, rather
-  // than a hardcoded list — a fixed list is exactly the kind of thing
-  // that goes stale the moment Groq adds or retires a model (hit this
-  // directly, twice, earlier this session).
-  const [fetchedModels, setFetchedModels] = useState<string[] | null>(null);
-  const [fetchingModels, setFetchingModels] = useState(false);
-  const [modelsFetchError, setModelsFetchError] = useState("");
-  const fetchModelsForKey = async (keyOverride?: string) => {
-    const key = (keyOverride ?? newPoolKey.key_value).trim();
-    if (!key) { setModelsFetchError("Enter the API key above first."); return; }
-    setFetchingModels(true); setModelsFetchError(""); setFetchedModels(null);
-    try {
-      const res = await groqPoolApi.listModels(key);
-      setFetchedModels(res.models || []);
-    } catch (e: any) {
-      setModelsFetchError(e.response?.data?.detail || "Could not fetch models for this key.");
-    } finally {
-      setFetchingModels(false);
-    }
-  };
-  // Fetches models for an ALREADY-SAVED pool key using its stored value
-  // server-side — the value itself is never sent to or requested from
-  // the browser, so "just change the model" never requires re-entering
-  // or knowing the existing key.
-  const fetchModelsForExistingPoolKey = async (poolId: number) => {
-    setFetchingModels(true); setModelsFetchError(""); setFetchedModels(null);
-    try {
-      const res = await groqPoolApi.listModelsForExisting(poolId);
-      setFetchedModels(res.models || []);
-    } catch (e: any) {
-      setModelsFetchError(e.response?.data?.detail || "Could not fetch models for this key.");
-    } finally {
-      setFetchingModels(false);
-    }
-  };
-  // Auto-fetches shortly after the user stops typing/pasting a
-  // plausible-looking key — no extra click needed, models just show up
-  // the way they would if you were looking at Groq's own console. The
-  // manual button stays as a fallback (e.g. to retry after a transient
-  // network error) but isn't the primary path anymore.
-  const autoFetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => {
-    if (autoFetchTimer.current) clearTimeout(autoFetchTimer.current);
-    const key = newPoolKey.key_value.trim();
-    if (key.length < 20) return; // too short to plausibly be a real key yet
-    autoFetchTimer.current = setTimeout(() => { fetchModelsForKey(key); }, 600);
-    return () => { if (autoFetchTimer.current) clearTimeout(autoFetchTimer.current); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [newPoolKey.key_value]);
-  const [poolMsg, setPoolMsg] = useState("");
-  const flashPool = (m: string) => { setPoolMsg(m); setTimeout(() => setPoolMsg(""), 3000); };
-
-  const addPoolMut = useMutation({
-    mutationFn: () => groqPoolApi.add({ key_value: newPoolKey.key_value.trim(), model: newPoolKey.model.trim() || undefined }),
-    onSuccess: () => { refetchPool(); setNewPoolKey({ key_value: "", model: "" }); setFetchedModels(null); setModelsFetchError(""); flashPool("Key added to pool."); },
-    onError: (e: any) => flashPool(`❌ ${e.response?.data?.detail || "Failed to add key"}`),
-  });
-  const togglePoolMut = useMutation({
-    mutationFn: ({ id, is_active }: { id: number; is_active: boolean }) => groqPoolApi.update(id, { is_active }),
-    onSuccess: () => refetchPool(),
-    onError: (e: any) => flashPool(`❌ ${e.response?.data?.detail || "Failed to update key"}`),
-  });
-  const removePoolMut = useMutation({
-    mutationFn: (id: number) => groqPoolApi.remove(id),
-    onSuccess: () => { refetchPool(); flashPool("Key removed from pool."); },
-    onError: (e: any) => flashPool(`❌ ${e.response?.data?.detail || "Failed to remove key"}`),
-  });
-
-  // ── Inline editing for an existing pool key ─────────────────────────
-  // Lets an admin change the model and/or replace the key value on an
-  // existing pool entry, instead of only being able to Disable/Remove it
-  // and add a brand new one. The key value field starts blank (the real
-  // value is never returned by the API) — leaving it blank keeps the
-  // current key and only updates the model.
-  const [editingPoolId, setEditingPoolId] = useState<number | null>(null);
-  const [editPoolModel, setEditPoolModel] = useState("");
-  const [editPoolKeyValue, setEditPoolKeyValue] = useState("");
-  const startPoolEdit = (k: any) => {
-    setEditingPoolId(k.id); setEditPoolModel(k.model || ""); setEditPoolKeyValue("");
-    setFetchedModels(null); setModelsFetchError("");
-  };
-  const cancelPoolEdit = () => {
-    setEditingPoolId(null); setEditPoolModel(""); setEditPoolKeyValue("");
-    setFetchedModels(null); setModelsFetchError("");
-  };
-  const editPoolMut = useMutation({
-    mutationFn: ({ id, model, key_value }: { id: number; model?: string; key_value?: string }) =>
-      groqPoolApi.update(id, { model, ...(key_value ? { key_value } : {}) }),
-    onSuccess: () => { refetchPool(); flashPool("Pool key updated."); cancelPoolEdit(); },
-    onError: (e: any) => flashPool(`❌ ${e.response?.data?.detail || "Failed to update key"}`),
-  });
-
   const saveKey = async (service: string, fields: Record<string, string>) => {
     const entries = Object.entries(fields).filter(([, v]) => v.trim() !== "");
     if (entries.length === 0) { flashMsg("Enter at least one value to save."); return; }
     setSavingService(service);
-    // Adzuna/Groq/Ollama are admin-only to even open (backend rejects a
+    // Apify/Groq/Ollama are admin-only to even open (backend rejects a
     // non-admin save with 403 — see routers/auth.py), so there's no
     // legitimate "admin-private, not shared" case for them: whatever the
     // admin sets here IS the platform-wide value every other user
@@ -356,11 +396,16 @@ export default function SettingsPage() {
   // Services that already show/manage their own saved key(s) inline in
   // their own card (via savedKeysBar above, the Groq Key Pool's own
   // listing, or — for "interview" — the live-loaded Interview Settings
-  // form). The catch-all "Saved keys" table at the bottom only needs to
-  // show whatever's left: services with no dedicated settings window at
-  // all (e.g. infra credentials like "database"/"s3" that aren't
-  // surfaced as a card in this UI).
-  const DEDICATED_UI_SERVICES = ["adzuna", "groq", "linkedin", "calendly", "navtalk", "ollama", "morphcast", "smtp", "interview"];
+  // form) — plus "database" and "s3", which are platform infrastructure
+  // credentials managed exclusively in Admin Console > API Keys (see
+  // ApiKeysTab.tsx's DatabasePanel/S3Panel). Those two are deliberately
+  // excluded here, not just "not yet given a card": a regular per-user
+  // Settings page is the wrong place for infra secrets to be editable/
+  // deletable from, even for the admin who configured them. The
+  // catch-all "Saved keys" table at the bottom only needs to show
+  // whatever's left: services with no dedicated settings window
+  // anywhere in the app.
+  const DEDICATED_UI_SERVICES = ["apify", "groq", "linkedin", "calendly", "navtalk", "ollama", "morphcast", "smtp", "telephony", "android_caller", "interview", "database", "s3"];
   const otherSavedKeys = savedKeys.filter((k: any) => !DEDICATED_UI_SERVICES.includes(k.service));
 
   // ── ADMIN USERS ──────────────────────────────────────────────────
@@ -381,27 +426,6 @@ export default function SettingsPage() {
         onChange={e => set(e.target.value)} placeholder={ph} />
     </div>
   );
-
-  const fetchCalendlyEventTypes = async () => {
-    setFetchingCalendlyTypes(true);
-    setCalendlyFetchError("");
-    try {
-      // Uses whatever token is CURRENTLY SAVED on the server, so save the
-      // token first if it hasn't been saved yet this session.
-      if (calendly.api_key.trim()) {
-        await authApi.saveApiKey({ service: "calendly", key_name: "api_key", key_value: calendly.api_key.trim(), is_global: false });
-        qc.invalidateQueries({ queryKey: ["api-keys"] });
-      }
-      const types = await interviewApi.calendlyEventTypes();
-      setCalendlyEventTypes(types);
-      if (types.length === 0) setCalendlyFetchError("No active event types found on this Calendly account.");
-    } catch (e: any) {
-      setCalendlyFetchError(e?.response?.data?.detail || "Could not fetch event types — check your Personal Access Token.");
-      setCalendlyEventTypes(null);
-    } finally {
-      setFetchingCalendlyTypes(false);
-    }
-  };
 
   return (
     <div>
@@ -474,233 +498,6 @@ export default function SettingsPage() {
         <div style={{ maxWidth: 680 }}>
           {keyMsg && <div className="tiq-alert tiq-alert-success tiq-mb-4">{keyMsg}</div>}
 
-          {/* ADZUNA / GROQ / OLLAMA — admin-managed only. These three are
-              platform-shared credentials (see utils/credentials.py
-              SHAREABLE_SERVICES); every user already inherits whatever the
-              admin configures here, so only admins get the editable form —
-              everyone else sees a simple status readout instead. */}
-          {isAdmin ? (
-            <div className="tiq-card tiq-mb-6">
-              <div className="tiq-card-title">Adzuna — Job Search API</div>
-              <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>
-                Free at <a href="https://developer.adzuna.com" target="_blank" rel="noopener noreferrer" style={{ color: "var(--teal-500)" }}>developer.adzuna.com</a>. Needed for JobHunt and JobIntel agents.
-              </p>
-              {savedKeysBar("adzuna")}
-              <div className="tiq-grid-2">
-                {inp("App ID", adzuna.app_id, v => setAdzuna(a => ({ ...a, app_id: v })), "text", "e.g. 638c0962")}
-                {inp("App Key", adzuna.app_key, v => setAdzuna(a => ({ ...a, app_key: v })), "password", "e.g. 04681adc…")}
-              </div>
-              <p style={{ fontSize: 11.5, color: "var(--text-muted)", margin: "4px 0 8px" }}>
-                Shared platform-wide — every user on this deployment automatically uses whatever you save here.
-              </p>
-              <button className="tiq-btn tiq-btn-primary" onClick={() => saveKey("adzuna", adzuna)} disabled={savingService === "adzuna"}>
-                {savingService === "adzuna" ? "Saving…" : "Save Adzuna Keys"}
-              </button>
-            </div>
-          ) : null}
-
-          {isAdmin ? (
-            <div className="tiq-card tiq-mb-6">
-              <div className="tiq-card-title">Groq Key Pool — scale capacity automatically</div>
-              <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 16 }}>
-                Add multiple Groq keys here (from separate Groq accounts if you want real added
-                throughput — Groq's rate limits apply per account, not per key). The platform
-                automatically spreads load across whichever keys are healthy, and routes around
-                any that are temporarily rate-limited, recovering them automatically once they
-                cool down.
-              </p>
-
-              {poolMsg && (
-                <div style={{ fontSize: 12, marginBottom: 12, padding: "8px 12px", borderRadius: 6,
-                  background: poolMsg.startsWith("❌") ? "rgba(239,68,68,.08)" : "rgba(20,184,166,.08)",
-                  color: poolMsg.startsWith("❌") ? "#ef4444" : "var(--teal-500)" }}>
-                  {poolMsg}
-                </div>
-              )}
-
-              {poolKeys.length > 0 && (
-                <div style={{ marginBottom: 20 }}>
-                  <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text-muted)", marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.4 }}>
-                    Keys in pool ({poolKeys.length})
-                  </div>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                    {(() => {
-                      // Numbered by chronological addition order (oldest = #1),
-                      // not by current display position — the list itself
-                      // shows newest-first, but "key #1" should always mean
-                      // "the first one I added", not shift around based on
-                      // display order.
-                      const byAddedAsc = [...poolKeys].sort((a: any, b: any) =>
-                        new Date(a.added_at || 0).getTime() - new Date(b.added_at || 0).getTime()
-                      );
-                      const numberOf = new Map(byAddedAsc.map((k: any, i: number) => [k.id, i + 1]));
-                      return poolKeys.map((k: any) => (
-                      <div key={k.id}>
-                      <div style={{
-                        display: "flex", alignItems: "center", gap: 10, padding: "8px 12px",
-                        border: "1px solid var(--border)", borderRadius: 8,
-                        opacity: k.is_active ? 1 : 0.5,
-                      }}>
-                        <span style={{
-                          display: "flex", alignItems: "center", justifyContent: "center",
-                          width: 24, height: 24, borderRadius: 6, flexShrink: 0,
-                          background: "var(--surface-2, rgba(0,0,0,.06))", fontSize: 11, fontWeight: 700,
-                          color: "var(--text-muted)",
-                        }}>
-                          {numberOf.get(k.id)}
-                        </span>
-                        <span style={{ fontFamily: "monospace", fontSize: 13 }}>{k.key_preview}</span>
-                        <span style={{ fontSize: 12, color: "var(--text-muted)" }}>{k.model || "platform default"}</span>
-                        {k.cooldown_until && new Date(k.cooldown_until) > new Date() && (
-                          <span style={{ fontSize: 11, color: "#f59e0b" }}>⏳ cooling down</span>
-                        )}
-                        {!k.is_active && <span style={{ fontSize: 11, color: "var(--text-muted)" }}>disabled</span>}
-                        <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-                          <button
-                            className="tiq-btn tiq-btn-sm"
-                            onClick={() => editingPoolId === k.id ? cancelPoolEdit() : startPoolEdit(k)}
-                          >
-                            <Pencil size={13} />
-                          </button>
-                          <button
-                            className="tiq-btn tiq-btn-sm"
-                            onClick={() => togglePoolMut.mutate({ id: k.id, is_active: !k.is_active })}
-                          >
-                            {k.is_active ? "Disable" : "Enable"}
-                          </button>
-                          <button
-                            className="tiq-btn tiq-btn-sm"
-                            style={{ color: "#ef4444" }}
-                            onClick={() => { if (confirm("Remove this key from the pool?")) removePoolMut.mutate(k.id); }}
-                          >
-                            <Trash2 size={13} />
-                          </button>
-                        </div>
-                      </div>
-                      {editingPoolId === k.id && (
-                        <div style={{
-                          display: "flex", flexDirection: "column", gap: 8, padding: "10px 14px",
-                          background: "var(--bg-secondary)", border: "1px solid var(--border)", borderTop: "none",
-                          borderRadius: "0 0 8px 8px", marginTop: -1,
-                        }}>
-                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                            <span style={{ fontSize: 12, color: "var(--text-secondary)", whiteSpace: "nowrap", width: 90 }}>Replace key:</span>
-                            <input
-                              type="password"
-                              value={editPoolKeyValue}
-                              onChange={e => setEditPoolKeyValue(e.target.value)}
-                              placeholder="leave blank to keep the current key, only change the model"
-                              style={{ flex: 1, padding: "6px 10px", fontSize: 12.5, borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg-tertiary)", color: "var(--text-primary)" }}
-                            />
-                            <button className="tiq-btn tiq-btn-outline tiq-btn-sm" style={{ whiteSpace: "nowrap" }}
-                              onClick={() => editPoolKeyValue.trim() ? fetchModelsForKey(editPoolKeyValue.trim()) : fetchModelsForExistingPoolKey(k.id)}
-                              disabled={fetchingModels}>
-                              {fetchingModels ? "Fetching…" : (fetchedModels ? "Refetch" : "Fetch now")}
-                            </button>
-                          </div>
-                          <div style={{ fontSize: 10.5, color: "var(--text-muted)", marginTop: -2 }}>
-                            Leave "Replace key" blank and click Fetch now to pull the live model list using THIS key's
-                            already-stored value (never sent to your browser) — or type a new value above first to
-                            fetch models for that key instead.
-                          </div>
-                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                            <span style={{ fontSize: 12, color: "var(--text-secondary)", whiteSpace: "nowrap", width: 90 }}>Model:</span>
-                            {fetchedModels ? (
-                              <select
-                                value={editPoolModel}
-                                onChange={e => setEditPoolModel(e.target.value)}
-                                style={{ flex: 1, padding: "6px 10px", fontSize: 12.5, borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg-tertiary)", color: "var(--text-primary)" }}
-                              >
-                                <option value="">Platform default</option>
-                                {fetchedModels.map(m => <option key={m} value={m}>{m}</option>)}
-                              </select>
-                            ) : (
-                              <input
-                                value={editPoolModel}
-                                onChange={e => setEditPoolModel(e.target.value)}
-                                placeholder="leave blank for platform default, or fetch models above to pick from a live list"
-                                style={{ flex: 1, padding: "6px 10px", fontSize: 12.5, borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg-tertiary)", color: "var(--text-primary)" }}
-                              />
-                            )}
-                          </div>
-                          {modelsFetchError && <div style={{ fontSize: 11.5, color: "#ef4444" }}>{modelsFetchError}</div>}
-                          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-                            <button className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={cancelPoolEdit} disabled={editPoolMut.isPending}>
-                              Cancel
-                            </button>
-                            <button className="tiq-btn tiq-btn-primary tiq-btn-sm"
-                              onClick={() => editPoolMut.mutate({ id: k.id, model: editPoolModel.trim(), key_value: editPoolKeyValue.trim() || undefined })}
-                              disabled={editPoolMut.isPending}>
-                              {editPoolMut.isPending ? "Saving…" : "Save"}
-                            </button>
-                          </div>
-                        </div>
-                      )}
-                      </div>
-                      ));
-                    })()}
-                  </div>
-                </div>
-              )}
-
-              <div style={{ borderTop: "1px solid var(--border)", paddingTop: 16 }}>
-                <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text-muted)", marginBottom: 10, textTransform: "uppercase", letterSpacing: 0.4 }}>
-                  Add a new key — will become Key #{poolKeys.length + 1}
-                </div>
-
-                {inp("API Key", newPoolKey.key_value, v => { setNewPoolKey(k => ({ ...k, key_value: v })); setFetchedModels(null); setModelsFetchError(""); }, "password", "gsk_…")}
-
-                <div style={{ marginBottom: 4, display: "flex", alignItems: "center", gap: 10 }}>
-                  {fetchingModels && (
-                    <span style={{ fontSize: 12, color: "var(--text-muted)" }}>Checking with Groq…</span>
-                  )}
-                  {!fetchingModels && fetchedModels && (
-                    <span style={{ fontSize: 12, color: "var(--teal-500)" }}>✓ {fetchedModels.length} models available for this key</span>
-                  )}
-                  {!fetchingModels && !fetchedModels && !modelsFetchError && newPoolKey.key_value.trim().length > 0 && (
-                    <span style={{ fontSize: 12, color: "var(--text-muted)" }}>Models will load automatically once the key looks complete…</span>
-                  )}
-                  <button
-                    type="button"
-                    className="tiq-btn tiq-btn-sm"
-                    onClick={() => fetchModelsForKey()}
-                    disabled={fetchingModels || !newPoolKey.key_value.trim()}
-                  >
-                    {fetchedModels ? "Refetch" : "Fetch now"}
-                  </button>
-                  {modelsFetchError && <span style={{ fontSize: 12, color: "#ef4444" }}>{modelsFetchError}</span>}
-                </div>
-
-                <div style={{ marginTop: 12, marginBottom: 14 }}>
-                  <label style={{ display: "block", fontSize: 12, color: "var(--text-muted)", marginBottom: 4 }}>Model</label>
-                  {fetchedModels ? (
-                    <select
-                      value={newPoolKey.model}
-                      onChange={e => setNewPoolKey(k => ({ ...k, model: e.target.value }))}
-                      className="tiq-input"
-                      style={{ width: "100%" }}
-                    >
-                      <option value="">Platform default</option>
-                      {fetchedModels.map(m => <option key={m} value={m}>{m}</option>)}
-                    </select>
-                  ) : (
-                    <>
-                      {inp("", newPoolKey.model, v => setNewPoolKey(k => ({ ...k, model: v })), "text", "leave blank for platform default, or fetch models above to pick from a live list")}
-                    </>
-                  )}
-                </div>
-
-                <button
-                  className="tiq-btn tiq-btn-primary"
-                  onClick={() => addPoolMut.mutate()}
-                  disabled={addPoolMut.isPending || !newPoolKey.key_value.trim()}
-                >
-                  {addPoolMut.isPending ? "Adding…" : `Add as Key #${poolKeys.length + 1}`}
-                </button>
-              </div>
-            </div>
-          ) : null}
-
           {/* LINKEDIN */}
           <div className="tiq-card tiq-mb-6">
             <div className="tiq-card-title">LinkedIn — Candidate Search</div>
@@ -717,136 +514,24 @@ export default function SettingsPage() {
             </button>
           </div>
 
-          {/* CALENDLY — admin-managed only, same pattern as Adzuna/Groq/Ollama above. */}
-          {isAdmin ? (
-          <div className="tiq-card tiq-mb-6">
-            <div className="tiq-card-title">Calendly — Interview Scheduling</div>
-            <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>
-              Lets Interviews hand candidates a Calendly link to book their own time instead of TalentIQ Solution's
-              own link-based flow — Calendly handles the actual time-slot picking and calendar conflicts.
-            </p>
-            {savedKeysBar("calendly")}
-
-            {/* Simple mode: one public link, same as embedding Calendly on a website.
-                No token needed — this is the field to use for a single Calendly page
-                shared by the whole team (e.g. https://calendly.com/pksingh210/30min). */}
-            <div className="tiq-form-group">
-              <label className="tiq-label">Booking Link</label>
-              <input className="tiq-input" value={calendly.booking_url}
-                     onChange={e => setCalendly(c => ({ ...c, booking_url: e.target.value }))}
-                     placeholder="https://calendly.com/your-username/30min" />
-            </div>
-            <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>
-              Paste your public Calendly page URL — this is the link every candidate gets. To change the
-              event, duration, or availability later, edit it in Calendly and update the link here; no
-              redeploy needed. Find it under your event type's <strong>Share</strong> button in Calendly.
-            </p>
-            <div style={{ marginBottom: 18 }}>
-              <button className="tiq-btn tiq-btn-primary" onClick={() => saveKey("calendly", calendly)} disabled={savingService === "calendly"}>
-                {savingService === "calendly" ? "Saving…" : "Save Calendly Link"}
-              </button>
-            </div>
-
-            {/* Advanced mode: per-candidate single-use links via the Calendly API.
-                Optional — only needed if you want a fresh, one-time link generated
-                per interview rather than sharing the same booking link above. */}
-            <details>
-              <summary style={{ cursor: "pointer", fontSize: 12, color: "var(--text-muted)", marginBottom: 10 }}>
-                Advanced: generate a single-use link per candidate instead (optional)
-              </summary>
-              <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "10px 0" }}>
-                Get your Personal Access Token from{" "}
-                <a href="https://calendly.com/integrations/api_webhooks" target="_blank" rel="noreferrer" style={{ color: "var(--brand-teal, #0d9488)" }}>
-                  Calendly → Integrations → API & Webhooks
-                </a>. This is a private credential — only you can use it, same as your LinkedIn login above.
-                If a Booking Link is set above, it takes priority and this is ignored.
-              </p>
-              <div className="tiq-grid-2">
-                {inp("Personal Access Token", calendly.api_key, v => setCalendly(c => ({ ...c, api_key: v })), "password", "eyJraWQiOi...")}
-                <div className="tiq-form-group">
-                  <label className="tiq-label">Event Type</label>
-                  {calendlyEventTypes ? (
-                    <select className="tiq-select" value={calendly.event_type_uri}
-                            onChange={e => setCalendly(c => ({ ...c, event_type_uri: e.target.value }))}>
-                      <option value="">— Select an event type —</option>
-                      {calendlyEventTypes.map((et: any) => (
-                        <option key={et.uri} value={et.uri}>{et.name} ({et.duration} min)</option>
-                      ))}
-                    </select>
-                  ) : (
-                    <input className="tiq-input" value={calendly.event_type_uri}
-                           onChange={e => setCalendly(c => ({ ...c, event_type_uri: e.target.value }))}
-                           placeholder="Click 'Fetch My Event Types' or paste an event type URI" />
-                  )}
-                </div>
-              </div>
-              {calendlyFetchError && <div className="tiq-alert tiq-alert-error" style={{ marginBottom: 10, fontSize: 12 }}>{calendlyFetchError}</div>}
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                <button className="tiq-btn tiq-btn-outline" onClick={fetchCalendlyEventTypes} disabled={fetchingCalendlyTypes || !calendly.api_key.trim()}>
-                  {fetchingCalendlyTypes ? "Fetching…" : "Fetch My Event Types"}
-                </button>
-                <button className="tiq-btn tiq-btn-primary" onClick={() => saveKey("calendly", calendly)} disabled={savingService === "calendly"}>
-                  {savingService === "calendly" ? "Saving…" : "Save Calendly Credentials"}
-                </button>
-              </div>
-            </details>
-          </div>
-          ) : null}
-
-          {/* NAVTALK — admin-managed only, same pattern as Adzuna/Groq/Ollama above. */}
-          {isAdmin ? (
-          <div className="tiq-card tiq-mb-6">
-            <div className="tiq-card-title">NavTalk — AI Avatar Interviews</div>
-            <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 6 }}>
-              Powers "Video Interview (AI Avatar)" rounds in Interviews — a NavTalk avatar asks each candidate their
-              personalized questions, and their spoken answers are transcribed and evaluated automatically.
-            </p>
-            <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>
-              Get your API key and avatar persona ID from your NavTalk.ai dashboard. This is a private credential —
-              only you can use it, same as your LinkedIn login above.
-            </p>
-            {savedKeysBar("navtalk")}
-            <div className="tiq-grid-2">
-              {inp("API Key", navtalk.api_key, v => setNavtalk(n => ({ ...n, api_key: v })), "password", "nvtk_...")}
-              {inp("Avatar Persona ID", navtalk.avatar_persona_id, v => setNavtalk(n => ({ ...n, avatar_persona_id: v })), "text", "e.g. persona_abc123")}
-            </div>
-            <button className="tiq-btn tiq-btn-primary" onClick={() => saveKey("navtalk", navtalk)} disabled={savingService === "navtalk"}>
-              {savingService === "navtalk" ? "Saving…" : "Save NavTalk Credentials"}
-            </button>
-          </div>
-          ) : null}
-
-          {isAdmin ? (
-            <div className="tiq-card tiq-mb-6">
-              <div className="tiq-card-title">Ollama — Local/Self-Hosted LLM</div>
-              <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>
-                Used as a fallback for JD Creator when no Groq key is set. Requires{" "}
-                <a href="https://ollama.com" target="_blank" rel="noopener noreferrer" style={{ color: "var(--teal-500)" }}>Ollama</a>{" "}
-                running locally (or reachable at the URL below) with a model pulled, e.g. <code>ollama pull llama3</code>.
-              </p>
-              {savedKeysBar("ollama")}
-              <div className="tiq-grid-2">
-                {inp("Base URL", ollama.base_url, v => setOllama(o => ({ ...o, base_url: v })), "text", "http://localhost:11434")}
-                {inp("Model", ollama.model, v => setOllama(o => ({ ...o, model: v })), "text", "llama3")}
-              </div>
-              <p style={{ fontSize: 11.5, color: "var(--text-muted)", margin: "4px 0 8px" }}>
-                Shared platform-wide — every user on this deployment automatically uses whatever you save here.
-              </p>
-              <button className="tiq-btn tiq-btn-primary" onClick={() => saveKey("ollama", ollama)} disabled={savingService === "ollama"}>
-                {savingService === "ollama" ? "Saving…" : "Save Ollama Settings"}
-              </button>
-            </div>
-          ) : showPlatformAiStatus ? (
+          {/* Apify/Groq/Ollama/Calendly/NavTalk/MorphCast are now
+              managed by admins from Admin Console → API Keys, not here
+              (they're platform-shared or admin-private credentials, and
+              every other user already inherits whatever's configured
+              there — see utils/credentials.py SHAREABLE_SERVICES). This
+              status readout is all non-admins see, and only if an admin
+              has switched it on via Admin Console → Modules Management. */}
+          {!isAdmin && showPlatformAiStatus ? (
             <div className="tiq-card tiq-mb-6">
               <div className="tiq-card-title">Platform AI & Search Services</div>
               <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>
-                Adzuna, Groq, and Ollama are configured platform-wide by your administrator — every feature that
+                Apify, Groq, and Ollama are configured platform-wide by your administrator — every feature that
                 uses them (resume summaries, JD skill extraction, interview questions, CVAnalysis scoring, job
                 search, and more) automatically uses whatever is set up here, no action needed from you.
               </p>
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 {[
-                  { key: "adzuna", label: "Adzuna (job search)" },
+                  { key: "apify", label: "Apify (Seek job search)" },
                   { key: "groq", label: "Groq (AI / LLM)" },
                   { key: "ollama", label: "Ollama (local LLM fallback)" },
                 ].map(({ key, label }) => {
@@ -935,26 +620,6 @@ export default function SettingsPage() {
             </div>
           ) : null}
 
-          {/* MORPHCAST — admin-managed only, same pattern as Adzuna/Groq/Ollama above. */}
-          {isAdmin ? (
-          <div className="tiq-card tiq-mb-6">
-            <div className="tiq-card-title">MorphCast — Video Interview Emotion AI</div>
-            <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>
-              Powers the facial emotion analysis during CandidateLens video interviews (Video Review column).
-              Get a free license key at{" "}
-              <a href="https://www.morphcast.com" target="_blank" rel="noopener noreferrer" style={{ color: "var(--teal-500)" }}>morphcast.com</a>{" "}
-              — a key is required on every load; without one, interviews still run but skip emotion analysis.
-            </p>
-            {savedKeysBar("morphcast")}
-            <div className="tiq-grid-2">
-              {inp("License Key", morphcast.license_key, v => setMorphcast({ license_key: v }), "text", "paste your MorphCast license key")}
-            </div>
-            <button className="tiq-btn tiq-btn-primary" onClick={() => saveKey("morphcast", morphcast)} disabled={savingService === "morphcast"}>
-              {savingService === "morphcast" ? "Saving…" : "Save MorphCast Key"}
-            </button>
-          </div>
-          ) : null}
-
           {/* SMTP — this is what "Send Interview Invite" on the Video
               Interview screen actually sends through: the backend reads
               these credentials fresh, per-request, for whichever
@@ -997,6 +662,210 @@ export default function SettingsPage() {
             </button>
           </div>
 
+          {/* TELEPHONY — powers Phone Interview's "Call Candidate" (click-to-call)
+              and "Text Call Time" (SMS scheduling) actions. Strictly private per
+              user, same as SMTP above — never shared, never falls back to
+              another user's or admin's credentials. */}
+          <div className="tiq-card tiq-mb-6">
+            <div className="tiq-card-title">Telephony — Click-to-Call &amp; SMS</div>
+            <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>
+              Powers Phone Interview's "Call Candidate" button (bridges your own phone to the candidate's — Twilio
+              rings you first, then connects you through once you pick up) and "Text Call Time" (SMS scheduling).
+              Get your Account SID, Auth Token, and a phone number from your{" "}
+              <a href="https://console.twilio.com" target="_blank" rel="noopener noreferrer" style={{ color: "var(--teal-500)" }}>Twilio Console</a>.
+            </p>
+
+            {telephonySavedKeys.length > 0 ? (
+              savedKeysBar("telephony")
+            ) : (
+              <div style={{
+                fontSize: 12, marginBottom: 16, padding: "10px 12px", borderRadius: 8,
+                background: "rgba(239,68,68,.06)", border: "1px solid rgba(239,68,68,.2)", color: "var(--text-muted)",
+              }}>
+                Not configured yet — calling and texting will fail until all fields below are saved at least once.
+              </div>
+            )}
+
+            <div className="tiq-grid-2">
+              {inp("Account SID", telephony.account_sid, v => setTelephony(t => ({ ...t, account_sid: v })), "text", "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")}
+              {inp("Auth Token", telephony.auth_token, v => setTelephony(t => ({ ...t, auth_token: v })), "password", "••••••••")}
+              {inp("Caller Number", telephony.caller_number, v => setTelephony(t => ({ ...t, caller_number: v })), "text", "+15551234567")}
+            </div>
+            <p style={{ fontSize: 11, color: "var(--text-muted)", marginTop: -6, marginBottom: 14 }}>
+              Caller Number is your Twilio phone number, in E.164 format (e.g. +15551234567) — this is both the
+              number that rings you for a click-to-call and the "From" number candidates see on texts.
+            </p>
+            <button className="tiq-btn tiq-btn-primary" onClick={() => saveKey("telephony", telephony)} disabled={savingService === "telephony"}>
+              {savingService === "telephony" ? "Saving…" : telephonySavedKeys.length > 0 ? "Update Telephony Settings" : "Save Telephony Settings"}
+            </button>
+          </div>
+
+          {/* PHONE CONNECTION — Windows/Android Caller. Alternative to
+              Twilio above: dials out on the recruiter's own Android SIM by
+              driving the phone over ADB from a small Node app running on
+              their own Windows laptop. Two ways that app can reach
+              TalentIQ — see windows-android-caller/README.md for the
+              full comparison:
+                - Relay (recommended): the laptop app connects OUT to
+                  this backend over a WebSocket (npm run start:agent) —
+                  works from any device signed into TalentIQ, no
+                  CORS/mixed-content concerns.
+                - Direct: this browser tab calls a local HTTP server on
+                  that same laptop (npm start) — simpler, but only works
+                  from a browser open on that exact machine. */}
+          <div className="tiq-card tiq-mb-6">
+            <div className="tiq-card-title">Phone Connection — Windows/Android Caller</div>
+            <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14 }}>
+              An alternative to Telephony above for "Call Candidate": instead of Twilio, this drives{" "}
+              <strong>your own Android phone's dialer</strong> over ADB from a small app running on your Windows
+              laptop — a real call on your own SIM, free, but only while that laptop app is running and the phone
+              is paired over Wi-Fi. See the app's README for one-time phone/laptop setup.
+            </p>
+
+            <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, marginBottom: 14, cursor: "pointer" }}>
+              <input type="checkbox" checked={androidCallerEnabled}
+                onChange={e => setAndroidCallerEnabled(e.target.checked)} />
+              Use my Windows/Android caller for "Call Candidate" instead of Twilio
+            </label>
+
+            <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+              {([
+                { id: "relay" as const, label: "Relay mode (recommended)" },
+                { id: "direct" as const, label: "Direct mode" },
+              ]).map(m => (
+                <button key={m.id} type="button" onClick={() => setAndroidCallerMode(m.id)}
+                  style={{
+                    padding: "6px 12px", borderRadius: 999, fontSize: 12, fontWeight: 700, cursor: "pointer",
+                    border: androidCallerMode === m.id ? "1.5px solid var(--violet-500)" : "1px solid var(--border)",
+                    color: androidCallerMode === m.id ? "var(--violet-500)" : "var(--text-muted)",
+                    background: androidCallerMode === m.id ? "rgba(139,92,246,.08)" : "transparent",
+                  }}>
+                  {m.label}
+                </button>
+              ))}
+            </div>
+
+            {androidCallerSavedKeys.length > 0 && savedKeysBar("android_caller")}
+
+            {androidCallerMode === "relay" ? (
+              <>
+                <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 12, lineHeight: 1.6 }}>
+                  The laptop app (<code>npm run start:agent</code>) connects <strong>out</strong> to TalentIQ, so it works from
+                  any device you sign into TalentIQ from — not just that laptop's own browser. Paste these two
+                  values into that app's <code>server/.env</code>:
+                </p>
+                <div className="tiq-form-group">
+                  <label className="tiq-label">Server URL (SERVER_URL)</label>
+                  <input className="tiq-input" readOnly value={relayServerUrl}
+                    onFocus={e => e.target.select()} style={{ fontFamily: "monospace", fontSize: 12 }} />
+                </div>
+                <div className="tiq-form-group">
+                  <label className="tiq-label">Agent Token (AGENT_TOKEN)</label>
+                  {freshAgentToken ? (
+                    <input className="tiq-input" readOnly value={freshAgentToken}
+                      onFocus={e => e.target.select()} style={{ fontFamily: "monospace", fontSize: 12 }} />
+                  ) : (
+                    <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                      {savedAgentTokenKey ? "Already generated — shown only once, when created. Generate a new one below to replace it." : "Not generated yet."}
+                    </div>
+                  )}
+                </div>
+                {tokenGenError && <div style={{ fontSize: 11.5, color: "var(--rose-500)", marginBottom: 8 }}>{tokenGenError}</div>}
+                <button type="button" className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={generateAgentToken} disabled={generatingToken} style={{ marginBottom: 16 }}>
+                  {generatingToken ? "Generating…" : savedAgentTokenKey ? "Generate new token (invalidates the old one)" : "Generate token"}
+                </button>
+
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+                  <button type="button" className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={checkRelayStatus} disabled={relayStatusChecking}>
+                    {relayStatusChecking ? "Checking…" : "Check connection"}
+                  </button>
+                  {relayStatus && (
+                    <span style={{ fontSize: 12, fontWeight: 700, color: !relayStatus.agentConnected ? "var(--rose-500)" : relayStatus.deviceConnected ? "#10b981" : "#f59e0b" }}>
+                      {!relayStatus.agentConnected
+                        ? "Agent not connected — is the agent (npm run start:agent) running on your laptop?"
+                        : relayStatus.deviceConnected
+                        ? "Agent connected — phone connected"
+                        : relayStatus.needsAuthorization
+                        ? "Agent connected — phone detected but not authorized"
+                        : "Agent connected — no phone connected yet"}
+                    </span>
+                  )}
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="tiq-grid-2">
+                  {inp("Local API Base URL", androidCaller.api_base, v => setAndroidCaller({ api_base: v }), "text", "http://127.0.0.1:4000")}
+                </div>
+                <p style={{ fontSize: 11, color: "var(--text-muted)", marginTop: -6, marginBottom: 14 }}>
+                  Default port is 4000 (set by <code>server/.env</code> in the Windows/Android Caller app, run via
+                  <code>npm start</code> in its <code>server/</code> folder). Leave as localhost unless you changed
+                  <code>PORT</code> there. Only works from a browser open on that same laptop.
+                </p>
+
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+                  <button type="button" className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={() => checkAndroidHealth(androidApiBase())} disabled={androidHealthChecking}>
+                    {androidHealthChecking ? "Checking…" : "Check connection"}
+                  </button>
+                  {androidHealth && (
+                    <span style={{ fontSize: 12, fontWeight: 700, color: !androidHealth.reachable ? "var(--rose-500)" : androidHealth.deviceConnected ? "#10b981" : "#f59e0b" }}>
+                      {!androidHealth.reachable
+                        ? "Local API unreachable — is the Local API (npm start in server/) running on this laptop?"
+                        : androidHealth.deviceConnected
+                        ? "Phone connected"
+                        : androidHealth.needsAuthorization
+                        ? "Phone detected but not authorized — accept the prompt on the phone"
+                        : "Local API is running, but no phone connected yet"}
+                    </span>
+                  )}
+                </div>
+              </>
+            )}
+
+            <button className="tiq-btn tiq-btn-primary" style={{ marginBottom: 18 }}
+              onClick={() => saveKey("android_caller", { api_base: androidCaller.api_base, enabled: String(androidCallerEnabled), mode: androidCallerMode })}
+              disabled={savingService === "android_caller"}>
+              {savingService === "android_caller" ? "Saving…" : androidCallerSavedKeys.length > 0 ? "Update Phone Connection Settings" : "Save Phone Connection Settings"}
+            </button>
+
+            <details>
+              <summary style={{ fontSize: 12.5, fontWeight: 700, cursor: "pointer", color: "var(--text-secondary)" }}>
+                Pair or connect a phone (one-time / per Wi-Fi session)
+              </summary>
+              <div style={{ marginTop: 12 }}>
+                <div style={{ fontSize: 11.5, fontWeight: 700, marginBottom: 4 }}>1. Pair (Android 11+, one time per phone)</div>
+                <p style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 8 }}>
+                  On the phone: Settings → Developer options → Wireless debugging → Pair device with pairing code —
+                  copy the IP, port, and 6-digit code shown there into here.
+                </p>
+                <div className="tiq-grid-2">
+                  {inp("Phone IP", pairIp, setPairIp, "text", "192.168.1.42")}
+                  {inp("Pairing port", pairPort, setPairPort, "text", "37251")}
+                </div>
+                {inp("Pairing code", pairCode, setPairCode, "text", "123456")}
+                {pairMsg && <div style={{ fontSize: 11.5, color: pairMsg.ok ? "#10b981" : "var(--rose-500)", marginBottom: 8 }}>{pairMsg.text}</div>}
+                <button type="button" className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={runAndroidPair} disabled={pairBusy} style={{ marginBottom: 16 }}>
+                  {pairBusy ? "Pairing…" : "Pair device"}
+                </button>
+
+                <div style={{ fontSize: 11.5, fontWeight: 700, marginBottom: 4 }}>2. Connect</div>
+                <p style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 8 }}>
+                  Back on the phone's main Wireless debugging screen (not the pairing dialog) — it shows a{" "}
+                  <em>different</em> IP:port. Enter that here. Older Android: run <code>adb tcpip 5555</code> over
+                  USB once and use port 5555.
+                </p>
+                <div className="tiq-grid-2">
+                  {inp("Phone IP", connectIp, setConnectIp, "text", "192.168.1.42")}
+                  {inp("Connect port", connectPort, setConnectPort, "text", "5555")}
+                </div>
+                {connectMsg && <div style={{ fontSize: 11.5, color: connectMsg.ok ? "#10b981" : "var(--rose-500)", marginBottom: 8 }}>{connectMsg.text}</div>}
+                <button type="button" className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={runAndroidConnect} disabled={connectBusy}>
+                  {connectBusy ? "Connecting…" : "Connect"}
+                </button>
+              </div>
+            </details>
+          </div>
+
           {/* SAVED KEYS LIST — only services with no dedicated card above
               (e.g. infra credentials not surfaced as their own settings
               window in this UI). Everything else is now managed inline,
@@ -1009,58 +878,64 @@ export default function SettingsPage() {
               </div>
             ) : (
               <div className="tiq-table-wrap">
-                <table className="tiq-table">
-                  <thead><tr><th>Service</th><th>Key</th><th>Value</th><th>Saved</th><th></th></tr></thead>
-                  <tbody>
-                    {otherSavedKeys.map((k: any) => (
-                      <Fragment key={k.id}>
-                        <tr>
-                          <td><span className="tiq-badge tiq-badge-slate">{k.service}</span></td>
-                          <td style={{ fontFamily: "monospace", fontSize: 12 }}>{k.key_name}</td>
-                          <td style={{ fontFamily: "monospace", fontSize: 12, color: "var(--text-muted)" }}>{k.key_preview || "—"}</td>
-                          <td style={{ fontSize: 12, color: "var(--text-muted)" }}>{new Date(k.created_at).toLocaleDateString()}</td>
-                          <td style={{ display: "flex", gap: 4 }}>
-                            <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" title="Edit — enter a new value to replace this key"
-                              onClick={() => editingKeyId === k.id ? cancelEdit() : startEdit(k)}>
-                              <Pencil size={13} />
-                            </button>
-                            <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" style={{ color: "var(--rose-500)" }}
-                              onClick={() => deleteKeyMut.mutate(k.id)}>
-                              <Trash2 size={13} />
-                            </button>
-                          </td>
-                        </tr>
-                        {editingKeyId === k.id && (
-                          <tr>
-                            <td colSpan={5} style={{ background: "var(--bg-secondary)", padding: "10px 14px" }}>
-                              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                                <span style={{ fontSize: 12, color: "var(--text-secondary)", whiteSpace: "nowrap" }}>
-                                  New value for {k.service} / {k.key_name}:
-                                </span>
-                                <input
-                                  type={k.key_name.toLowerCase().includes("password") || k.key_name.toLowerCase().includes("key") ? "password" : "text"}
-                                  value={editValue}
-                                  onChange={e => setEditValue(e.target.value)}
-                                  onKeyDown={e => { if (e.key === "Enter") saveEdit(k); if (e.key === "Escape") cancelEdit(); }}
-                                  placeholder="Enter the new value — current value is never shown, for security"
-                                  autoFocus
-                                  style={{ flex: 1, padding: "6px 10px", fontSize: 12.5, borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg-tertiary)", color: "var(--text-primary)" }}
-                                />
-                                <button className="tiq-btn tiq-btn-primary tiq-btn-sm" onClick={() => saveEdit(k)} disabled={editSaving}>
-                                  {editSaving ? "Saving…" : "Save"}
-                                </button>
-                                <button className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={cancelEdit} disabled={editSaving}>
-                                  Cancel
-                                </button>
-                              </div>
-                              {editError && <div style={{ fontSize: 11.5, color: "var(--rose-500)", marginTop: 6 }}>{editError}</div>}
-                            </td>
-                          </tr>
-                        )}
-                      </Fragment>
-                    ))}
-                  </tbody>
-                </table>
+                <DataTable
+                  columns={["service", "key_name", "key_preview", "created_at"]}
+                  columnLabels={{ service: "Service", key_name: "Key", key_preview: "Value", created_at: "Saved" }}
+                  rows={otherSavedKeys}
+                  getRowKey={(k: any) => k.id}
+                  actionsLabel=""
+                  actionsWidth={70}
+                  renderActions={(k: any) => (
+                    <div style={{ display: "flex", gap: 4 }}>
+                      <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" title="Edit — enter a new value to replace this key"
+                        onClick={() => editingKeyId === k.id ? cancelEdit() : startEdit(k)}>
+                        <Pencil size={13} />
+                      </button>
+                      <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" style={{ color: "var(--rose-500)" }}
+                        onClick={() => deleteKeyMut.mutate(k.id)}>
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
+                  )}
+                  renderCell={(k: any, col: string) => {
+                    switch (col) {
+                      case "service": return <span className="tiq-badge tiq-badge-slate">{k.service}</span>;
+                      case "key_name": return <span style={{ fontFamily: "monospace", fontSize: 12 }}>{k.key_name}</span>;
+                      case "key_preview": return <span style={{ fontFamily: "monospace", fontSize: 12, color: "var(--text-muted)" }}>{k.key_preview || "—"}</span>;
+                      case "created_at": return <span style={{ fontSize: 12, color: "var(--text-muted)" }}>{new Date(k.created_at).toLocaleDateString()}</span>;
+                      default: return null;
+                    }
+                  }}
+                />
+                {editingKeyId && (() => {
+                  const k = otherSavedKeys.find((x: any) => x.id === editingKeyId);
+                  if (!k) return null;
+                  return (
+                    <div style={{ background: "var(--bg-secondary)", padding: "10px 14px", marginTop: 8, borderRadius: 8 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <span style={{ fontSize: 12, color: "var(--text-secondary)", whiteSpace: "nowrap" }}>
+                          New value for {k.service} / {k.key_name}:
+                        </span>
+                        <input
+                          type={k.key_name.toLowerCase().includes("password") || k.key_name.toLowerCase().includes("key") ? "password" : "text"}
+                          value={editValue}
+                          onChange={e => setEditValue(e.target.value)}
+                          onKeyDown={e => { if (e.key === "Enter") saveEdit(k); if (e.key === "Escape") cancelEdit(); }}
+                          placeholder="Enter the new value — current value is never shown, for security"
+                          autoFocus
+                          style={{ flex: 1, padding: "6px 10px", fontSize: 12.5, borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg-tertiary)", color: "var(--text-primary)" }}
+                        />
+                        <button className="tiq-btn tiq-btn-primary tiq-btn-sm" onClick={() => saveEdit(k)} disabled={editSaving}>
+                          {editSaving ? "Saving…" : "Save"}
+                        </button>
+                        <button className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={cancelEdit} disabled={editSaving}>
+                          Cancel
+                        </button>
+                      </div>
+                      {editError && <div style={{ fontSize: 11.5, color: "var(--rose-500)", marginTop: 6 }}>{editError}</div>}
+                    </div>
+                  );
+                })()}
               </div>
             )}
           </div>
@@ -1073,29 +948,31 @@ export default function SettingsPage() {
           <div className="tiq-card">
             <div className="tiq-card-title">All users ({users.length})</div>
             <div className="tiq-table-wrap">
-              <table className="tiq-table">
-                <thead>
-                  <tr><th>Name</th><th>Email (User ID)</th><th>Role</th><th>Company</th><th>Status</th><th>Last login</th><th></th></tr>
-                </thead>
-                <tbody>
-                  {users.map((u: any) => (
-                    <tr key={u.id}>
-                      <td style={{ fontWeight: 600 }}>{u.name}</td>
-                      <td style={{ fontSize: 13 }}>{u.email}</td>
-                      <td><span className={`tiq-badge ${u.role === "admin" ? "tiq-badge-violet" : "tiq-badge-slate"}`}>{u.role}</span></td>
-                      <td style={{ fontSize: 13, color: "var(--text-muted)" }}>{u.company || "—"}</td>
-                      <td><span className={`tiq-badge ${u.is_active ? "tiq-badge-teal" : "tiq-badge-rose"}`}>{u.is_active ? "Active" : "Inactive"}</span></td>
-                      <td style={{ fontSize: 12, color: "var(--text-muted)" }}>{u.last_login ? new Date(u.last_login).toLocaleDateString() : "Never"}</td>
-                      <td>
-                        {u.id !== user.id && u.is_active && (
-                          <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" style={{ color: "var(--rose-500)", fontSize: 11 }}
-                            onClick={() => deactivateMut.mutate(u.id)}>Deactivate</button>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+              <DataTable
+                columns={["name", "email", "role", "company", "is_active", "last_login"]}
+                columnLabels={{ name: "Name", email: "Email (User ID)", role: "Role", company: "Company", is_active: "Status", last_login: "Last login" }}
+                rows={users}
+                getRowKey={(u: any) => u.id}
+                actionsLabel=""
+                actionsWidth={100}
+                renderActions={(u: any) => (
+                  u.id !== user.id && u.is_active ? (
+                    <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" style={{ color: "var(--rose-500)", fontSize: 11 }}
+                      onClick={() => deactivateMut.mutate(u.id)}>Deactivate</button>
+                  ) : null
+                )}
+                renderCell={(u: any, col: string) => {
+                  switch (col) {
+                    case "name": return <span style={{ fontWeight: 600 }}>{u.name}</span>;
+                    case "email": return <span style={{ fontSize: 13 }}>{u.email}</span>;
+                    case "role": return <span className={`tiq-badge ${u.role === "admin" ? "tiq-badge-violet" : "tiq-badge-slate"}`}>{u.role}</span>;
+                    case "company": return <span style={{ fontSize: 13, color: "var(--text-muted)" }}>{u.company || "—"}</span>;
+                    case "is_active": return <span className={`tiq-badge ${u.is_active ? "tiq-badge-teal" : "tiq-badge-rose"}`}>{u.is_active ? "Active" : "Inactive"}</span>;
+                    case "last_login": return <span style={{ fontSize: 12, color: "var(--text-muted)" }}>{u.last_login ? new Date(u.last_login).toLocaleDateString() : "Never"}</span>;
+                    default: return null;
+                  }
+                }}
+              />
             </div>
           </div>
         </div>

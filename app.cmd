@@ -98,7 +98,7 @@ if exist "%BACKEND%\.env" (
     echo  DATABASE_URL is the ONLY thing that has to live in this file - it's
     echo  needed before the app can even reach the database, so it can't be
     echo  stored inside the database itself. Everything else - SECRET_KEY,
-    echo  Groq/Adzuna keys, S3/R2 credentials - is generated or configured
+    echo  Groq/Apify keys, S3/R2 credentials - is generated or configured
     echo  once and then lives in the database from then on - a fresh
     echo  extraction of this project into a new folder won't ask for those
     echo  again as long as DATABASE_URL below points at the same database.

@@ -13,7 +13,7 @@ function todayStr() {
   return d.toLocaleDateString("en-GB"); // dd/mm/yyyy, matches backend issue_date format
 }
 
-export default function JDCreatorPage() {
+export default function JDCreatorPage({ embedded = false }: { embedded?: boolean } = {}) {
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
   const qc = useQueryClient();
@@ -175,12 +175,14 @@ export default function JDCreatorPage() {
 
   return (
     <div>
-      <div className="tiq-page-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 8 }}>
-        <h1 className="tiq-page-title" style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <FileEdit size={22} color="var(--teal-500)" /> JD Creator
-        </h1>
-        <p className="tiq-page-sub">Generate a formal, professional job description in seconds — download as Word</p>
-      </div>
+      {!embedded && (
+        <div className="tiq-page-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 8 }}>
+          <h1 className="tiq-page-title" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <FileEdit size={22} color="var(--teal-500)" /> JD Creator
+          </h1>
+          <p className="tiq-page-sub">Generate a formal, professional job description in seconds — download as Word</p>
+        </div>
+      )}
 
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
         <div className="tiq-tabs">

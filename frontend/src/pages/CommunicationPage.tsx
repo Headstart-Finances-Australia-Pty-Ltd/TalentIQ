@@ -4,6 +4,7 @@ import {
   AlertTriangle, Inbox, ClipboardCheck, CalendarClock,
 } from "lucide-react";
 import { communicationApi, acquisitionApi } from "../lib/api";
+import DataTable from "../components/DataTable";
 
 const TEMPLATE_CATEGORIES = ["Interview Invite", "Offer", "Rejection", "Follow-up", "General"];
 const TRIGGER_EVENTS = [
@@ -388,29 +389,31 @@ function AutomationTab() {
       {rules.length === 0 ? (
         <div className="tiq-empty" style={{ marginBottom: 24 }}>No automation rules yet.</div>
       ) : (
-        <div className="tiq-table-wrap" style={{ marginBottom: 24 }}>
-          <table className="tiq-table">
-            <thead><tr><th>Rule</th><th>Trigger</th><th>Template</th><th>Active</th><th style={{ width: 60 }}></th></tr></thead>
-            <tbody>
-              {rules.map((r: any) => (
-                <tr key={r.id}>
-                  <td style={{ fontWeight: 600, fontSize: 13 }}>{r.name}</td>
-                  <td style={{ fontSize: 12 }}>
-                    {TRIGGER_EVENTS.find((t) => t.value === r.trigger_event)?.label || r.trigger_event}
-                    {r.trigger_stage_name && ` (${r.trigger_stage_name})`}
-                  </td>
-                  <td style={{ fontSize: 12 }}>{r.template_name}</td>
-                  <td>
-                    <label style={{ display: "inline-flex", alignItems: "center", cursor: "pointer" }}>
-                      <input type="checkbox" checked={r.is_active} onChange={() => toggleActive(r)} />
-                    </label>
-                  </td>
-                  <td><button className="tiq-btn tiq-btn-ghost tiq-btn-sm" onClick={() => remove(r.id)}><Trash2 size={12} /></button></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <DataTable
+          columns={["name", "trigger", "template_name", "is_active"]}
+          columnLabels={{ name: "Rule", trigger: "Trigger", template_name: "Template", is_active: "Active" }}
+          rows={rules.map((r: any) => ({
+            ...r,
+            trigger: `${TRIGGER_EVENTS.find((t) => t.value === r.trigger_event)?.label || r.trigger_event}${r.trigger_stage_name ? ` (${r.trigger_stage_name})` : ""}`,
+          }))}
+          getRowKey={(r: any) => r.id}
+          actionsLabel=""
+          actionsWidth={50}
+          renderActions={(r: any) => <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" onClick={() => remove(r.id)}><Trash2 size={12} /></button>}
+          renderCell={(r: any, col: string) => {
+            switch (col) {
+              case "name": return <span style={{ fontWeight: 600, fontSize: 13 }}>{r.name}</span>;
+              case "trigger": return <span style={{ fontSize: 12 }}>{r.trigger}</span>;
+              case "template_name": return <span style={{ fontSize: 12 }}>{r.template_name}</span>;
+              case "is_active": return (
+                <label style={{ display: "inline-flex", alignItems: "center", cursor: "pointer" }}>
+                  <input type="checkbox" checked={r.is_active} onChange={() => toggleActive(r)} />
+                </label>
+              );
+              default: return null;
+            }
+          }}
+        />
       )}
 
       <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 10 }}>Recent Automation Activity</div>

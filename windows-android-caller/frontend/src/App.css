@@ -1,0 +1,132 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Manrope:wght@400;500;600;700&display=swap');
+
+:root {
+  --bg: #0d1210;
+  --panel: #131a17;
+  --panel-raised: #171f1b;
+  --line: #24312b;
+  --text: #e9efe9;
+  --text-dim: #8fa199;
+  --signal: #48e0a4;
+  --signal-dim: #1f4536;
+  --amber: #e0b048;
+  --amber-dim: #4a3d1f;
+  --red: #e05a48;
+  --red-dim: #4a231f;
+  --mono: 'IBM Plex Mono', ui-monospace, monospace;
+  --sans: 'Manrope', system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body {
+  background: radial-gradient(1200px 500px at 15% -10%, #16211c 0%, transparent 60%), var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+}
+
+.shell {
+  max-width: 480px;
+  margin: 0 auto;
+  min-height: 100%;
+  padding: 28px 20px 60px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+header { display: flex; align-items: center; justify-content: space-between; }
+.brand { display: flex; align-items: center; gap: 10px; }
+.brand .mark {
+  width: 32px; height: 32px; border-radius: 8px;
+  background: linear-gradient(155deg, var(--signal), #2a8f68);
+  display: flex; align-items: center; justify-content: center; font-size: 15px;
+}
+.brand h1 { font-size: 15px; margin: 0; font-weight: 700; }
+.brand .sub { font-family: var(--mono); font-size: 10px; color: var(--text-dim); letter-spacing: .06em; margin-top: 1px; }
+
+.status-pill {
+  display: flex; align-items: center; gap: 6px;
+  font-family: var(--mono); font-size: 11px; color: var(--text-dim);
+  padding: 6px 10px; border: 1px solid var(--line); border-radius: 100px; background: var(--panel);
+}
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-dim); flex-shrink: 0; }
+.dot.up { background: var(--signal); box-shadow: 0 0 0 3px var(--signal-dim); }
+.dot.warn { background: var(--amber); box-shadow: 0 0 0 3px var(--amber-dim); }
+.dot.down { background: var(--red); box-shadow: 0 0 0 3px var(--red-dim); }
+
+nav.tabs {
+  display: flex; gap: 4px; padding: 4px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+}
+nav.tabs button {
+  flex: 1; padding: 9px 0; border: none; border-radius: 9px;
+  background: transparent; color: var(--text-dim);
+  font-family: var(--sans); font-weight: 600; font-size: 13px; cursor: pointer;
+}
+nav.tabs button.active { background: var(--panel-raised); color: var(--text); }
+
+.panel {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 16px;
+  padding: 22px; display: flex; flex-direction: column; gap: 18px;
+}
+
+.subhead { font-size: 13px; font-weight: 700; }
+.hint { font-size: 12px; color: var(--text-dim); line-height: 1.5; margin-top: -10px; }
+.hint code { font-family: var(--mono); background: var(--panel-raised); padding: 1px 5px; border-radius: 4px; }
+.field-row { display: flex; gap: 10px; }
+.field-row .field { flex: 1; }
+.field.narrow { max-width: 130px; }
+.divider { height: 1px; background: var(--line); margin: 2px 0; }
+
+.msg.info { border-color: var(--line); background: var(--panel-raised); color: var(--text-dim); }
+
+.device-list { display: flex; flex-direction: column; gap: 8px; }
+.device-row {
+  display: flex; align-items: center; justify-content: space-between;
+  font-family: var(--mono); font-size: 12px; color: var(--text-dim);
+  background: var(--panel-raised); border: 1px solid var(--line);
+  border-radius: 8px; padding: 8px 12px;
+}
+
+.field label {
+  display: block; font-size: 11px; font-weight: 600; color: var(--text-dim);
+  text-transform: uppercase; letter-spacing: .07em; margin-bottom: 8px;
+}
+.field input {
+  width: 100%; background: var(--panel-raised); border: 1px solid var(--line);
+  border-radius: 10px; padding: 13px 14px; color: var(--text);
+  font-family: var(--mono); font-size: 17px; outline: none;
+}
+.field input:focus { border-color: var(--signal); }
+.field input:disabled { opacity: .6; }
+
+.btn-row { display: flex; gap: 10px; }
+button.primary, button.danger {
+  flex: 1; padding: 14px; border-radius: 11px; font-family: var(--sans);
+  font-weight: 700; font-size: 14px; cursor: pointer; border: none;
+}
+button.primary { background: var(--signal); color: #06140d; }
+button.primary:disabled { background: #2a352f; color: #5c6a63; cursor: not-allowed; }
+button.danger { background: transparent; border: 1px solid var(--red); color: var(--red); }
+button.danger:disabled { border-color: var(--line); color: #5c6a63; cursor: not-allowed; }
+
+.msg.show {
+  font-size: 13px; padding: 12px 14px; border-radius: 10px;
+  border: 1px solid var(--red); background: var(--red-dim); color: #ffd9d2;
+}
+
+.callcard {
+  border: 1px solid var(--line); border-radius: 14px; padding: 18px;
+  background: var(--panel-raised); display: flex; flex-direction: column; gap: 10px;
+}
+.callcard .row { display: flex; align-items: center; justify-content: space-between; }
+.callcard .number { font-family: var(--mono); font-size: 18px; }
+.badge {
+  font-family: var(--mono); font-size: 10.5px; font-weight: 600; padding: 5px 10px;
+  border-radius: 100px; text-transform: uppercase; letter-spacing: .08em;
+}
+.badge.dialing { background: var(--amber-dim); color: var(--amber); }
+.badge.active { background: var(--signal-dim); color: var(--signal); }
+
+footer { text-align: center; font-family: var(--mono); font-size: 10.5px; color: #4d5e56; }

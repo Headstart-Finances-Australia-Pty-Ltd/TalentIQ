@@ -5,6 +5,7 @@ import type { ReactNode } from "react";
 import { Building2, UserCheck, Video, DollarSign, TrendingUp, CheckCircle2, ChevronDown, ChevronRight, X } from "lucide-react";
 import { governanceApi } from "../lib/api";
 import RecruitmentWorkflow from "../components/RecruitmentWorkflow";
+import DataTable from "../components/DataTable";
 
 // A colored pill used across every dashboard table for status-style counts.
 function Pill({ value, color }: { value: number | string; color: string }) {
@@ -66,20 +67,20 @@ function TileDetailModal({ title, color, rows, valueLabel, onClose }: {
         {rows.length === 0 ? (
           <div style={{ textAlign: "center", padding: 28, color: "#94a3b8", fontSize: 13 }}>Nothing here yet.</div>
         ) : (
-          <table className="tiq-table" style={{ fontSize: 13, width: "100%" }}>
-            <thead>
-              <tr><th>Client</th><th>Role</th><th style={{ textAlign: "center" }}>{valueLabel}</th></tr>
-            </thead>
-            <tbody>
-              {rows.map((r, i) => (
-                <tr key={i}>
-                  <td>{r.client}</td>
-                  <td style={{ fontWeight: 600 }}>{r.role}</td>
-                  <td style={{ textAlign: "center", fontWeight: 700, color }}>{r.value}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <DataTable
+            columns={["client", "role", "value"]}
+            columnLabels={{ client: "Client", role: "Role", value: valueLabel }}
+            rows={rows.map((r, i) => ({ ...r, _key: i }))}
+            getRowKey={(r: any) => r._key}
+            renderCell={(r: any, col: string) => {
+              switch (col) {
+                case "client": return r.client;
+                case "role": return <span style={{ fontWeight: 600 }}>{r.role}</span>;
+                case "value": return <span style={{ textAlign: "center", fontWeight: 700, color, display: "block" }}>{r.value}</span>;
+                default: return null;
+              }
+            }}
+          />
         )}
       </div>
     </div>
@@ -208,7 +209,12 @@ export default function DashboardPage() {
         {overviewLoading ? (
           <div style={{ textAlign: "center", padding: 28, color: "var(--text-muted)" }}>Loading…</div>
         ) : overviewError ? (
-          <div style={{ textAlign: "center", padding: 20, color: "var(--rose-500)", fontSize: 12 }}>Failed to load business overview.</div>
+          <div style={{ textAlign: "center", padding: 20, color: "var(--rose-500)", fontSize: 12 }}>
+            Failed to load business overview.
+            {(overviewError as any)?.response?.data?.detail && (
+              <div style={{ marginTop: 4, color: "var(--text-muted)" }}>{(overviewError as any).response.data.detail}</div>
+            )}
+          </div>
         ) : !overview ? (
           <div style={{ textAlign: "center", padding: 28 }}>
             <Building2 size={22} color="var(--text-muted)" style={{ opacity: .5, marginBottom: 6 }} />
@@ -310,28 +316,22 @@ export default function DashboardPage() {
                         {overview.by_client.map((c: any) => <option key={c.client_name} value={c.client_name}>{c.client_name}</option>)}
                       </select>
                     </div>
-                    <table className="tiq-table" style={{ fontSize: 12, width: "100%" }}>
-                      <thead>
-                        <tr>
-                          <th>Client</th>
-                          <th style={{ textAlign: "center" }}>Open</th>
-                          <th style={{ textAlign: "center" }}>Closed</th>
-                          <th style={{ textAlign: "center" }}>Pending</th>
-                          <th style={{ textAlign: "center" }}>Offers</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {(clientFilter ? overview.by_client.filter((c: any) => c.client_name === clientFilter) : overview.by_client).map((c: any) => (
-                          <tr key={c.client_name}>
-                            <td style={{ fontWeight: 600 }}>{c.client_name}</td>
-                            <td style={{ textAlign: "center" }}><Pill value={c.open} color="#10b981" /></td>
-                            <td style={{ textAlign: "center" }}><Pill value={c.closed} color="#64748b" /></td>
-                            <td style={{ textAlign: "center" }}><Pill value={c.pending} color="#f59e0b" /></td>
-                            <td style={{ textAlign: "center", fontWeight: 700 }}>{c.offer_count}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                    <DataTable
+                      columns={["client_name", "open", "closed", "pending", "offer_count"]}
+                      columnLabels={{ client_name: "Client", open: "Open", closed: "Closed", pending: "Pending", offer_count: "Offers" }}
+                      rows={clientFilter ? overview.by_client.filter((c: any) => c.client_name === clientFilter) : overview.by_client}
+                      getRowKey={(c: any) => c.client_name}
+                      renderCell={(c: any, col: string) => {
+                        switch (col) {
+                          case "client_name": return <span style={{ fontWeight: 600 }}>{c.client_name}</span>;
+                          case "open": return <div style={{ textAlign: "center" }}><Pill value={c.open} color="#10b981" /></div>;
+                          case "closed": return <div style={{ textAlign: "center" }}><Pill value={c.closed} color="#64748b" /></div>;
+                          case "pending": return <div style={{ textAlign: "center" }}><Pill value={c.pending} color="#f59e0b" /></div>;
+                          case "offer_count": return <div style={{ textAlign: "center", fontWeight: 700 }}>{c.offer_count}</div>;
+                          default: return null;
+                        }
+                      }}
+                    />
                   </TableCard>
 
                   {/* Offer acceptance status, org-wide */}
@@ -365,48 +365,38 @@ export default function DashboardPage() {
                   </select>
                 </div>
                 <div style={{ overflowX: "auto" }}>
-                  <table className="tiq-table" style={{ fontSize: 12, width: "100%" }}>
-                    <thead>
-                      <tr>
-                        <th>Role</th>
-                        <th>Client</th>
-                        <th>Status</th>
-                        <th>Vendor Sourcing (Submitted / Screened &amp; Matched)</th>
-                        <th style={{ textAlign: "center" }}>Interviews</th>
-                        <th style={{ textAlign: "center" }}>Offers</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {filteredRequisitions.length === 0 ? (
-                        <EmptyRow colSpan={6} icon={TrendingUp} text={clientFilter ? "No roles for this client." : "No roles yet."} />
-                      ) : filteredRequisitions.map((r: any) => (
-                        <tr key={r.requisition_id}>
-                          <td style={{ fontWeight: 600 }}>{r.title}</td>
-                          <td>{r.client_name}</td>
-                          <td>
-                            <span style={{
-                              fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 999,
-                              color: r.status_bucket === "Open" ? "#10b981" : r.status_bucket === "Closed" ? "#64748b" : "#f59e0b",
-                              background: r.status_bucket === "Open" ? "rgba(16,185,129,.12)" : r.status_bucket === "Closed" ? "rgba(100,116,139,.12)" : "rgba(245,158,11,.12)",
-                            }}>{r.status}</span>
-                          </td>
-                          <td>
-                            {r.vendor_breakdown.length === 0 ? <span style={{ color: "var(--text-muted)" }}>— none sourced —</span> : (
-                              <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-                                {r.vendor_breakdown.map((v: any) => (
-                                  <span key={v.vendor_id} className="tiq-badge tiq-badge-slate" style={{ fontSize: 10 }}>
-                                    {v.vendor_name}: {v.submitted} / {v.accepted}
-                                  </span>
-                                ))}
-                              </div>
-                            )}
-                          </td>
-                          <td style={{ textAlign: "center", fontWeight: 700 }}>{r.interview_count}</td>
-                          <td style={{ textAlign: "center", fontWeight: 700 }}>{r.offer_count}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                  <DataTable
+                    columns={["title", "client_name", "status", "vendor_breakdown", "interview_count", "offer_count"]}
+                    columnLabels={{ title: "Role", client_name: "Client", status: "Status", vendor_breakdown: "Vendor Sourcing (Submitted / Screened & Matched)", interview_count: "Interviews", offer_count: "Offers" }}
+                    rows={filteredRequisitions}
+                    getRowKey={(r: any) => r.requisition_id}
+                    emptyMessage={clientFilter ? "No roles for this client." : "No roles yet."}
+                    renderCell={(r: any, col: string) => {
+                      switch (col) {
+                        case "title": return <span style={{ fontWeight: 600 }}>{r.title}</span>;
+                        case "client_name": return r.client_name;
+                        case "status": return (
+                          <span style={{
+                            fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 999,
+                            color: r.status_bucket === "Open" ? "#10b981" : r.status_bucket === "Closed" ? "#64748b" : "#f59e0b",
+                            background: r.status_bucket === "Open" ? "rgba(16,185,129,.12)" : r.status_bucket === "Closed" ? "rgba(100,116,139,.12)" : "rgba(245,158,11,.12)",
+                          }}>{r.status}</span>
+                        );
+                        case "vendor_breakdown": return r.vendor_breakdown.length === 0 ? <span style={{ color: "var(--text-muted)" }}>— none sourced —</span> : (
+                          <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                            {r.vendor_breakdown.map((v: any) => (
+                              <span key={v.vendor_id} className="tiq-badge tiq-badge-slate" style={{ fontSize: 10 }}>
+                                {v.vendor_name}: {v.submitted} / {v.accepted}
+                              </span>
+                            ))}
+                          </div>
+                        );
+                        case "interview_count": return <div style={{ textAlign: "center", fontWeight: 700 }}>{r.interview_count}</div>;
+                        case "offer_count": return <div style={{ textAlign: "center", fontWeight: 700 }}>{r.offer_count}</div>;
+                        default: return null;
+                      }
+                    }}
+                  />
                 </div>
               </TileDrilldownModal>
             )}

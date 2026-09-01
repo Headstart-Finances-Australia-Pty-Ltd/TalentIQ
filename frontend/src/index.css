@@ -489,7 +489,9 @@ body {
   padding: 4px;
   border-radius: var(--radius-sm);
   margin-bottom: 24px;
-  width: fit-content;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+  width: 100%;
 }
 
 .tiq-tab {
@@ -505,9 +507,9 @@ body {
 }
 
 .tiq-tab.active {
-  background: var(--white);
-  color: var(--text-primary);
-  box-shadow: 0 1px 3px rgba(0,0,0,.08);
+  background: var(--teal-500);
+  color: var(--white);
+  box-shadow: 0 1px 3px rgba(0,0,0,.12);
 }
 
 /* ── PAGE HEADER ── */

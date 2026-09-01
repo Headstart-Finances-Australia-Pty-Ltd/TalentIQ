@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { Users, Save, Trash2, Plus, RefreshCw, Shield } from "lucide-react";
+import DataTable from "../components/DataTable";
 
 const adminApi = {
   listUsers: () => api.get("/api/admin/users").then(r => r.data),
@@ -12,6 +13,14 @@ const adminApi = {
 function Badge({ val }: { val: string }) {
   const colors: Record<string, string> = {
     admin: "tiq-badge-violet", user: "tiq-badge-teal", recruiter: "tiq-badge-amber"
+  };
+  return <span className={`tiq-badge ${colors[val] || "tiq-badge-slate"}`}>{val}</span>;
+}
+
+function PlanStatusBadge({ val }: { val: string }) {
+  const colors: Record<string, string> = {
+    active: "tiq-badge-teal", demo: "tiq-badge-amber", expired: "tiq-badge-rose",
+    cancelled: "tiq-badge-slate", none: "tiq-badge-slate",
   };
   return <span className={`tiq-badge ${colors[val] || "tiq-badge-slate"}`}>{val}</span>;
 }
@@ -114,50 +123,70 @@ export default function AdminSetupPage({ embedded = false }: { embedded?: boolea
         {isLoading ? (
           <div className="tiq-spinner-wrap"><div className="tiq-spinner" /></div>
         ) : (
-          <div className="tiq-table-wrap" style={{ border: "none" }}>
-            <table className="tiq-table">
-              <thead>
-                <tr>
-                  <th>ID</th><th>Name</th><th>Email</th><th>Company</th>
-                  <th>Phone</th><th>Role</th><th>Status</th><th>Created</th><th>Last Login</th><th>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {users.map((u: any) => (
-                  <tr key={u.id} style={{ background: editing?.id === u.id ? "rgba(139,92,246,.05)" : undefined }}>
-                    <td style={{ color: "var(--text-muted)", fontSize: 12 }}>{u.id}</td>
-                    <td style={{ fontWeight: 600 }}>{u.name}</td>
-                    <td style={{ fontSize: 13 }}>{u.email}</td>
-                    <td style={{ fontSize: 13, color: "var(--text-secondary)" }}>{u.company || "—"}</td>
-                    <td style={{ fontSize: 12, color: "var(--text-muted)" }}>{u.phone || "—"}</td>
-                    <td><Badge val={u.role} /></td>
-                    <td>
-                      <span className={`tiq-badge ${u.is_active ? "tiq-badge-teal" : "tiq-badge-rose"}`}>
-                        {u.is_active ? "Active" : "Inactive"}
-                      </span>
-                    </td>
-                    <td style={{ fontSize: 11, color: "var(--text-muted)" }}>
-                      {u.created_at ? new Date(u.created_at).toLocaleDateString() : "—"}
-                    </td>
-                    <td style={{ fontSize: 11, color: "var(--text-muted)" }}>
-                      {u.last_login ? new Date(u.last_login).toLocaleDateString() : "Never"}
-                    </td>
-                    <td>
-                      <div style={{ display: "flex", gap: 4 }}>
-                        <button className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={() => { setEditing({...u}); setNewPw(""); }}>
-                          Edit
-                        </button>
-                        <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" style={{ color: "var(--rose-500)" }}
-                          onClick={() => { if (confirm(`Delete ${u.name}?`)) deleteMut.mutate(u.id); }}>
-                          <Trash2 size={12} />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <DataTable
+            columns={["id", "name", "email", "company", "phone", "role", "is_active", "plan_name", "plan_status", "plan_start_date", "plan_end_date", "payment_date", "transaction_number", "created_at", "last_login"]}
+            columnLabels={{
+              id: "ID", name: "Name", email: "Email", company: "Company", phone: "Phone", role: "Role", is_active: "Status",
+              plan_name: "Plan", plan_status: "Plan Status", plan_start_date: "Plan Start", plan_end_date: "Plan End",
+              payment_date: "Payment Date", transaction_number: "Transaction #",
+              created_at: "Created", last_login: "Last Login",
+            }}
+            rows={users}
+            getRowKey={(u: any) => u.id}
+            rowStyle={(u: any) => editing?.id === u.id ? { background: "rgba(139,92,246,.05)" } : undefined}
+            actionsLabel="Actions"
+            actionsWidth={130}
+            renderActions={(u: any) => (
+              <div style={{ display: "flex", gap: 4 }}>
+                <button className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={() => { setEditing({...u}); setNewPw(""); }}>
+                  Edit
+                </button>
+                <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" style={{ color: "var(--rose-500)" }}
+                  onClick={() => { if (confirm(`Delete ${u.name}?`)) deleteMut.mutate(u.id); }}>
+                  <Trash2 size={12} />
+                </button>
+              </div>
+            )}
+            renderCell={(u: any, col: string) => {
+              switch (col) {
+                case "id": return <span style={{ color: "var(--text-muted)", fontSize: 12 }}>{u.id}</span>;
+                case "name": return <span style={{ fontWeight: 600 }}>{u.name}</span>;
+                case "email": return <span style={{ fontSize: 13 }}>{u.email}</span>;
+                case "company": return <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>{u.company || "—"}</span>;
+                case "phone": return <span style={{ fontSize: 12, color: "var(--text-muted)" }}>{u.phone || "—"}</span>;
+                case "role": return <Badge val={u.role} />;
+                case "is_active": return (
+                  <span className={`tiq-badge ${u.is_active ? "tiq-badge-teal" : "tiq-badge-rose"}`}>
+                    {u.is_active ? "Active" : "Inactive"}
+                  </span>
+                );
+                case "created_at": return <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{u.created_at ? new Date(u.created_at).toLocaleDateString() : "—"}</span>;
+                case "last_login": return <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{u.last_login ? new Date(u.last_login).toLocaleDateString() : "Never"}</span>;
+                // Plan/billing columns — see routers/admin.py's list_users
+                // for how these are derived from tiq_subscriptions.
+                case "plan_name": return <span style={{ fontSize: 12, fontWeight: 600 }}>{u.plan_name || "—"}</span>;
+                case "plan_status": return <PlanStatusBadge val={u.plan_status || "none"} />;
+                case "plan_start_date": return <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{u.plan_start_date ? new Date(u.plan_start_date).toLocaleDateString() : "—"}</span>;
+                case "plan_end_date": {
+                  if (!u.plan_end_date) return <span style={{ fontSize: 11, color: "var(--text-muted)" }}>—</span>;
+                  // 9999-12-31 is how "never expires" is represented on
+                  // the backend (see routers/auth.py's register() and
+                  // db/migrate_fix.py's admin backfill) — shown as a
+                  // literal date it reads oddly, so render it as "Never".
+                  const d = new Date(u.plan_end_date);
+                  const never = d.getUTCFullYear() >= 9999;
+                  return <span style={{ fontSize: 11, color: never ? "var(--teal-500)" : "var(--text-muted)", fontWeight: never ? 700 : 400 }}>
+                    {never ? "Never" : d.toLocaleDateString()}
+                  </span>;
+                }
+                case "payment_date": return <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                  {u.payment_date ? `${new Date(u.payment_date).toLocaleDateString()}${u.amount_paid_cents ? ` — $${(u.amount_paid_cents / 100).toFixed(2)}` : ""}` : "—"}
+                </span>;
+                case "transaction_number": return <span style={{ fontSize: 11, fontFamily: "monospace", color: "var(--text-muted)" }}>{u.transaction_number || "—"}</span>;
+                default: return u[col];
+              }
+            }}
+          />
         )}
       </div>
     </div>

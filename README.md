@@ -10,7 +10,7 @@ TalentIQ is a full-stack SaaS platform that combines three AI agents into one pr
 
 | Agent | What it does |
 |-------|-------------|
-| **JobHunt** | Scrapes live jobs (Adzuna), matches your resume with ATS scoring, generates cover letters, exports to Excel |
+| **JobHunt** | Scrapes live Seek jobs (Apify), matches your resume with ATS scoring, generates cover letters, exports to Excel |
 | **JobIntel** | Analyses job market data — skill demand, salary trends, experience levels, company-type breakdown |
 | **LinkLens** | Searches LinkedIn at scale using Playwright, extracts candidate profiles, guesses contact emails, exports to Excel |
 
@@ -25,7 +25,7 @@ Frontend   React 18 + TypeScript + Vite + Recharts
 Backend    FastAPI (async) + SQLAlchemy (async) + Alembic
 Database   PostgreSQL 16
 AI layer   LangChain + LangChain-Groq (llama3-70b-8192)
-Scraping   Adzuna REST API + Playwright (LinkedIn)
+Scraping   Apify (Seek scraper Actor) + Playwright (LinkedIn)
 Auth       JWT (python-jose) + bcrypt
 ```
 
@@ -140,11 +140,11 @@ Go to **Settings → API Keys** after logging in to save your keys:
 
 | Service | Keys needed | Where to get |
 |---------|------------|--------------|
-| **Adzuna** | `app_id`, `app_key` | [developer.adzuna.com](https://developer.adzuna.com) — free tier |
+| **Apify** | `api_token`, `actor_id` (optional) | [console.apify.com](https://console.apify.com) — free tier, runs a Seek scraper Actor |
 | **Groq** | `api_key` | [console.groq.com](https://console.groq.com) — free tier |
 | **LinkedIn** | `email`, `password` | Your own LinkedIn account |
 
-> Default Adzuna keys are pre-filled in `.env.example` for quick testing.
+> Default Apify credentials are pre-filled in `.env.example` for quick testing.
 
 ---
 
@@ -155,7 +155,7 @@ users               → all platform users, roles, auth
 user_api_keys       → per-user external API keys (encrypted)
 resumes             → uploaded resume files + parsed data
 job_searches        → every search session with criteria
-jobs                → individual job listings from Adzuna
+jobs                → individual job listings from Seek (via Apify)
 job_matches         → ATS scores, strengths, gaps, cover letters
 jobintel_runs       → market intelligence analysis sessions
 jobintel_records    → individual enriched job records per run
@@ -184,7 +184,7 @@ Interactive docs available at `http://localhost:8000/docs`
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | POST | `/api/jobhunt/resume` | Upload resume (PDF/DOCX/TXT) |
-| POST | `/api/jobhunt/search` | Search jobs via Adzuna |
+| POST | `/api/jobhunt/search` | Search Seek jobs via Apify |
 | POST | `/api/jobhunt/match` | Match resume to jobs (ATS scoring) |
 | GET | `/api/jobhunt/matches` | List all matches |
 | GET | `/api/jobhunt/export/{search_id}` | Download Excel export |
@@ -239,13 +239,13 @@ Each agent is built as a LangChain `ReActAgent` with domain-specific tools:
 
 ```
 JobHunt Agent
-  ├── Tool: ScrapeJobs     → Adzuna API
+  ├── Tool: ScrapeJobs     → Apify (Seek scraper Actor)
   ├── Tool: ParseResume    → text extraction + keyword analysis
   ├── Tool: MatchResume    → ATS scoring (keyword + optional LLM)
   └── Tool: GenerateCover  → template + optional Groq LLM
 
 JobIntel Agent
-  ├── Tool: ScrapeJobMarket → Adzuna API
+  ├── Tool: ScrapeJobMarket → Apify (Seek scraper Actor)
   ├── Tool: AnalyseSkills   → Counter-based analytics
   └── Tool: GenerateReport  → Groq LLM summary
 
@@ -282,13 +282,29 @@ llm = ChatOpenAI(api_key="...", model="gpt-4o")
 
 ---
 
+## Windows/Android Caller (`windows-android-caller/`)
+
+An optional, **separate local app** — not part of the FastAPI backend or
+the main frontend build — that lets Phone Screening's "Call Candidate"
+button dial out on your own Android phone's SIM instead of Twilio.
+
+It has to be separate because it drives your phone over **ADB**, which
+only works over the local Wi-Fi network your laptop and phone are both
+on. TalentIQ's backend runs elsewhere and has no path to your phone, so
+this piece runs on your own laptop instead and TalentIQ's browser tab
+(running on that same laptop) talks to it directly — see
+`windows-android-caller/README.md` for setup, and Settings → API Keys →
+"Phone Connection" in the app for pairing/enabling it.
+
+---
+
 ## Environment Variables
 
 ```env
 DATABASE_URL=postgresql+asyncpg://user:pass@host:5432/dbname
 SECRET_KEY=your-jwt-secret
-ADZUNA_APP_ID=638c0962
-ADZUNA_APP_KEY=your-key
+APIFY_API_TOKEN=apify_api_your-token
+APIFY_ACTOR_ID=automation-lab/seek-scraper
 GROQ_API_KEY=gsk_...
 EMAIL_USER=smtp-email@gmail.com
 EMAIL_PASSWORD=gmail-app-password

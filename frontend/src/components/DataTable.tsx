@@ -57,10 +57,13 @@ interface DataTableProps {
   actionsWidth?: number;                      // defaults to ACTIONS_COL_WIDTH; widen for busier action cells
   renderActions?: (row: any) => ReactNode;
   defaultColWidth?: number;
+  colWidths?: Record<string, number>;          // per-column default width overrides (keyed by column key)
   emptyMessage?: string;
   selectable?: boolean;                        // adds a checkbox column + "select all"
   selectedKeys?: Array<string | number>;       // controlled selection
   onSelectionChange?: (keys: Array<string | number>) => void;
+  columnLabels?: Record<string, string>;       // display header text when it differs from the column key
+  renderCell?: (row: any, col: string) => ReactNode; // custom cell rendering (badges, links, dates…); filtering/sorting still use the raw row[col] value
 }
 
 /**
@@ -72,8 +75,9 @@ interface DataTableProps {
  */
 export default function DataTable({
   columns, rows, getRowKey, rowStyle, actionsLabel, actionsWidth, renderActions,
-  defaultColWidth = DEFAULT_COL_WIDTH, emptyMessage = "No records",
+  defaultColWidth = DEFAULT_COL_WIDTH, colWidths, emptyMessage = "No records",
   selectable = false, selectedKeys, onSelectionChange,
+  columnLabels, renderCell,
 }: DataTableProps) {
   const [widths, setWidths] = useState<Record<string, number>>({});
   const [resizingCol, setResizingCol] = useState<string | null>(null);
@@ -289,7 +293,7 @@ export default function DataTable({
           <colgroup>
             {selectable && <col style={{ width: "38px" }} />}
             {columns.map(c => (
-              <col key={c} style={{ width: (widths[c] || defaultColWidth) + "px" }} />
+              <col key={c} style={{ width: (widths[c] || colWidths?.[c] || defaultColWidth) + "px" }} />
             ))}
             {actionsLabel && <col style={{ width: (actionsWidth || ACTIONS_COL_WIDTH) + "px" }} />}
           </colgroup>
@@ -316,7 +320,7 @@ export default function DataTable({
                         style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "pointer", flex: 1 }}
                         title="Click to sort"
                       >
-                        {c}
+                        {columnLabels?.[c] ?? c}
                       </span>
                       <span
                         onClick={() => toggleSort(c)}
@@ -363,6 +367,13 @@ export default function DataTable({
                   </td>
                 )}
                 {columns.map(c => {
+                  if (renderCell) {
+                    return (
+                      <td key={c} style={{ fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {renderCell(row, c)}
+                      </td>
+                    );
+                  }
                   const truncated = isCellTruncated(row[c]);
                   return (
                     <td

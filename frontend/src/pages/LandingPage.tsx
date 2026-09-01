@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "../hooks/useAuth";
+import { api } from "../lib/api";
 import {
   Zap, Shield, Download, ArrowRight, CheckCircle,
   Globe, Database, Star, TrendingUp, Mail, Twitter, Linkedin,
@@ -17,6 +19,36 @@ const STATS = [
 
 const ALL_MODULES = CAPABILITIES.flatMap((cap) => cap.modules.map((m) => ({ ...m, capability: cap.name })));
 const BUILT_MODULE_COUNT = ALL_MODULES.filter((m) => m.built).length;
+
+// Same on/off map Admin Console > Modules Management edits and the app
+// sidebar (AppLayout.tsx) already reads — this is the public,
+// unauthenticated read of it (see routers/public_config.py) so a
+// logged-out visitor's browser can filter the same way. A short
+// refetchInterval means a module an admin just turned off/on stops
+// showing up here (or starts appearing again) without the visitor
+// needing to hard-refresh — same "dynamic" behavior as the sidebar,
+// just polled instead of React Query's default refetch-on-focus, since
+// there's no guarantee a marketing-page visitor's tab ever loses focus.
+function useVisibleModules() {
+  const { data: moduleToggles = {} } = useQuery({
+    queryKey: ["public-module-toggles"],
+    queryFn: () => api.get("/api/public/config/module-toggles").then((r) => r.data as Record<string, boolean>),
+    refetchInterval: 60_000,
+  });
+  const isModuleEnabled = (route: string) => moduleToggles[route] ?? true;
+
+  const filterCaps = (caps: typeof CAPABILITIES) =>
+    caps
+      .map((cap) => ({ ...cap, modules: cap.modules.filter((m) => isModuleEnabled(m.route)) }))
+      .filter((cap) => cap.modules.length > 0);
+
+  return {
+    visibleCapabilities: filterCaps(CAPABILITIES),
+    visibleCorePipeline: filterCaps(CORE_PIPELINE_CAPABILITIES),
+    visibleSupporting: filterCaps(SUPPORTING_CAPABILITIES),
+    visibleJobseekerModules: JOBSEEKER_MODULES.filter((m) => isModuleEnabled(m.route)),
+  };
+}
 
 function slugify(name: string) {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
@@ -84,7 +116,7 @@ function CapabilityColumn({ cap }: { cap: (typeof CAPABILITIES)[0] }) {
   );
 }
 
-function RecruitmentMegaMenu() {
+function RecruitmentMegaMenu({ core, supporting }: { core: typeof CAPABILITIES; supporting: typeof CAPABILITIES }) {
   const [open, setOpen] = useState(false);
   return (
     <div style={{ position: "relative" }}
@@ -104,19 +136,29 @@ function RecruitmentMegaMenu() {
           background: "#ffffff", borderRadius: 12, border: "1px solid #f1f5f9",
           boxShadow: "0 16px 40px rgba(0,0,0,.14)", padding: 20, zIndex: 200, width: 640,
         }}>
-          <div style={{ fontSize: 9.5, fontWeight: 800, color: "#94a3b8", textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 10 }}>
-            Recruitment Capabilities
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 190px)", gap: "16px 20px", marginBottom: 18 }}>
-            {CORE_PIPELINE_CAPABILITIES.map(cap => <CapabilityColumn key={cap.name} cap={cap} />)}
-          </div>
-          <div style={{ height: 1, background: "#f1f5f9", margin: "0 0 16px" }} />
-          <div style={{ fontSize: 9.5, fontWeight: 800, color: "#94a3b8", textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 10 }}>
-            Supporting Capabilities
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 190px)", gap: "16px 20px" }}>
-            {SUPPORTING_CAPABILITIES.map(cap => <CapabilityColumn key={cap.name} cap={cap} />)}
-          </div>
+          {core.length > 0 && (
+            <>
+              <div style={{ fontSize: 9.5, fontWeight: 800, color: "#94a3b8", textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 10 }}>
+                Recruitment Capabilities
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 190px)", gap: "16px 20px", marginBottom: supporting.length > 0 ? 18 : 0 }}>
+                {core.map(cap => <CapabilityColumn key={cap.name} cap={cap} />)}
+              </div>
+            </>
+          )}
+          {core.length > 0 && supporting.length > 0 && (
+            <div style={{ height: 1, background: "#f1f5f9", margin: "0 0 16px" }} />
+          )}
+          {supporting.length > 0 && (
+            <>
+              <div style={{ fontSize: 9.5, fontWeight: 800, color: "#94a3b8", textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 10 }}>
+                Supporting Capabilities
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 190px)", gap: "16px 20px" }}>
+                {supporting.map(cap => <CapabilityColumn key={cap.name} cap={cap} />)}
+              </div>
+            </>
+          )}
         </div>
       )}
     </div>
@@ -201,6 +243,7 @@ function ModuleCard({ m, isEven, color, bg }: { m: ModuleDef; isEven: boolean; c
 export default function LandingPage() {
   const { user } = useAuth();
   const isLoggedIn = !!user;
+  const { visibleCapabilities, visibleCorePipeline, visibleSupporting, visibleJobseekerModules } = useVisibleModules();
   return (
     <div style={{ background: "#ffffff", color: "#0f172a", fontFamily: "'Inter',system-ui,sans-serif", overflowX: "hidden" }}>
 
@@ -228,8 +271,16 @@ export default function LandingPage() {
         </div>
 
         <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-          <RecruitmentMegaMenu />
-          <NavDropdown label="Job Seeker Tools" items={JOBSEEKER_MODULES} />
+          <RecruitmentMegaMenu core={visibleCorePipeline} supporting={visibleSupporting} />
+          {visibleJobseekerModules.length > 0 && <NavDropdown label="Job Seeker Tools" items={visibleJobseekerModules} />}
+          <Link to="/pricing" style={{
+            fontSize: 13.5, fontWeight: 600, color: "#374151", textDecoration: "none",
+            padding: "8px 14px", borderRadius: 8,
+          }}
+            onMouseEnter={e => (e.currentTarget.style.background = "#f8fafc")}
+            onMouseLeave={e => (e.currentTarget.style.background = "transparent")}>
+            Pricing
+          </Link>
           <div style={{ width: 1, height: 20, background: "#e2e8f0", margin: "0 6px" }} />
           {isLoggedIn ? (
             <Link to="/app"
@@ -361,7 +412,7 @@ export default function LandingPage() {
 
         {/* Jump-to-capability strip — makes moving between sections explicit */}
         <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "center", gap: 8 }}>
-          {CAPABILITIES.map((capability) => (
+          {visibleCapabilities.map((capability) => (
             <a key={capability.name} href={`#${slugify(capability.name)}`} style={{
               display: "inline-flex", alignItems: "center", gap: 6,
               padding: "7px 14px", borderRadius: 20, textDecoration: "none",
@@ -371,18 +422,20 @@ export default function LandingPage() {
               <span>{capability.emoji}</span>{capability.name}
             </a>
           ))}
-          <a href="#job-seeker-tools" style={{
-            display: "inline-flex", alignItems: "center", gap: 6,
-            padding: "7px 14px", borderRadius: 20, textDecoration: "none",
-            background: "rgba(14,165,233,.12)", border: "1px solid #0ea5e935",
-            fontSize: 12.5, fontWeight: 700, color: "#0ea5e9",
-          }}>
-            <span>🧑‍💻</span>Job Seeker Tools
-          </a>
+          {visibleJobseekerModules.length > 0 && (
+            <a href="#job-seeker-tools" style={{
+              display: "inline-flex", alignItems: "center", gap: 6,
+              padding: "7px 14px", borderRadius: 20, textDecoration: "none",
+              background: "rgba(14,165,233,.12)", border: "1px solid #0ea5e935",
+              fontSize: 12.5, fontWeight: 700, color: "#0ea5e9",
+            }}>
+              <span>🧑‍💻</span>Job Seeker Tools
+            </a>
+          )}
         </div>
       </section>
 
-      {CAPABILITIES.map((capability, idx) => (
+      {visibleCapabilities.map((capability, idx) => (
         <section key={capability.name} id={slugify(capability.name)} style={{
           padding: "72px 5%",
           background: idx % 2 === 0 ? "#ffffff" : "#f8fafc",
@@ -398,7 +451,7 @@ export default function LandingPage() {
               </div>
               <div>
                 <div style={{ fontSize: 11.5, fontWeight: 700, color: capability.color, textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 4 }}>
-                  Capability {idx + 1} of {CAPABILITIES.length}
+                  Capability {idx + 1} of {visibleCapabilities.length}
                 </div>
                 <h3 style={{ fontSize: "clamp(24px,3vw,34px)", fontWeight: 800, letterSpacing: "-.5px", color: "#0f172a" }}>{capability.name}</h3>
               </div>
@@ -413,34 +466,36 @@ export default function LandingPage() {
         </section>
       ))}
 
-      <section id="job-seeker-tools" style={{
-        padding: "72px 5%", background: CAPABILITIES.length % 2 === 0 ? "#ffffff" : "#f8fafc",
-        borderTop: "1px solid #f1f5f9",
-      }}>
-        <div style={{ maxWidth: 1200, margin: "0 auto" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 18, marginBottom: 8 }}>
-            <div style={{
-              width: 56, height: 56, borderRadius: 16, background: "rgba(14,165,233,.12)",
-              display: "flex", alignItems: "center", justifyContent: "center", fontSize: 28, flexShrink: 0,
-            }}>
-              🧑‍💻
-            </div>
-            <div>
-              <div style={{ fontSize: 11.5, fontWeight: 700, color: "#0ea5e9", textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 4 }}>
-                For Individuals
+      {visibleJobseekerModules.length > 0 && (
+        <section id="job-seeker-tools" style={{
+          padding: "72px 5%", background: visibleCapabilities.length % 2 === 0 ? "#ffffff" : "#f8fafc",
+          borderTop: "1px solid #f1f5f9",
+        }}>
+          <div style={{ maxWidth: 1200, margin: "0 auto" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 18, marginBottom: 8 }}>
+              <div style={{
+                width: 56, height: 56, borderRadius: 16, background: "rgba(14,165,233,.12)",
+                display: "flex", alignItems: "center", justifyContent: "center", fontSize: 28, flexShrink: 0,
+              }}>
+                🧑‍💻
               </div>
-              <h3 style={{ fontSize: "clamp(24px,3vw,34px)", fontWeight: 800, letterSpacing: "-.5px", color: "#0f172a" }}>Job Seeker Tools</h3>
+              <div>
+                <div style={{ fontSize: 11.5, fontWeight: 700, color: "#0ea5e9", textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 4 }}>
+                  For Individuals
+                </div>
+                <h3 style={{ fontSize: "clamp(24px,3vw,34px)", fontWeight: 800, letterSpacing: "-.5px", color: "#0f172a" }}>Job Seeker Tools</h3>
+              </div>
             </div>
+            <p style={{ fontSize: 15.5, color: "#64748b", marginBottom: 48, maxWidth: 640 }}>
+              Standalone tools for individuals managing their own job search — separate from the recruiter-facing
+              platform above, sharing the same AI engine underneath.
+            </p>
+            {visibleJobseekerModules.map((m, i) => (
+              <ModuleCard key={m.name} m={m} isEven={i % 2 === 0} color="#0ea5e9" bg="rgba(14,165,233,.12)" />
+            ))}
           </div>
-          <p style={{ fontSize: 15.5, color: "#64748b", marginBottom: 48, maxWidth: 640 }}>
-            Standalone tools for individuals managing their own job search — separate from the recruiter-facing
-            platform above, sharing the same AI engine underneath.
-          </p>
-          {JOBSEEKER_MODULES.map((m, i) => (
-            <ModuleCard key={m.name} m={m} isEven={i % 2 === 0} color="#0ea5e9" bg="rgba(14,165,233,.12)" />
-          ))}
-        </div>
-      </section>
+        </section>
+      )}
 
       {/* ── WHY ── */}
       <section style={{ background: "#f8fafc", borderTop: "1px solid #f1f5f9", borderBottom: "1px solid #f1f5f9", padding: "80px 5%" }}>
@@ -531,7 +586,7 @@ export default function LandingPage() {
             <div>
               <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "1px", color: "#475569", marginBottom: 16 }}>Modules</div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", columnGap: 20 }}>
-                {ALL_MODULES.map(m => (
+                {[...visibleCapabilities.flatMap((cap) => cap.modules), ...visibleJobseekerModules].map(m => (
                   <Link key={m.name} to={m.route} style={{ display: "block", fontSize: 13, color: "#64748b", textDecoration: "none", marginBottom: 10 }}
                     onMouseEnter={e => (e.currentTarget.style.color = "white")}
                     onMouseLeave={e => (e.currentTarget.style.color = "#64748b")}>

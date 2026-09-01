@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { authApi, systemApi } from "../../lib/api";
 import { Database, Cloud, CheckCircle2, XCircle, Loader2, Trash2, Eye, EyeOff, ArrowRightLeft } from "lucide-react";
+import { ApifyPanel, GroqKeyPoolPanel, CalendlyPanel, NavTalkPanel, OllamaPanel, MorphcastPanel, StripePanel, LinkedInJobsPanel, SeekJobsPanel } from "./PlatformIntegrationsPanels";
 
 // Shared "result banner" for a Test Connection check — success/failure
 // with the provider's own message, not persisted, cleared whenever the
@@ -407,7 +408,7 @@ function S3Panel() {
   const saveMut = useMutation({
     mutationFn: async () => {
       // One row per field, same generic upsert-by-(service,key_name)
-      // endpoint the Groq/Ollama/Adzuna panels already use — no bespoke
+      // endpoint the Groq/Ollama/Apify panels already use — no bespoke
       // "save all S3 fields" endpoint needed.
       for (const f of S3_FIELDS) {
         const value = (form[f.name] || "").trim();
@@ -497,6 +498,23 @@ export default function ApiKeysTab() {
     <div>
       <DatabasePanel />
       <S3Panel />
+      <StripePanel />
+
+      <div style={{ margin: "28px 0 16px", fontSize: 13, fontWeight: 700, color: "var(--text-secondary)" }}>
+        Job Ad Posting
+      </div>
+      <LinkedInJobsPanel />
+      <SeekJobsPanel />
+
+      <div style={{ margin: "28px 0 16px", fontSize: 13, fontWeight: 700, color: "var(--text-secondary)" }}>
+        Platform Integrations
+      </div>
+      <ApifyPanel />
+      <GroqKeyPoolPanel />
+      <CalendlyPanel />
+      <NavTalkPanel />
+      <OllamaPanel />
+      <MorphcastPanel />
     </div>
   );
 }

@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Users, Search, Download, RefreshCw, Linkedin, MapPin, Briefcase, CheckCircle, XCircle, Clock, Terminal , Home, Trash2 } from "lucide-react";
 import { linklensApi, downloadBlob } from "../lib/api";
 import { api } from "../lib/api";
+import DataTable from "../components/DataTable";
 import { useSearchHistory } from "../hooks/useSearchHistory";
 import { useLatestMutation } from "../hooks/useLatestMutation";
 import HistoryDropdown from "../components/HistoryDropdown";
@@ -318,53 +319,48 @@ export default function LinkLensPage() {
                 </div>
               ) : (
                 <div style={{ overflowX: "auto" }}>
-                  <table className="tiq-table">
-                    <thead>
-                      <tr>
-                        <th style={{ width: 40 }}>✓</th>
-                        <th>Name</th>
-                        <th>Title</th>
-                        <th>Company</th>
-                        <th>Location</th>
-                        <th>Skills</th>
-                        <th>Contact</th>
-                        <th>Profile</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {profiles.map((p: any) => (
-                        <tr key={p.id}>
-                          <td><AcceptedBadge val={p.accepted} /></td>
-                          <td style={{ fontWeight: 600, whiteSpace: "nowrap" }}>{p.name}</td>
-                          <td style={{ fontSize: 12, maxWidth: 200 }}>{p.title}</td>
-                          <td style={{ fontSize: 12 }}>{p.company}</td>
-                          <td style={{ fontSize: 12 }}>
-                            {p.location && p.location !== "Not found" && (
-                              <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                                <MapPin size={11} color="var(--text-muted)" />{p.location}
-                              </span>
-                            )}
-                          </td>
-                          <td style={{ fontSize: 11, maxWidth: 160, color: "var(--text-secondary)" }}>
-                            {Array.isArray(p.skills) ? p.skills.slice(0, 3).join(", ") : (p.skills || "")}
-                          </td>
-                          <td style={{ fontSize: 11 }}>
+                  <DataTable
+                    columns={["accepted", "name", "title", "company", "location", "skills", "contact", "profile"]}
+                    columnLabels={{ accepted: "✓", name: "Name", title: "Title", company: "Company", location: "Location", skills: "Skills", contact: "Contact", profile: "Profile" }}
+                    rows={profiles.map((p: any) => ({
+                      ...p,
+                      location: p.location && p.location !== "Not found" ? p.location : "",
+                      skills: Array.isArray(p.skills) ? p.skills.join(", ") : (p.skills || ""),
+                    }))}
+                    getRowKey={(p: any) => p.id}
+                    renderCell={(p: any, col: string) => {
+                      switch (col) {
+                        case "accepted": return <AcceptedBadge val={p.accepted} />;
+                        case "name": return <span style={{ fontWeight: 600, whiteSpace: "nowrap" }}>{p.name}</span>;
+                        case "title": return <span style={{ fontSize: 12, maxWidth: 200 }}>{p.title}</span>;
+                        case "company": return <span style={{ fontSize: 12 }}>{p.company}</span>;
+                        case "location": return p.location ? (
+                          <span style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }}>
+                            <MapPin size={11} color="var(--text-muted)" />{p.location}
+                          </span>
+                        ) : null;
+                        case "skills": return (
+                          <span style={{ fontSize: 11, maxWidth: 160, color: "var(--text-secondary)" }}>
+                            {Array.isArray(p.skills) ? p.skills.slice(0, 3).join(", ") : p.skills}
+                          </span>
+                        );
+                        case "contact": return (
+                          <div style={{ fontSize: 11 }}>
                             {p.email && <div>{p.email}</div>}
                             {p.phone && <div style={{ color: "var(--text-muted)" }}>{p.phone}</div>}
-                          </td>
-                          <td>
-                            {p.profile_url && (
-                              <a href={p.profile_url} target="_blank" rel="noopener noreferrer"
-                                className="tiq-btn tiq-btn-ghost tiq-btn-sm"
-                                style={{ color: "#0A66C2", fontSize: 11 }}>
-                                <Linkedin size={11} /> View
-                              </a>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                          </div>
+                        );
+                        case "profile": return p.profile_url ? (
+                          <a href={p.profile_url} target="_blank" rel="noopener noreferrer"
+                            className="tiq-btn tiq-btn-ghost tiq-btn-sm"
+                            style={{ color: "#0A66C2", fontSize: 11 }}>
+                            <Linkedin size={11} /> View
+                          </a>
+                        ) : null;
+                        default: return null;
+                      }
+                    }}
+                  />
                 </div>
               )}
             </div>
