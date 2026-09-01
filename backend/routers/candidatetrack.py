@@ -46,9 +46,26 @@ class BulkIds(BaseModel):
 def _parse_csv(content: bytes) -> List[dict]:
     """Parses CSV bytes into a list of {header: value} dicts, tolerant of a
     UTF-8 BOM (common from Excel exports) and stripping whitespace from
-    both headers and values."""
+    both headers and values.
+
+    Delimiter is auto-detected (comma / semicolon / tab) rather than
+    hardcoded to comma: Excel saved under many European/regional locales
+    exports semicolon-delimited ".csv" files (comma is the decimal
+    separator there, so Excel avoids using it as the field separator
+    too). A hardcoded comma reader on one of those files doesn't error —
+    it just reads the entire header row as a single column, so every
+    expected column (starting with the required one, e.g. "name") comes
+    back missing and every row gets silently skipped. That "looks like"
+    the whole import failed even though it ran successfully against the
+    wrong delimiter. Falls back to comma if sniffing can't tell (e.g. a
+    single-column file, or a header line with no delimiter at all)."""
     text = content.decode("utf-8-sig", errors="replace")
-    reader = csv.DictReader(io.StringIO(text))
+    sample = text[:4096]
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
+    except csv.Error:
+        dialect = csv.excel  # comma-delimited default
+    reader = csv.DictReader(io.StringIO(text), dialect=dialect)
     rows = []
     for row in reader:
         clean = {(k or "").strip().lower(): (v or "").strip() for k, v in row.items() if k}
@@ -79,6 +96,8 @@ class ClientCreate(BaseModel):
     name: str
     address: str = ""
     abn: str = ""
+    phone: str = ""
+    email: str = ""
     area_of_work: str = ""
 
 
@@ -86,6 +105,8 @@ class ClientUpdate(BaseModel):
     name: Optional[str] = None
     address: Optional[str] = None
     abn: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
     area_of_work: Optional[str] = None
 
 
@@ -104,6 +125,8 @@ def _fmt_client(c: Client, jd_count: int = 0) -> dict:
         "name": c.name,
         "address": c.address or "",
         "abn": c.abn or "",
+        "phone": c.phone or "",
+        "email": c.email or "",
         "area_of_work": c.area_of_work or "",
         "jd_count": jd_count,
         "created_at": c.created_at.isoformat() if c.created_at else None,
@@ -123,6 +146,8 @@ async def create_client(
         name=payload.name.strip(),
         address=payload.address.strip(),
         abn=payload.abn.strip(),
+        phone=payload.phone.strip(),
+        email=payload.email.strip(),
         area_of_work=payload.area_of_work.strip(),
     )
     db.add(c)
@@ -162,6 +187,10 @@ async def update_client(
         c.address = payload.address.strip()
     if payload.abn is not None:
         c.abn = payload.abn.strip()
+    if payload.phone is not None:
+        c.phone = payload.phone.strip()
+    if payload.email is not None:
+        c.email = payload.email.strip()
     if payload.area_of_work is not None:
         c.area_of_work = payload.area_of_work.strip()
     c.updated_at = datetime.utcnow()
@@ -259,19 +288,29 @@ async def import_clients_csv(
     client's own name as a fallback contact name rather than silently
     dropping the email/phone with no explanation)."""
     rows = _parse_csv(await file.read())
+    if not rows:
+        raise HTTPException(400, "No data rows found in this CSV — check it has a header row plus at least one data row.")
     org = await acquisition_service.get_or_create_default_organisation(db, current_user)
     created, skipped, errors = 0, 0, []
     for i, row in enumerate(rows, start=2):  # row 1 is the header
         name = row.get("name", "").strip()
         if not name:
             skipped += 1
-            errors.append(f"Row {i}: missing 'name', skipped")
+            # Names the columns actually seen for this row, not just "missing 'name'"
+            # — the fastest way to tell a genuine blank name apart from a
+            # delimiter/header mismatch (wrong separator, renamed column,
+            # extra leading/trailing spaces) where 'name' was never
+            # recognized as a column at all.
+            seen_cols = ", ".join(k for k in row.keys() if k) or "(no columns recognized — check the file's delimiter matches the template)"
+            errors.append(f"Row {i}: missing 'name', skipped. Columns found: {seen_cols}")
             continue
         client = Client(
             user_id=current_user.id,
             name=name,
             address=row.get("address", ""),
             abn=row.get("abn", ""),
+            phone=row.get("phone", ""),
+            email=row.get("email", ""),
             area_of_work=row.get("area_of_work", ""),
         )
         db.add(client)

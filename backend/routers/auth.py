@@ -12,6 +12,7 @@ from sqlalchemy import select, func
 
 from db.database import get_db
 from models.models import User, UserAPIKey, AuditLog, GroqKeyPool
+from models.billing_models import Subscription, PricingPlan
 from schemas.schemas import (
     UserRegister, UserLogin, UserOut, TokenOut,
     PasswordResetRequest, PasswordReset, UserUpdate,
@@ -58,6 +59,54 @@ async def register(payload: UserRegister, request: Request, db: AsyncSession = D
         resource="user",
         ip_address=request.client.host if request.client else None,
     ))
+
+    # Plan assignment at signup:
+    #   - The platform's first-ever user (auto-promoted to admin, above)
+    #     gets a permanent, comped Enterprise subscription with no real
+    #     end date — 9999-12-31 stands in for "never expires" so the
+    #     User Management table's Plan End column always has a real,
+    #     sortable date rather than a null/"—" that special-cases the
+    #     admin row everywhere it's displayed.
+    #   - Everyone else gets whatever plan they picked on the Create
+    #     Account page. A free-demo plan activates immediately, same as
+    #     clicking "Start Free Demo" on the Pricing page later would. A
+    #     PAID plan can't be charged here — this form never collects a
+    #     card — so it's simply left unset (status stays "none"); the
+    #     frontend sends the new user on to Pricing to complete Stripe
+    #     checkout for the plan they chose.
+    if is_first:
+        enterprise = (await db.execute(
+            select(PricingPlan).where(PricingPlan.slug == "enterprise")
+        )).scalar_one_or_none()
+        if enterprise:
+            db.add(Subscription(
+                user_id=user.id,
+                plan_slug="enterprise",
+                billing_period="",
+                status="active",
+                start_date=datetime.utcnow(),
+                end_date=datetime(9999, 12, 31),
+                amount_paid_cents=0,
+                notes=f"{datetime.utcnow().date()}: Auto-granted Enterprise plan (platform admin) — no charge.",
+            ))
+    elif payload.plan_slug:
+        plan = (await db.execute(
+            select(PricingPlan).where(PricingPlan.slug == payload.plan_slug, PricingPlan.is_active.is_(True))
+        )).scalar_one_or_none()
+        if plan and plan.is_free_demo:
+            now = datetime.utcnow()
+            db.add(Subscription(
+                user_id=user.id,
+                plan_slug=plan.slug,
+                billing_period="",
+                status="demo",
+                start_date=now,
+                end_date=now + timedelta(days=plan.demo_days or 14),
+                amount_paid_cents=0,
+                notes=f"{now.date()}: Started {plan.demo_days}-day free demo ({plan.name}) at signup.",
+            ))
+        # A chosen paid plan is intentionally not persisted as a
+        # Subscription row here — see comment above.
 
     return TokenOut(access_token=token, user=UserOut.model_validate(user))
 
@@ -165,7 +214,7 @@ async def save_api_key(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # Adzuna/Groq/Ollama are admin-managed only now — every other user
+    # Apify/Groq/Ollama are admin-managed only now — every other user
     # inherits whatever the admin configures as the global fallback, so
     # there's no legitimate reason for a non-admin to save their own here.
     # (is_global handling below is effectively moot for non-admins once
@@ -227,6 +276,20 @@ def _mask_key_preview(value: str) -> str:
     return "••••" + tail
 
 
+# (service, key_name) pairs whose stored "key" values aren't secrets at
+# all — e.g. the Windows/Android Caller's Local API base URL and its
+# on/off flag, which the frontend needs back in FULL (not just a masked
+# tail) to actually fetch() the Local API from a different page/session.
+# "agent_token" for that same service is a REAL credential (it lets
+# whoever holds it command someone's phone) and stays masked — only
+# specific field names are ever listed here, never a whole service.
+UNMASKED_PREVIEW_FIELDS = {("android_caller", "api_base"), ("android_caller", "enabled"), ("android_caller", "mode")}
+
+
+def _preview_for(service: str, key_name: str, value: str) -> str:
+    return value if (service, key_name) in UNMASKED_PREVIEW_FIELDS else _mask_key_preview(value)
+
+
 @router.get("/api-keys", response_model=List[APIKeyOut])
 async def list_api_keys(
     db: AsyncSession = Depends(get_db),
@@ -239,7 +302,7 @@ async def list_api_keys(
     out = []
     for k in keys:
         item = APIKeyOut.model_validate(k)
-        item.key_preview = _mask_key_preview(k.key_value)
+        item.key_preview = _preview_for(k.service, k.key_name, k.key_value)
         out.append(item)
     return out
 
@@ -250,7 +313,7 @@ async def list_global_keys(
     current_user: User = Depends(get_current_user),
 ):
     """Visible to every user (not just admins) so people can see which
-    shared services (Groq/Ollama/Adzuna) are already configured platform-
+    shared services (Groq/Ollama/Apify) are already configured platform-
     wide — never returns the actual secret value, same as /api-keys."""
     result = await db.execute(
         select(UserAPIKey).where(UserAPIKey.is_global.is_(True))

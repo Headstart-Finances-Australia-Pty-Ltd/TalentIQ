@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from sqlalchemy import select, func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import PipelineStage, PipelineEntry, Offer, Placement, DEFAULT_STAGE_TEMPLATE
@@ -12,16 +13,38 @@ async def ensure_default_stages(db: AsyncSession, organisation_id: int) -> None:
     """Seeds the organisation-wide default stage template (Submitted ->
     ... -> Placed/Rejected) the first time it's needed — lazy, same
     pattern as get_or_create_default_organisation, so nothing has to run
-    at registration time. Safe to call repeatedly; no-ops once seeded."""
+    at registration time. Safe to call repeatedly; no-ops once seeded.
+
+    The count-then-insert check below has a real race window: two
+    near-simultaneous calls (React StrictMode double-invoking an effect
+    in dev, two tabs both loading a fresh org's first requisition, etc.)
+    can both see zero existing rows before either has committed, and
+    both go on to insert a full duplicate set of 5 defaults — this is
+    exactly what caused every requisition falling back to defaults to
+    show the same stages multiplied several times over (see the
+    migration in db/migrate_fix.py that cleans up any duplicates this
+    already produced). A partial unique index on
+    (organisation_id, name) WHERE requisition_id IS NULL — also added in
+    that migration — makes the LOSING side of that race fail on its
+    INSERT instead of silently succeeding with a duplicate; catching
+    that here and treating it as "someone else already seeded this"
+    closes the race instead of just cleaning up after it once.
+    """
     existing = (await db.execute(
         select(func.count()).select_from(PipelineStage)
         .where(PipelineStage.organisation_id == organisation_id, PipelineStage.requisition_id.is_(None))
     )).scalar()
     if existing:
         return
-    for tpl in DEFAULT_STAGE_TEMPLATE:
-        db.add(PipelineStage(organisation_id=organisation_id, requisition_id=None, **tpl))
-    await db.flush()
+    try:
+        for tpl in DEFAULT_STAGE_TEMPLATE:
+            db.add(PipelineStage(organisation_id=organisation_id, requisition_id=None, **tpl))
+        await db.flush()
+    except IntegrityError:
+        # Lost the race — another concurrent call already inserted these
+        # (caught by the partial unique index). Roll back OUR half-applied
+        # insert attempt and treat it the same as "already seeded".
+        await db.rollback()
 
 
 async def get_effective_stages(db: AsyncSession, organisation_id: int, requisition_id: int) -> list:

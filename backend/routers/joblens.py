@@ -13,6 +13,7 @@ import io
 import re
 import os
 import json
+import logging
 import asyncio
 import secrets
 import smtplib
@@ -26,7 +27,7 @@ from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks, Request
 from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, or_
 from pydantic import BaseModel
 
 from db.database import get_db, AsyncSessionLocal
@@ -40,6 +41,7 @@ from utils.storage import (
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 @router.get("/jd-options")
@@ -97,9 +99,9 @@ async def list_requisition_options(
             "id": req.id,
             "title": req.title,
             "client_name": client_name,
-            "has_jd_file": bool(req.jd_file_blob),
+            "has_jd_file": bool(req.jd_file_blob or req.jd_file_key),
             "has_jd_record": bool(req.jd_record_id),
-            "has_jd": bool(req.jd_file_blob or req.jd_record_id),
+            "has_jd": bool(req.jd_file_blob or req.jd_file_key or req.jd_record_id),
         })
     return out
 
@@ -681,7 +683,7 @@ def calculate_score(cv_text: str, jd_skills: list) -> dict:
 async def generate_questions(
     jd_text: str, candidate_name: str, matched_skills: list, groq_key: str, groq_model: str = DEFAULT_GROQ_MODEL,
     resume_context: str = "",
-) -> list:
+) -> tuple[list, Optional[str]]:
     """Mirrors buildQuestionPrompt + callOllamaGenerate.
 
     resume_context is the candidate's OWN resume content (built from
@@ -691,7 +693,17 @@ async def generate_questions(
     payments-processing API you led at Pinnacle Systems" possible,
     instead of only ever "Tell me about a project where you used
     Python" — the latter is answerable by anyone who's ever listed
-    Python, the former only by someone whose actual resume says that."""
+    Python, the former only by someone whose actual resume says that.
+
+    Returns (questions, error). error is None on a genuine LLM-generated
+    set; otherwise it's a short reason the caller can surface — this used
+    to silently swallow every failure and hand back _default_questions()
+    with no indication anything had gone wrong, which is indistinguishable
+    from a WORKING "regenerate" that just happens to produce the same
+    generic questions every time (it's the same deterministic template
+    based only on name+skills) — exactly what made clicking "Regenerate"
+    look broken instead of surfacing the actual, fixable cause (e.g. no
+    Groq key, an invalid one, or a rate limit)."""
     try:
         from langchain_groq import ChatGroq
         from langchain.schema import HumanMessage
@@ -725,9 +737,13 @@ Return ONLY valid JSON:
         data = _parse_json_response(resp.content)
         if data is None:
             raise ValueError(f"LLM returned unparseable/empty response (length {len(resp.content)})")
-        return data.get("questions", [])[:5]
-    except Exception:
-        return _default_questions(candidate_name, matched_skills)
+        questions = data.get("questions", [])[:5]
+        if not questions:
+            raise ValueError("LLM response had no questions in it")
+        return questions, None
+    except Exception as e:
+        logger.warning(f"generate_questions: LLM generation failed, falling back to default questions — {e}")
+        return _default_questions(candidate_name, matched_skills), f"AI question generation failed ({str(e)[:150]}) — showing default questions instead."
 
 
 def _default_questions(name: str, skills: list) -> list:
@@ -863,7 +879,12 @@ class SendInviteRequest(BaseModel):
 
 # ── FORMAT CANDIDATE ─────────────────────────────────────────────────────────
 
-def _fmt(c: JobLensCandidate) -> dict:
+def _fmt(c: JobLensCandidate, phone_schedule: Optional[dict] = None) -> dict:
+    # phone_schedule: this candidate's entry from _phone_schedule_map()
+    # below (Interview Scheduling row for the Phone Interview round) —
+    # None/missing when no such row exists yet (candidate never
+    # contacted, texted, or Calendly-linked).
+    ps = phone_schedule or {}
     return {
         "id": c.id,
         "name": c.name,
@@ -893,7 +914,16 @@ def _fmt(c: JobLensCandidate) -> dict:
         "emotion_surprise": c.emotion_surprise,
         "dominant_emotion": c.dominant_emotion,
         "has_resume_file": bool(c.resume_file_blob),
-        "has_video": bool(c.video_blob),
+        # BUG FIX: this used to be bool(c.video_blob) only — but
+        # upload_interview_video() clears video_blob to None whenever S3
+        # storage succeeds (the preferred path; see upload_video_and_get_key),
+        # storing video_key instead. Any candidate whose video actually went
+        # to S3 therefore had has_video come back False here — which hides
+        # the "View recorded video" link AND every analysis-status/results
+        # block below (all gated on has_video), even though the video and
+        # its analysis are both there. Whichever storage path was used,
+        # having either field set means a video exists.
+        "has_video": bool(c.video_blob) or bool(c.video_key),
         "video_transcript": c.video_transcript or "",
         "video_analysis": c.video_analysis or None,
         "video_analysis_status": c.video_analysis_status or "Pending",
@@ -917,6 +947,46 @@ def _fmt(c: JobLensCandidate) -> dict:
         "video_screening_recommendation": c.video_screening_recommendation or "",
         "video_screening_notes": c.video_screening_notes or "",
         "video_screening_at": c.video_screening_at.isoformat() if c.video_screening_at else None,
+        # ── Phone Interview: telephony (click-to-call + SMS scheduling) ──
+        # Pulled from this candidate's Interview Scheduling row (Phone
+        # Interview round) — see _phone_schedule_map below. Absent
+        # (None/"") until that row exists.
+        "phone_interview_scheduled_at": ps.get("scheduled_at"),
+        "phone_interview_status": ps.get("status", ""),
+        "phone_call_status": ps.get("phone_call_status", ""),
+        "phone_called_at": ps.get("phone_called_at"),
+        "call_sms_sent_at": ps.get("call_sms_sent_at"),
+        "phone_transcript": ps.get("phone_transcript", ""),
+        "phone_transcript_status": ps.get("phone_transcript_status", ""),
+    }
+
+
+async def _phone_schedule_map(db: AsyncSession, candidate_ids: list) -> dict:
+    """Bulk-fetches each candidate's Interview Scheduling row for the
+    Phone Interview round in ONE query, keyed by joblens_candidate_id —
+    used to enrich _fmt() output for a page of candidates without an
+    N+1 query per row. Returns {} entries are simply omitted (caller
+    treats a missing key the same as "no row yet")."""
+    if not candidate_ids:
+        return {}
+    from capabilities.interview.models import Interview
+    rows = (await db.execute(
+        select(Interview).where(
+            Interview.joblens_candidate_id.in_(candidate_ids),
+            Interview.interview_type == "Phone Interview",
+        )
+    )).scalars().all()
+    return {
+        i.joblens_candidate_id: {
+            "scheduled_at": i.scheduled_at.isoformat() if i.scheduled_at else None,
+            "status": i.status,
+            "phone_call_status": i.phone_call_status or "",
+            "phone_called_at": i.phone_called_at.isoformat() if i.phone_called_at else None,
+            "call_sms_sent_at": i.call_sms_sent_at.isoformat() if i.call_sms_sent_at else None,
+            "phone_transcript": i.phone_transcript or "",
+            "phone_transcript_status": i.phone_transcript_status or "",
+        }
+        for i in rows
     }
 
 
@@ -1010,10 +1080,26 @@ async def run_joblens(
         )).scalar_one_or_none()
         if not requisition:
             raise HTTPException(404, "Selected requisition not found.")
-        if requisition.jd_file_blob:
-            extracted = extract_text(requisition.jd_file_blob, requisition.jd_file_filename or "jd.txt")
-            if extracted.strip():
-                requisition_jd_text = extracted
+        # Requisition's own JD file can live in either place depending on
+        # when it was uploaded: jd_file_blob (legacy, stored directly in
+        # the DB row) or jd_file_key (current — an S3/R2 object key,
+        # fetched via get_file_bytes). This previously only checked
+        # jd_file_blob, so a requisition whose JD was uploaded AFTER the
+        # move to S3/R2 storage (jd_file_key set, jd_file_blob left null)
+        # was incorrectly reported as having no JD attached at all, even
+        # though one was clearly sitting in the bucket — see the same
+        # jd_file_key-first pattern already used in
+        # capabilities/requisition/router.py and candidatetrack.py.
+        if requisition.jd_file_key or requisition.jd_file_blob:
+            jd_bytes = None
+            if requisition.jd_file_key:
+                jd_bytes = await get_file_bytes(db, requisition.jd_file_key)
+            if not jd_bytes:
+                jd_bytes = requisition.jd_file_blob
+            if jd_bytes:
+                extracted = extract_text(jd_bytes, requisition.jd_file_filename or "jd.txt")
+                if extracted.strip():
+                    requisition_jd_text = extracted
         if not requisition_jd_text and not requisition.jd_record_id:
             raise HTTPException(400, "This requisition has no JD attached yet — attach one on the Requisitions page first.")
         # Falls through to the jd_record_id branch below when this
@@ -1338,7 +1424,7 @@ async def run_joblens(
             # would actually triage.
             status = "Not Qualified"
 
-        questions = questions_result if groq_key else _default_questions(info["name"], result["matched"])
+        questions = questions_result[0] if groq_key and questions_result else _default_questions(info["name"], result["matched"])
 
         fname_lower = (filename or "").lower()
         if fname_lower.endswith(".pdf"):
@@ -1552,6 +1638,14 @@ async def run_joblens(
     for c in candidates:
         await db.refresh(c)
 
+    # Auto-log each candidate's Resume Screening completion into Interview
+    # Scheduling — see _log_joblens_interview's docstring. Best-effort per
+    # candidate (never raises), so a logging hiccup can't fail the whole
+    # scoring run.
+    for c in candidates:
+        await _log_joblens_interview(db, current_user, c, round_name="Resume Screening", interview_type="Resume Screening",
+                                      status="Completed", notes="Auto-logged: resume screened and scored.")
+
     candidates.sort(key=lambda c: c.ats_score, reverse=True)
 
     # Whether a Groq key EXISTS says nothing about whether extraction
@@ -1569,13 +1663,14 @@ async def run_joblens(
         from utils.groq_pool import record_key_outcome
         await record_key_outcome(db, key_resolution["pool_id"], success=any(ai_powered_flags) if ai_powered_flags else False)
 
+    _phone_schedule = await _phone_schedule_map(db, [c.id for c in candidates])
     return {
         "session_id": session.id,
         "jd_skills":  jd_skills[:30],
         "ai_powered": all(ai_powered_flags) if ai_powered_flags else (groq_key is not None),
         "ai_powered_partial": 0 < sum(ai_powered_flags) < len(ai_powered_flags),
         "total":      len(candidates),
-        "candidates": [_fmt(c) for c in candidates],
+        "candidates": [_fmt(c, _phone_schedule.get(c.id)) for c in candidates],
     }
 
 
@@ -1625,6 +1720,7 @@ async def get_session(
     )
     candidates = cr.scalars().all()
 
+    _phone_schedule = await _phone_schedule_map(db, [c.id for c in candidates])
     return {
         "id": session.id,
         "sequence_number": session.sequence_number or session.id,
@@ -1643,7 +1739,7 @@ async def get_session(
         "status": session.status,
         "cv_count": session.cv_count,
         "created_at": session.created_at.isoformat() if session.created_at else None,
-        "candidates": [_fmt(c) for c in candidates],
+        "candidates": [_fmt(c, _phone_schedule.get(c.id)) for c in candidates],
         # ── Dual-track scoring config used for this session — lets the UI
         # pre-fill weight sliders / logistics fields to "what was actually
         # used" when reopening a session ──────────────────────────────────
@@ -1752,12 +1848,79 @@ async def reweight_session(
         await db.refresh(c)
 
     candidates = sorted(candidates, key=lambda c: c.ats_score, reverse=True)
+    _phone_schedule = await _phone_schedule_map(db, [c.id for c in candidates])
     return {
         "session_id": session.id,
         "weights": weights,
         "disqualifiers": disqualifiers,
-        "candidates": [_fmt(c) for c in candidates],
+        "candidates": [_fmt(c, _phone_schedule.get(c.id)) for c in candidates],
     }
+
+
+@router.get("/sessions/{session_id}/video-decision-settings")
+async def get_video_decision_settings(
+    session_id: int, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    from utils.scoring import merge_video_decision_weights, merge_video_decision_thresholds
+    sr = await db.execute(select(JobLensSession).where(JobLensSession.id == session_id, JobLensSession.user_id == current_user.id))
+    session = sr.scalar_one_or_none()
+    if not session:
+        raise HTTPException(404, "Session not found")
+    return {
+        "weights": merge_video_decision_weights(session.video_decision_weights),
+        "thresholds": merge_video_decision_thresholds(session.video_decision_thresholds),
+    }
+
+
+@router.post("/sessions/{session_id}/video-decision-settings")
+async def set_video_decision_settings(
+    session_id: int, payload: dict,
+    current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    """Same 'reweight and re-apply instantly' idea as /reweight above, for
+    Video Interview's auto-decision instead of Resume Screening's ATS
+    score. Unlike the per-candidate auto-decision in _run_video_analysis
+    (which never overwrites a recommendation that's already set), THIS
+    endpoint recomputes and overwrites the recommendation for every
+    already-analyzed candidate in the session — an explicit "apply these
+    new settings now" action, not a background side-effect, so
+    overwriting an existing value here is the whole point rather than
+    something to protect against.
+
+    Body: {"weights": {...overrides...}, "thresholds": {...overrides...}}
+    """
+    from utils.scoring import (
+        merge_video_decision_weights, merge_video_decision_thresholds,
+        compute_video_composite_score, compute_video_decision,
+    )
+    sr = await db.execute(select(JobLensSession).where(JobLensSession.id == session_id, JobLensSession.user_id == current_user.id))
+    session = sr.scalar_one_or_none()
+    if not session:
+        raise HTTPException(404, "Session not found")
+
+    weights = merge_video_decision_weights({**(session.video_decision_weights or {}), **(payload.get("weights") or {})})
+    thresholds = merge_video_decision_thresholds({**(session.video_decision_thresholds or {}), **(payload.get("thresholds") or {})})
+
+    cr = await db.execute(select(JobLensCandidate).where(JobLensCandidate.session_id == session_id))
+    candidates = cr.scalars().all()
+    updated = 0
+    for c in candidates:
+        if not c.video_analysis or "error" in (c.video_analysis or {}):
+            continue
+        composite = compute_video_composite_score(c.video_analysis, weights)
+        if composite is None:
+            continue
+        c.video_screening_recommendation = compute_video_decision(composite, thresholds)
+        analysis = dict(c.video_analysis)
+        analysis["auto_decision_score"] = composite
+        analysis["auto_decision"] = c.video_screening_recommendation
+        c.video_analysis = analysis
+        updated += 1
+
+    session.video_decision_weights = weights
+    session.video_decision_thresholds = thresholds
+    await db.commit()
+    return {"weights": weights, "thresholds": thresholds, "updated": updated}
 
 
 @router.post("/sessions/{session_id}/candidates/{candidate_id}/questions")
@@ -1794,8 +1957,21 @@ async def get_questions(
     if candidate.interview_questions and not regenerate:
         return {"questions": candidate.interview_questions, "ai_powered": False}
 
-    groq_key = await get_credential(db, current_user.id, "groq", "api_key")
-    groq_model = await get_groq_model(db, current_user.id)
+    # BUG FIX: this used to call get_credential(db, user_id, "groq",
+    # "api_key") directly, which only ever checks a user's own key or a
+    # single legacy is_global=True UserAPIKey row — it has no idea the
+    # Groq Key Pool (GroqKeyPool table, utils/groq_pool.py) exists at
+    # all. The main resume-scoring pipeline already resolves Groq keys
+    # through resolve_groq_key() (which checks personal -> pool ->
+    # legacy-global, in that order), so any admin who set Groq up via
+    # the Key Pool — the primary supported way, per Settings' own
+    # Admin Console UI — had scoring work fine while THIS endpoint kept
+    # reporting "No Groq API key configured" and silently regenerating
+    # the exact same default questions every time.
+    from utils.groq_pool import resolve_groq_key
+    key_resolution = await resolve_groq_key(db, current_user.id)
+    groq_key = key_resolution["groq_key"]
+    groq_model = key_resolution["model"] or await get_groq_model(db, current_user.id)
 
     if groq_key:
         # Built from data already extracted from THIS candidate's own
@@ -1814,17 +1990,18 @@ async def get_questions(
             resume_parts.append(f"Summary: {candidate.summary}")
         resume_context = "\n".join(resume_parts)
 
-        questions = await generate_questions(
+        questions, gen_error = await generate_questions(
             session.jd_text or "", candidate.name,
             candidate.matched_skills or [], groq_key, groq_model,
             resume_context=resume_context,
         )
     else:
         questions = _default_questions(candidate.name, candidate.matched_skills or [])
+        gen_error = "No Groq API key configured (Settings -> API Keys) — showing default questions instead."
 
     candidate.interview_questions = questions
     await db.commit()
-    return {"questions": questions, "ai_powered": groq_key is not None}
+    return {"questions": questions, "ai_powered": groq_key is not None and gen_error is None, "error": gen_error}
 
 
 @router.put("/candidates/{candidate_id}/shortlist")
@@ -1933,11 +2110,16 @@ async def _get_or_create_joblens_interview(
 
 async def _log_joblens_interview(
     db: AsyncSession, current_user: User, candidate: JobLensCandidate,
-    round_name: str, interview_type: str, notes: str = "",
+    round_name: str, interview_type: str, notes: str = "", status: str = "",
+    completed_at: Optional[datetime] = None,
 ) -> None:
     """Registers/updates a row in Interview Scheduling for a JobLens/
     CandidateLens action — Video Interview's 'Send Interview Invite' and
-    Phone Interview's 'Candidate reached by phone' both call this.
+    Phone Interview's 'Candidate reached by phone' both call this, as do
+    Resume Screening / Phone Interview / Video Interview's actual
+    COMPLETION points (status="Completed") so a candidate finishing any
+    of the three stages shows up in Interview Scheduling with a real
+    completion date, not just "an invite/call happened at some point".
     JobLens candidates live in tiq_joblens_candidates, not the Talent
     Pool's tiq_candidates that Interview.candidate_id has always pointed
     at, so this sets joblens_candidate_id instead (see that column's
@@ -1950,17 +2132,31 @@ async def _log_joblens_interview(
     inserting, so repeated actions against the same candidate/round
     update one tracking row instead of piling up duplicates.
 
+    status, when given, is written directly (e.g. "Completed") — and for
+    "Completed" specifically, completed_at is set to now WITHOUT
+    touching scheduled_at, so a real booked time (e.g. from a Calendly
+    booking) already on the row survives a later completion instead of
+    being overwritten by the completion timestamp.
+
     Best-effort: never raises. A failure here shouldn't block the actual
-    invite/contact action it's just a side-effect record of.
+    invite/contact/completion action it's just a side-effect record of —
+    but it IS logged (not silently swallowed with zero trace), since a
+    failure here previously left no evidence anywhere that an Interview
+    Scheduling row should have existed but doesn't.
     """
     try:
         interview = await _get_or_create_joblens_interview(db, current_user, candidate, round_name, interview_type)
         if notes:
             interview.notes = notes
+        if status:
+            interview.status = status
+            if status == "Completed":
+                interview.completed_at = completed_at or datetime.utcnow()
         interview.updated_at = datetime.utcnow()
         await db.commit()
-    except Exception:
+    except Exception as e:
         await db.rollback()
+        logger.warning(f"_log_joblens_interview failed for candidate_id={candidate.id}, round={interview_type}: {e}")
 
 
 @router.post("/candidates/{candidate_id}/mark-contacted")
@@ -1979,8 +2175,11 @@ async def mark_contacted(
         raise HTTPException(404, "Candidate not found")
     c.contacted = True
     await db.commit()
-    await _log_joblens_interview(db, current_user, c, round_name="Video Interview", interview_type="Video Interview",
-                                  notes="Auto-logged: interview invite sent via Video Interview's Candidate Contact.")
+    interview = await _get_or_create_joblens_interview(db, current_user, c, round_name="Video Interview", interview_type="Video Interview")
+    interview.video_invite_sent_at = datetime.utcnow()
+    interview.notes = "Auto-logged: interview invite sent via Video Interview's Candidate Contact."
+    interview.updated_at = datetime.utcnow()
+    await db.commit()
     return {"contacted": True}
 
 
@@ -2016,6 +2215,41 @@ class SendCalendlyLinkRequest(BaseModel):
     to_email: str = ""   # defaults to the candidate's own email if blank
     subject: str = "Schedule your phone screening interview"
     body_html: str = ""  # defaults to a standard message wrapping the link if blank
+    # Set by the frontend's compose-modal flow (prepare-calendly-link
+    # fetched this once when the modal opened, and the editable message
+    # body already has it embedded) — reusing it here avoids minting a
+    # SECOND single-use Calendly link that never actually gets emailed.
+    # Left blank, this endpoint generates its own exactly as before.
+    booking_url: str = ""
+
+
+@router.post("/candidates/{candidate_id}/phone-interview/prepare-calendly-link")
+async def prepare_phone_calendly_link(
+    candidate_id: int,
+    current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    """Resolves (and, for the single-use-link Calendly setup, actually
+    mints) the booking link WITHOUT sending anything — lets the frontend
+    show a real, working link in the compose modal's editable message
+    body before the recruiter hits Send, the same way Video Interview's
+    invite modal shows a real interview link (from /prepare-invite)
+    before it's emailed."""
+    cr = await db.execute(select(JobLensCandidate).where(JobLensCandidate.id == candidate_id))
+    c = cr.scalar_one_or_none()
+    if not c:
+        raise HTTPException(404, "Candidate not found")
+
+    from capabilities.interview import service as interview_service
+
+    creds = await interview_service.get_calendly_credentials(db, current_user.id)
+    if creds["booking_url"]:
+        booking_url = creds["booking_url"]
+    elif creds["api_key"] and creds["event_type_uri"]:
+        booking_url = await interview_service.create_calendly_single_use_link(creds["api_key"], creds["event_type_uri"])
+    else:
+        raise HTTPException(400, "Set up Calendly under Settings -> API Keys first — either paste your Calendly booking link, or a Personal Access Token + Event Type.")
+
+    return {"booking_url": booking_url, "candidate_name": c.name, "candidate_email": c.email}
 
 
 @router.post("/candidates/{candidate_id}/phone-interview/send-calendly-link")
@@ -2044,13 +2278,16 @@ async def send_phone_calendly_link(
 
     from capabilities.interview import service as interview_service
 
-    creds = await interview_service.get_calendly_credentials(db, current_user.id)
-    if creds["booking_url"]:
-        booking_url = creds["booking_url"]
-    elif creds["api_key"] and creds["event_type_uri"]:
-        booking_url = await interview_service.create_calendly_single_use_link(creds["api_key"], creds["event_type_uri"])
+    if payload.booking_url.strip():
+        booking_url = payload.booking_url.strip()
     else:
-        raise HTTPException(400, "Set up Calendly under Settings -> API Keys first — either paste your Calendly booking link, or a Personal Access Token + Event Type.")
+        creds = await interview_service.get_calendly_credentials(db, current_user.id)
+        if creds["booking_url"]:
+            booking_url = creds["booking_url"]
+        elif creds["api_key"] and creds["event_type_uri"]:
+            booking_url = await interview_service.create_calendly_single_use_link(creds["api_key"], creds["event_type_uri"])
+        else:
+            raise HTTPException(400, "Set up Calendly under Settings -> API Keys first — either paste your Calendly booking link, or a Personal Access Token + Event Type.")
 
     body_html = payload.body_html.strip() or (
         f"<p>Hi {c.name or 'there'},</p>"
@@ -2064,12 +2301,191 @@ async def send_phone_calendly_link(
 
     interview = await _get_or_create_joblens_interview(db, current_user, c, round_name="Phone Screening", interview_type="Phone Interview")
     interview.calendly_scheduling_url = booking_url
+    interview.calendly_link_sent_at = datetime.utcnow()
     if interview.status not in ("Scheduled", "Completed"):
         interview.status = "Requested"
     interview.updated_at = datetime.utcnow()
     await db.commit()
 
     return {"sent": True, "calendly_scheduling_url": booking_url, "interview_id": interview.id}
+
+
+# ── TELEPHONY (click-to-call + SMS scheduling — see utils/telephony.py) ──
+# Phone Interview page's counterpart to Interview Scheduling's /call and
+# /sms-schedule endpoints (capabilities/interview/router.py) — same
+# underlying Twilio plumbing, but operating on a JobLensCandidate
+# directly rather than requiring an Interview row to already exist, same
+# bridge pattern _get_or_create_joblens_interview/_log_joblens_interview
+# already use for "Send Calendly Link" above.
+
+@router.post("/candidates/{candidate_id}/phone-interview/call")
+async def call_phone_candidate(
+    candidate_id: int, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    """Click-to-call from the Phone Interview page: bridges the
+    recruiter's own configured caller number (Settings -> API Keys ->
+    Telephony) to this candidate's phone. Registers/updates the same
+    Interview Scheduling row this candidate's other Phone Interview
+    actions use, so the call shows up there too."""
+    from utils.telephony import get_telephony_config, place_click_to_call
+
+    cr = await db.execute(select(JobLensCandidate).where(JobLensCandidate.id == candidate_id))
+    c = cr.scalar_one_or_none()
+    if not c:
+        raise HTTPException(404, "Candidate not found")
+
+    config = await get_telephony_config(db, current_user.id)
+    result = await place_click_to_call(config, c.phone or "", record=True)
+
+    interview = await _get_or_create_joblens_interview(db, current_user, c, round_name="Phone Screening", interview_type="Phone Interview")
+    interview.phone_call_sid = result["sid"]
+    interview.phone_call_status = result["status"]
+    interview.phone_called_at = datetime.utcnow()
+    # Fresh call — any transcript from a PREVIOUS call to this candidate
+    # no longer corresponds to what's about to happen, so clear it rather
+    # than leave a stale transcript sitting under a new call_sid.
+    interview.phone_recording_sid = None
+    interview.phone_transcript = None
+    interview.phone_transcript_status = None
+    interview.updated_at = datetime.utcnow()
+    await db.commit()
+
+    return {
+        "call_sid": result["sid"], "status": result["status"],
+        "caller_number": result["from"], "candidate_number": result["to"],
+    }
+
+
+@router.post("/candidates/{candidate_id}/phone-interview/fetch-transcript")
+async def fetch_phone_transcript(
+    candidate_id: int, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    """Pulls the Twilio call recording for this candidate's most recent
+    Phone Interview call (see call_phone_candidate's record=True) and
+    transcribes it via Groq Whisper — same transcription engine Video
+    Interview already uses (_transcribe_video), reused here rather than
+    a second copy of the same Groq audio-transcription call.
+
+    On-demand rather than automatic: recordings typically take a few
+    seconds to a minute to become available after the call ends, and
+    this app deliberately avoids requiring a public webhook URL just to
+    know when that's happened (see utils/telephony.place_click_to_call's
+    docstring) — the recruiter clicks "Fetch Call Transcript" once
+    they're ready to check.
+
+    Note: this only works for calls placed via Twilio click-to-call
+    (Settings -> API Keys -> Telephony). A call placed via the Windows/
+    Android Caller dials out on the recruiter's own phone's native SIM —
+    a real cellular call TalentIQ has no access to the audio of at all,
+    so there is nothing here to record or transcribe for that path.
+    """
+    from capabilities.interview.models import Interview
+    from utils.telephony import get_telephony_config, fetch_call_recordings, download_recording_audio
+
+    cr = await db.execute(select(JobLensCandidate).where(JobLensCandidate.id == candidate_id))
+    c = cr.scalar_one_or_none()
+    if not c:
+        raise HTTPException(404, "Candidate not found")
+
+    interview = (await db.execute(
+        select(Interview).where(
+            Interview.joblens_candidate_id == candidate_id,
+            Interview.interview_type == "Phone Interview",
+        )
+    )).scalar_one_or_none()
+    if not interview or not interview.phone_call_sid:
+        raise HTTPException(400, "No call has been placed to this candidate yet — use Call Candidate first.")
+
+    config = await get_telephony_config(db, current_user.id)
+    recordings = await fetch_call_recordings(config, interview.phone_call_sid)
+    if not recordings:
+        raise HTTPException(404, "No recording available yet for that call — Twilio usually takes a few seconds to a minute after the call ends. Try again shortly.")
+
+    # Most recent recording for this call (a call can technically produce
+    # more than one, e.g. if re-answered) — sorted explicitly rather than
+    # trusting Twilio's response ordering.
+    recording = sorted(recordings, key=lambda r: r.get("date_created", ""), reverse=True)[0]
+    recording_sid = recording.get("sid")
+
+    interview.phone_transcript_status = "Processing"
+    await db.commit()
+
+    from utils.groq_pool import resolve_groq_key, record_key_outcome
+    key_resolution = await resolve_groq_key(db, current_user.id)
+    groq_key = key_resolution["groq_key"]
+    if not groq_key:
+        interview.phone_transcript_status = "Failed"
+        await db.commit()
+        raise HTTPException(400, "No Groq API key configured (own or admin-shared) — required for transcription.")
+
+    try:
+        audio_bytes = await download_recording_audio(config, recording_sid)
+        transcript = _transcribe_video(audio_bytes, "audio/mpeg", groq_key)
+        if not transcript:
+            interview.phone_transcript_status = "Failed"
+            await db.commit()
+            raise HTTPException(400, "Transcription returned no speech content — the recording may be silent or too short.")
+
+        interview.phone_recording_sid = recording_sid
+        interview.phone_transcript = transcript
+        interview.phone_transcript_status = "Completed"
+        await db.commit()
+        if key_resolution["pool_id"] is not None:
+            await record_key_outcome(db, key_resolution["pool_id"], success=True)
+        return {"transcript": transcript, "status": "Completed"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        interview.phone_transcript_status = "Failed"
+        await db.commit()
+        raise HTTPException(500, f"Failed to transcribe the call recording: {str(e)[:200]}")
+
+
+class SendScheduleSmsRequest(BaseModel):
+    scheduled_at: str    # ISO datetime — when the candidate will be called
+    message: str = ""    # defaults to a standard "you'll be called at <time>" text if blank
+
+
+@router.post("/candidates/{candidate_id}/phone-interview/send-sms-schedule")
+async def send_phone_schedule_sms(
+    candidate_id: int, payload: SendScheduleSmsRequest,
+    current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    """Texts the candidate the time they'll be called, and sets that
+    time on this candidate's Interview Scheduling row (scheduled_at +
+    status="Scheduled") so it's reflected in both the calendar and the
+    table there — the interviewer-picks-the-time alternative to
+    'Send Calendly Link' above, for when the candidate would rather get
+    a text than self-schedule."""
+    from utils.telephony import get_telephony_config, send_sms
+
+    cr = await db.execute(select(JobLensCandidate).where(JobLensCandidate.id == candidate_id))
+    c = cr.scalar_one_or_none()
+    if not c:
+        raise HTTPException(404, "Candidate not found")
+
+    try:
+        scheduled_dt = datetime.fromisoformat(payload.scheduled_at.replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(400, "scheduled_at must be a valid ISO datetime string.")
+
+    when_display = scheduled_dt.strftime("%A, %B %d at %I:%M %p").replace(" 0", " ")
+    body = payload.message.strip() or (
+        f"Hi {c.name or 'there'}, this is a heads-up that we'll be calling you for your "
+        f"phone interview on {when_display}. Talk soon!"
+    )
+
+    config = await get_telephony_config(db, current_user.id)
+    await send_sms(config, c.phone or "", body)
+
+    interview = await _get_or_create_joblens_interview(db, current_user, c, round_name="Phone Screening", interview_type="Phone Interview")
+    interview.scheduled_at = scheduled_dt
+    interview.status = "Scheduled"
+    interview.call_sms_sent_at = datetime.utcnow()
+    interview.updated_at = datetime.utcnow()
+    await db.commit()
+
+    return {"sent": True, "scheduled_at": interview.scheduled_at.isoformat(), "status": interview.status}
 
 
 CANDIDATE_STATUSES = ["Qualified", "Review", "Not Qualified"]
@@ -2129,6 +2545,8 @@ async def save_phone_result(
     c.phone_screening_notes = payload.notes.strip()
     c.phone_screening_at = datetime.utcnow()
     await db.commit()
+    await _log_joblens_interview(db, current_user, c, round_name="Phone Screening", interview_type="Phone Interview",
+                                  status="Completed", notes="Auto-logged: phone screening completed.")
     return {
         "phone_screening_status": c.phone_screening_status,
         "phone_screening_recommendation": c.phone_screening_recommendation,
@@ -2275,6 +2693,8 @@ async def save_interview_result(
     c.dominant_emotion = result.dominant
     c.video_status     = "Completed"
     await db.commit()
+    await _log_joblens_interview(db, current_user, c, round_name="Video Interview", interview_type="Video Interview",
+                                  status="Completed", notes="Auto-logged: video interview completed.")
     return {"status": "saved"}
 
 
@@ -2288,11 +2708,18 @@ async def save_interview_result(
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _transcribe_video(video_bytes: bytes, mimetype: str, groq_key: str) -> str:
-    """Groq's /audio/transcriptions endpoint is OpenAI-Whisper-API-compatible
-    and accepts webm/mp4/mp3/wav/m4a/ogg directly — no local audio
-    extraction/conversion needed."""
+    """Groq's /audio/translations endpoint (Whisper's "translate" task,
+    not "transcribe") — same API shape as /audio/transcriptions, but
+    ALWAYS outputs English text regardless of what language was actually
+    spoken, instead of transcribing faithfully in the spoken language
+    (which is what /audio/transcriptions did before this fix — a
+    candidate answering in Urdu produced an Urdu transcript, not an
+    English one). Recruiters reviewing transcripts need them in one
+    consistent language regardless of which language a candidate
+    answered in. Accepts webm/mp4/mp3/wav/m4a/ogg directly — no local
+    audio extraction/conversion needed."""
     resp = requests.post(
-        "https://api.groq.com/openai/v1/audio/transcriptions",
+        "https://api.groq.com/openai/v1/audio/translations",
         headers={"Authorization": f"Bearer {groq_key}"},
         files={"file": ("interview.webm", video_bytes, mimetype or "video/webm")},
         data={"model": "whisper-large-v3", "response_format": "text"},
@@ -2318,11 +2745,21 @@ comment on what the transcript actually supports.
 QUESTIONS ASKED:
 {questions_block}
 
-TRANSCRIPT (auto-generated, may contain minor recognition errors):
+TRANSCRIPT (auto-generated, translated to English if the candidate answered
+in another language — may contain minor recognition errors):
 \"\"\"{transcript[:6000]}\"\"\"
 
-Assess the candidate's spoken interview performance. Return ONLY valid JSON,
-no markdown, no commentary:
+Assess the candidate's spoken interview performance. Also split the
+transcript into the individual question/answer pairs it actually contains,
+in the order asked — the transcript is one continuous recording with no
+built-in boundaries between questions, so use the QUESTIONS ASKED list
+above plus the natural content/topic shifts in the transcript to work out
+where each answer starts and ends. If a question doesn't appear to have
+been answered (skipped, cut off, inaudible), still include it with
+answer_transcript set to an empty string rather than omitting it — the
+reader needs to see that gap, not have it silently disappear.
+
+Return ONLY valid JSON, no markdown, no commentary:
 {{
   "communication_score": <0-100, clarity/structure of spoken answers>,
   "relevance_score": <0-100, how directly answers addressed the questions asked>,
@@ -2331,7 +2768,10 @@ no markdown, no commentary:
   "strengths": ["<specific, evidence-based>", "..."],
   "concerns": ["<specific, evidence-based>", "..."],
   "key_observations": ["<notable moment or answer>", "..."],
-  "summary": "<3-4 sentence overall assessment>"
+  "summary": "<3-4 sentence overall assessment>",
+  "qa_pairs": [
+    {{"question": "<question text, verbatim from QUESTIONS ASKED>", "answer_transcript": "<the portion of the transcript that answers it, verbatim or lightly trimmed — empty string if not answered>"}}
+  ]
 }}"""
     resp = llm.invoke([HumanMessage(content=prompt)])
     from utils.llm_extraction import _parse_json_response
@@ -2341,10 +2781,19 @@ no markdown, no commentary:
     return data
 
 
+# Strong references for fire-and-forget asyncio.create_task() calls (see
+# analyze_unanalyzed_videos below) — asyncio only holds a WEAK reference
+# to a task otherwise, so without this a task can be garbage-collected
+# mid-flight with no warning, silently dropping a queued analysis.
+_BACKGROUND_TASK_REFS: set = set()
+
+
 async def _run_video_analysis(candidate_id: int):
     """Background task — opens its OWN DB session since the request-scoped
     one is already closed by the time this runs after the response returns."""
     async with AsyncSessionLocal() as db:
+        key_resolution = None
+        c = None
         try:
             cr = await db.execute(
                 select(JobLensCandidate, JobLensSession)
@@ -2359,8 +2808,14 @@ async def _run_video_analysis(candidate_id: int):
             c.video_analysis_status = "Processing"
             await db.commit()
 
-            groq_key = await get_credential(db, session.user_id, "groq", "api_key")
-            groq_model = await get_groq_model(db, session.user_id)
+            # Same bug as get_questions() had before this session's fix:
+            # get_credential() alone doesn't know the Groq Key Pool
+            # exists — resolve_groq_key checks personal -> pool -> legacy
+            # global, matching what the scoring pipeline already does.
+            from utils.groq_pool import resolve_groq_key, record_key_outcome
+            key_resolution = await resolve_groq_key(db, session.user_id)
+            groq_key = key_resolution["groq_key"]
+            groq_model = key_resolution["model"] or await get_groq_model(db, session.user_id)
             if not groq_key:
                 c.video_analysis_status = "Failed"
                 c.video_analysis = {"error": "No Groq API key configured (own or admin-shared) — required for transcription and analysis."}
@@ -2393,19 +2848,59 @@ async def _run_video_analysis(candidate_id: int):
                 await db.commit()
                 return
 
+            # Save the transcript as soon as it exists, BEFORE attempting
+            # the LLM scoring step below — previously both were only ever
+            # written together after a successful analysis, so a
+            # transcription that worked fine followed by a scoring
+            # failure (LLM error, rate limit, bad JSON) silently threw
+            # the transcript away too, leaving nothing to show even
+            # though the hard part (transcribing the actual audio)
+            # had already succeeded.
+            c.video_transcript = transcript
+            await db.commit()
+
             analysis = await _analyze_transcript(
                 transcript, c.interview_questions or [], c.name or "the candidate", groq_key, groq_model
             )
 
-            c.video_transcript = transcript
             c.video_analysis = analysis
             c.video_analysis_status = "Completed"
+
+            # Auto-decision: only ever sets the recommendation, never
+            # overwrites one — if a recruiter already made a manual call
+            # (e.g. between an earlier failed analysis and this retry),
+            # that choice sticks. Explicit re-weighting via
+            # /sessions/{id}/video-decision-settings is the only path
+            # that recomputes decisions that already exist.
+            if not c.video_screening_recommendation:
+                from utils.scoring import (
+                    merge_video_decision_weights, merge_video_decision_thresholds,
+                    compute_video_composite_score, compute_video_decision,
+                )
+                vd_weights = merge_video_decision_weights(session.video_decision_weights)
+                vd_thresholds = merge_video_decision_thresholds(session.video_decision_thresholds)
+                composite = compute_video_composite_score(analysis, vd_weights)
+                if composite is not None:
+                    c.video_screening_recommendation = compute_video_decision(composite, vd_thresholds)
+                    analysis["auto_decision_score"] = composite
+                    analysis["auto_decision"] = c.video_screening_recommendation
+                    c.video_analysis = analysis  # re-assign so JSON column picks up the added keys
+
             await db.commit()
+            if key_resolution["pool_id"] is not None:
+                await record_key_outcome(db, key_resolution["pool_id"], success=True)
         except Exception as e:
+            if key_resolution is not None and key_resolution.get("pool_id") is not None:
+                try:
+                    from utils.groq_pool import record_key_outcome
+                    await record_key_outcome(db, key_resolution["pool_id"], success=False)
+                except Exception:
+                    pass
             try:
-                c.video_analysis_status = "Failed"
-                c.video_analysis = {"error": str(e)[:300]}
-                await db.commit()
+                if c is not None:
+                    c.video_analysis_status = "Failed"
+                    c.video_analysis = {"error": str(e)[:300]}
+                    await db.commit()
             except Exception:
                 pass
 
@@ -2470,6 +2965,140 @@ async def reanalyze_video(
     await db.commit()
     background_tasks.add_task(_run_video_analysis, candidate_id)
     return {"status": "queued"}
+
+
+@router.post("/candidates/analyze-unanalyzed-videos")
+async def analyze_unanalyzed_videos(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Backfill action: finds every one of THIS recruiter's candidates who
+    has a stored interview video (video_key or the legacy video_blob) but
+    no completed analysis on file — status is NULL/"Pending"/"Failed", or
+    a status of "Completed" with no actual video_analysis payload (the
+    has_video bug fixed earlier this session could leave rows in exactly
+    that inconsistent state) — and queues _run_video_analysis for each.
+    Explicitly excludes candidates already "Processing" so a second click
+    doesn't pile on duplicate concurrent runs of the same video.
+
+    Scoped to the calling recruiter's own sessions only, same ownership
+    boundary as every other candidate-level action in this router — this
+    is not an admin-wide "reprocess everything" tool."""
+    rows = (await db.execute(
+        select(JobLensCandidate.id)
+        .join(JobLensSession, JobLensCandidate.session_id == JobLensSession.id)
+        .where(
+            JobLensSession.user_id == current_user.id,
+            or_(JobLensCandidate.video_key.isnot(None), JobLensCandidate.video_blob.isnot(None)),
+            or_(
+                JobLensCandidate.video_analysis_status.is_(None),
+                JobLensCandidate.video_analysis_status.in_(["Pending", "Failed"]),
+                JobLensCandidate.video_analysis.is_(None),
+            ),
+        )
+    )).scalars().all()
+
+    # Fire all of these CONCURRENTLY via asyncio.create_task rather than
+    # background_tasks.add_task — FastAPI's BackgroundTasks runs its
+    # tasks one at a time, in sequence, awaiting each fully before
+    # starting the next. With N candidates queued that meant N videos
+    # got transcribed+analysed strictly one after another regardless of
+    # how many Groq keys were sitting in the pool ready to be used in
+    # parallel — the whole point of having multiple keys is exactly this
+    # kind of concurrent throughput, and BackgroundTasks was silently
+    # throwing that away. _BACKGROUND_TASK_REFS holds a strong reference
+    # to each task so it can't be garbage-collected mid-flight (asyncio
+    # only holds a weak reference otherwise) — cleared via the task's own
+    # done-callback once it finishes, success or failure either way.
+    for candidate_id in rows:
+        task = asyncio.create_task(_run_video_analysis(candidate_id))
+        _BACKGROUND_TASK_REFS.add(task)
+        task.add_done_callback(_BACKGROUND_TASK_REFS.discard)
+
+    if rows:
+        await db.execute(
+            JobLensCandidate.__table__.update()
+            .where(JobLensCandidate.id.in_(rows))
+            .values(video_analysis_status="Pending")
+        )
+        await db.commit()
+
+    return {"queued": len(rows), "candidate_ids": rows}
+
+
+@router.post("/candidates/backfill-interview-scheduling")
+async def backfill_interview_scheduling(
+    current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    """One-time catch-up action for Interview Scheduling: creates/updates
+    rows for candidates who completed Resume Screening / Phone Interview /
+    Video Interview BEFORE the auto-logging in the /run, save_phone_result,
+    and save_interview_result endpoints existed — those completions
+    happened with no Interview Scheduling row created at the time (the
+    feature didn't exist yet), and there's no automatic retroactive
+    mechanism for that other than running this once.
+
+    Exact historical completion timestamps for Resume Screening and Video
+    Interview were never actually stored anywhere (this app didn't track
+    them until the auto-logging feature existed), so the best available
+    approximation is used instead of leaving completed_at blank:
+      - Resume Screening: the candidate's SESSION creation time (scoring
+        happens synchronously at upload, so this is normally exact or
+        within seconds of the truth).
+      - Video Interview: video_screening_at (the Decision & Comments
+        timestamp) if set — normally made shortly after watching the
+        recording, so a reasonable proxy — otherwise this candidate's
+        session creation time as a last resort.
+      - Phone Interview: phone_screening_at IS the actual, exact
+        completion time already (that field has existed all along), so
+        no approximation needed there.
+
+    Scoped to the calling recruiter's own sessions only, same ownership
+    boundary as analyze_unanalyzed_videos above.
+    """
+    sessions = (await db.execute(
+        select(JobLensSession).where(JobLensSession.user_id == current_user.id)
+    )).scalars().all()
+    if not sessions:
+        return {"resume": 0, "phone": 0, "video": 0}
+
+    session_ids = [s.id for s in sessions]
+    session_created_at = {s.id: s.created_at for s in sessions}
+
+    candidates = (await db.execute(
+        select(JobLensCandidate).where(JobLensCandidate.session_id.in_(session_ids))
+    )).scalars().all()
+
+    counts = {"resume": 0, "phone": 0, "video": 0}
+    for c in candidates:
+        session_time = session_created_at.get(c.session_id) or datetime.utcnow()
+
+        # Every candidate that exists in a session was, by definition,
+        # already resume-screened — that's what creates the row at all.
+        await _log_joblens_interview(
+            db, current_user, c, round_name="Resume Screening", interview_type="Resume Screening",
+            status="Completed", notes="Backfilled: resume screened and scored (pre-existing candidate).",
+            completed_at=session_time,
+        )
+        counts["resume"] += 1
+
+        if c.phone_screening_status == "Completed":
+            await _log_joblens_interview(
+                db, current_user, c, round_name="Phone Screening", interview_type="Phone Interview",
+                status="Completed", notes="Backfilled: phone screening completed.",
+                completed_at=c.phone_screening_at or session_time,
+            )
+            counts["phone"] += 1
+
+        if c.video_status == "Completed":
+            await _log_joblens_interview(
+                db, current_user, c, round_name="Video Interview", interview_type="Video Interview",
+                status="Completed", notes="Backfilled: video interview completed.",
+                completed_at=c.video_screening_at or session_time,
+            )
+            counts["video"] += 1
+
+    return counts
 
 
 @router.get("/candidates/{candidate_id}/video")
@@ -2764,6 +3393,19 @@ async def public_save_interview_result(
     c.dominant_emotion = result.dominant
     c.video_status     = "Completed"
     await db.commit()
+    # No current_user on this public/token-based path (the candidate,
+    # not the recruiter, is calling it) — _log_joblens_interview needs
+    # the actual owner User row (get_or_create_default_organisation
+    # takes a User, not just an id), so fetch it via the candidate's own
+    # session.user_id.
+    sr = await db.execute(select(JobLensSession).where(JobLensSession.id == c.session_id))
+    owning_session = sr.scalar_one_or_none()
+    if owning_session:
+        ur = await db.execute(select(User).where(User.id == owning_session.user_id))
+        owner = ur.scalar_one_or_none()
+        if owner:
+            await _log_joblens_interview(db, owner, c, round_name="Video Interview", interview_type="Video Interview",
+                                          status="Completed", notes="Auto-logged: video interview completed (candidate self-serve link).")
     return {"status": "saved"}
 
 

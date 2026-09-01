@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from db.database import get_db, engine, get_connection_display_info, test_connection_url
 from models.models import User
+from models.billing_models import Subscription, PricingPlan
 from utils.auth_utils import get_current_user, require_admin
 from utils.storage import test_s3_config, REQUIRED_S3_FIELDS
 
@@ -271,16 +272,42 @@ async def list_users(_: User = Depends(require_admin), db: AsyncSession = Depend
         select(User).order_by(User.created_at.desc())
     )
     users = result.scalars().all()
-    return [
-        {
+
+    # One extra query for every subscription + its plan name, rather than
+    # a per-user N+1 — small tables (one row per user, one per plan), so
+    # loading both in full and joining in Python is simpler than a SQL
+    # JOIN here and just as fast in practice.
+    subs = {s.user_id: s for s in (await db.execute(select(Subscription))).scalars().all()}
+    plan_names = {p.slug: p.name for p in (await db.execute(select(PricingPlan))).scalars().all()}
+
+    def _iso(dt):
+        return dt.isoformat() if dt else None
+
+    out = []
+    for u in users:
+        sub = subs.get(u.id)
+        out.append({
             "id": u.id, "name": u.name, "email": u.email,
             "company": u.company, "phone": u.phone, "role": u.role,
             "is_active": u.is_active,
-            "created_at": u.created_at.isoformat() if u.created_at else None,
-            "last_login": u.last_login.isoformat() if u.last_login else None,
-        }
-        for u in users
-    ]
+            "created_at": _iso(u.created_at),
+            "last_login": _iso(u.last_login),
+            # Plan/billing columns — from tiq_subscriptions (+ its plan's
+            # display name), one row per user, "none" until they've ever
+            # subscribed to or started a demo of anything. start_date is
+            # also the payment date for the CURRENT term: activation and
+            # payment happen in the same instant, in the Stripe webhook
+            # handler (see routers/billing.py's stripe_webhook) — there's
+            # no separate "paid but not yet active" state in this model.
+            "plan_name": plan_names.get(sub.plan_slug, sub.plan_slug) if sub and sub.plan_slug else "—",
+            "plan_status": sub.status if sub else "none",
+            "plan_start_date": _iso(sub.start_date) if sub else None,
+            "plan_end_date": _iso(sub.end_date) if sub else None,
+            "payment_date": _iso(sub.start_date) if (sub and sub.amount_paid_cents) else None,
+            "amount_paid_cents": sub.amount_paid_cents if sub else 0,
+            "transaction_number": (sub.stripe_checkout_session_id or "—") if sub else "—",
+        })
+    return out
 
 
 class UserUpdate(BaseModel):
@@ -374,7 +401,7 @@ async def run_query(
 # reachable through the generic File Manager, but a purpose-built list/
 # add/remove UI beats hand-editing raw rows for something admins will do
 # repeatedly. Admin-only: this is a platform-wide shared resource, same
-# security tier as the existing global Groq/Ollama/Adzuna keys.
+# security tier as the existing global Groq/Ollama/Apify keys.
 
 class GroqPoolKeyIn(BaseModel):
     key_value: str
@@ -848,6 +875,30 @@ async def test_s3(payload: S3TestIn, _: User = Depends(require_admin)):
     if missing:
         raise HTTPException(400, f"Missing required field(s): {', '.join(missing)}")
     return test_s3_config(cfg)
+
+
+class StripeTestIn(BaseModel):
+    secret_key: str
+
+
+@router.post("/system/stripe/test")
+async def test_stripe(payload: StripeTestIn, _: User = Depends(require_admin)):
+    """Validates a candidate Stripe secret key without persisting it —
+    Balance.retrieve() is a free, read-only call Stripe explicitly
+    documents as safe for "is this key valid" checks, so a typo'd or
+    revoked key is caught before Save rather than at the next real
+    checkout attempt."""
+    secret = payload.secret_key.strip()
+    if not secret:
+        raise HTTPException(400, "Secret key is required.")
+    import stripe
+    stripe.api_key = secret
+    try:
+        balance = stripe.Balance.retrieve()
+        mode = "test" if secret.startswith("sk_test_") else "live" if secret.startswith("sk_live_") else "unknown"
+        return {"ok": True, "message": f"Connected ({mode} mode) — key is valid."}
+    except Exception as e:
+        return {"ok": False, "message": f"Stripe rejected this key: {str(e)[:300]}"}
 
 
 @router.get("/storage/blob-audit")

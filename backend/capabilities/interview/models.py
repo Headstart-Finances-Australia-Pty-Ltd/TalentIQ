@@ -70,7 +70,7 @@ INTERVIEW_STATUSES = ["Requested", "Scheduled", "Completed", "Cancelled", "No-Sh
 # this server-side): a video or panel round involves other people's
 # calendars an HR person needs to actually coordinate, so those must be
 # scheduled directly rather than left to a public, unauthenticated link.
-INTERVIEW_TYPES = ["Phone Interview", "Video Interview", "Panel Interview"]
+INTERVIEW_TYPES = ["Phone Interview", "Video Interview", "Panel Interview", "Resume Screening"]
 SELF_SCHEDULABLE_TYPES = {"Phone Interview"}
 
 RECOMMENDATION_OPTIONS = ["Strong Yes", "Yes", "Neutral", "No", "Strong No"]
@@ -198,8 +198,56 @@ class Interview(Base):
     # other interview.
     calendly_scheduling_url = Column(Text, nullable=True)
 
+    # ── Telephony (click-to-call + SMS scheduling — see utils/telephony.py) ──
+    # Caller number itself is NOT stored here — it's a per-recruiter
+    # Settings credential (Settings -> API Keys -> Telephony), same
+    # reasoning as SMTP/Calendly not storing sender identity per-row.
+    # These three columns are just a log of the last action taken, so
+    # Interview Scheduling's table and the Phone Interview page can both
+    # show "a call happened" / "a call is coming" without a separate
+    # activity-log table.
+    phone_call_sid    = Column(String(64), nullable=True)   # last Twilio Call sid placed for this interview
+    phone_call_status = Column(String(30), nullable=True)   # last known Twilio call status (queued/ringing/completed/failed/...)
+    phone_called_at   = Column(DateTime, nullable=True)     # when the click-to-call button was last pressed
+    call_sms_sent_at  = Column(DateTime, nullable=True)      # when a "you'll be called at <time>" SMS was last sent
+
+    # Call recording + transcript — the click-to-call bridge (see
+    # utils/telephony.place_click_to_call's record param) records the
+    # conversation once both legs connect; phone_recording_sid identifies
+    # WHICH Twilio recording belongs to this round once fetched (a call
+    # can technically have more than one recording — e.g. a re-answer —
+    # so this pins down exactly which one phone_transcript came from).
+    # phone_transcript_status mirrors JobLensCandidate.video_analysis_status's
+    # states (Pending/Processing/Completed/Failed), fetched on demand via
+    # a button rather than automatically — see routers/joblens.py's
+    # fetch_phone_transcript.
+    phone_recording_sid    = Column(String(64), nullable=True)
+    phone_transcript       = Column(Text, nullable=True)
+    phone_transcript_status = Column(String(30), nullable=True)
+
     notes            = Column(Text)
     cancellation_reason = Column(Text)
+
+    # When this round was actually COMPLETED — distinct from
+    # scheduled_at (when it was/is due to happen), so a genuinely booked
+    # slot (e.g. via Calendly) isn't overwritten just because the round
+    # later gets marked Completed. Set by the JobLens auto-logging bridge
+    # (_log_joblens_interview) for Resume Screening / Phone Interview /
+    # Video Interview completions.
+    completed_at     = Column(DateTime, nullable=True)
+
+    # Precise send timestamps — see db/migrate_fix.py's migration
+    # docstring for why these exist separately from updated_at.
+    calendly_link_sent_at = Column(DateTime, nullable=True)  # Phone Interview's Send Calendly Link
+    video_invite_sent_at  = Column(DateTime, nullable=True)  # Video Interview's Send Interview Invite / Candidate Contact
+
+    # Links a Panel Interview round to a reusable Panel Setup (see
+    # InterviewPanel below) — Interview Scheduling's Panel column shows
+    # just this panel's number; clicking it looks up the full member
+    # list. Only meaningful when interview_type == "Panel Interview";
+    # left null for rounds that still use the old ad-hoc interviewers
+    # list directly instead of a saved panel.
+    panel_id = Column(Integer, ForeignKey("tiq_interview_panels.id"), index=True, nullable=True)
 
     created_at       = Column(DateTime, default=datetime.utcnow)
     updated_at       = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -267,3 +315,56 @@ class InterviewFeedbackLink(Base):
     created_at       = Column(DateTime, default=datetime.utcnow)
 
     interview = relationship("Interview", back_populates="feedback_links")
+
+
+class PanelInterviewer(Base):
+    """A directory/roster of external and internal subject-matter experts
+    who sit on Panel Interview rounds — separate from Interview.interviewers
+    (a per-round JSON snapshot of whoever was assigned to THAT round) so
+    the same person's contact details/expertise are entered once and
+    reused across every panel they sit on, instead of being re-typed
+    fresh each time a round is scheduled. Their actual assignment
+    history (which roles, when, feedback/decision links) is DERIVED at
+    read time by matching InterviewFeedbackLink.interviewer_email against
+    this row's email — see capabilities/interview/router.py's
+    list_panel_interviewers — rather than duplicated here, so it can
+    never drift out of sync with the real Interview/feedback-link data."""
+    __tablename__ = "tiq_panel_interviewers"
+
+    id                = Column(Integer, primary_key=True, index=True)
+    organisation_id   = Column(Integer, ForeignKey("tiq_organisations.id"), index=True, nullable=False)
+    name              = Column(String(200), nullable=False)
+    expertise_area    = Column(String(300))
+    company           = Column(String(300))
+    phone             = Column(String(50))
+    email             = Column(String(200), index=True)
+    notes             = Column(Text)
+    created_at        = Column(DateTime, default=datetime.utcnow)
+    updated_at        = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class InterviewPanel(Base):
+    """A named/numbered PANEL SETUP — a group of one or more
+    PanelInterviewer people convened together for a given role at a
+    given company, created once and then referenced (via Interview.panel_id
+    below) by every Panel Interview round that uses that same group of
+    people, instead of re-picking the same interviewers one at a time on
+    every round. Interview Scheduling's Panel column shows just this
+    panel's NUMBER; clicking it looks up the full member list from here.
+
+    interviewer_ids is a JSON array of PanelInterviewer.id values — same
+    "JSON list of light references" pattern Interview.interviewers
+    already uses for its own ad-hoc per-round snapshot, chosen here for
+    consistency rather than a separate join table for what's still a
+    small, rarely-changing list per panel."""
+    __tablename__ = "tiq_interview_panels"
+
+    id                = Column(Integer, primary_key=True, index=True)
+    organisation_id   = Column(Integer, ForeignKey("tiq_organisations.id"), index=True, nullable=False)
+    sequence_number   = Column(Integer, nullable=False)  # the "Panel Number" shown everywhere
+    role_for          = Column(String(300))
+    company           = Column(String(300))
+    interviewer_ids   = Column(JSON, default=list)
+    setup_date        = Column(DateTime, nullable=True)
+    created_at        = Column(DateTime, default=datetime.utcnow)
+    updated_at        = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

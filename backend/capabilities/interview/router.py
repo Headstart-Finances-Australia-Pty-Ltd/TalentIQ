@@ -7,6 +7,7 @@ registered as: /api/public/interviews/*
 """
 from datetime import datetime
 from typing import List, Optional
+import os
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -14,16 +15,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, delete as sa_delete
 
 from db.database import get_db
-from models.models import User
+from models.models import User, UserAPIKey
 from utils.auth_utils import get_current_user
 from utils.email_send import get_smtp_config, send_email
+from utils.credentials import get_all_credentials
 from capabilities.acquisition import service as acquisition_service
 from capabilities.acquisition.models import Candidate, Application
 from capabilities.requisition.models import Requisition
 from capabilities.communication import service as service_communication
 
 from .models import (
-    Interview, InterviewScorecard, InterviewFeedbackLink,
+    Interview, InterviewScorecard, InterviewFeedbackLink, PanelInterviewer, InterviewPanel,
     INTERVIEW_STATUSES, INTERVIEW_TYPES, SELF_SCHEDULABLE_TYPES,
     DECISION_STATUSES,
 )
@@ -113,6 +115,12 @@ def _fmt_interview(
         "proposed_slots": i.proposed_slots or [],
         "candidate_selected_at": i.candidate_selected_at.isoformat() if i.candidate_selected_at else None,
         "calendly_scheduling_url": i.calendly_scheduling_url or "",
+        "calendly_link_sent_at": i.calendly_link_sent_at.isoformat() if i.calendly_link_sent_at else None,
+        "video_invite_sent_at": i.video_invite_sent_at.isoformat() if i.video_invite_sent_at else None,
+        # Telephony (click-to-call + SMS scheduling — see utils/telephony.py)
+        "phone_call_status": i.phone_call_status or "",
+        "phone_called_at": i.phone_called_at.isoformat() if i.phone_called_at else None,
+        "call_sms_sent_at": i.call_sms_sent_at.isoformat() if i.call_sms_sent_at else None,
         "notes": i.notes or "",
         "artifacts": i.artifacts or [],
         "cancellation_reason": i.cancellation_reason or "",
@@ -130,6 +138,12 @@ def _fmt_interview(
         "approved_by": i.approved_by or "",
         "cancelled_at": i.cancelled_at.isoformat() if i.cancelled_at else None,
         "cancelled_by": i.cancelled_by or "",
+        # When this round was actually COMPLETED — see the column's
+        # docstring in models.py. Was added to the DB a few rounds ago
+        # but never actually surfaced here, so nothing calling this
+        # endpoint could ever see it despite the column being populated.
+        "completed_at": i.completed_at.isoformat() if i.completed_at else None,
+        "panel_id": i.panel_id,
         "scorecard_count": len(scorecards) if scorecards is not None else None,
         "scorecards": scorecards,
         "feedback_links": (
@@ -202,6 +216,15 @@ async def create_interview(
 
     status = "Scheduled" if payload.scheduled_at else ("Requested" if payload.proposed_slots else "Requested")
     interviewers = [i.dict() for i in payload.interviewers]
+    # If a Panel Setup was picked, populate the interviewers snapshot
+    # from its members automatically — the recruiter shouldn't have to
+    # both pick a panel AND separately re-type the same people into the
+    # interviewers list by hand.
+    if payload.panel_id and not interviewers:
+        panel = (await db.execute(select(InterviewPanel).where(InterviewPanel.id == payload.panel_id, InterviewPanel.organisation_id == org.id))).scalar_one_or_none()
+        if panel and panel.interviewer_ids:
+            people = (await db.execute(select(PanelInterviewer).where(PanelInterviewer.id.in_(panel.interviewer_ids)))).scalars().all()
+            interviewers = [{"name": p.name, "email": p.email or ""} for p in people]
     interview = Interview(
         organisation_id=org.id, owner_user_id=current_user.id,
         sequence_number=await service.get_next_sequence(db, org.id),
@@ -218,6 +241,7 @@ async def create_interview(
         artifacts=[a.dict() for a in payload.artifacts],
         approver_name=payload.approver_name.strip(), approver_email=payload.approver_email.strip(),
         approver_user_id=payload.approver_user_id,
+        panel_id=payload.panel_id,
     )
     if interview.approver_name or interview.approver_email or interview.approver_user_id:
         interview.approval_token = service.generate_token()
@@ -293,10 +317,38 @@ async def list_interviews(
     else:
         joblens_candidate_names = {}
 
-    requisition_titles = {}
+    requisition_meta = {}
     if requisition_ids:
-        res = await db.execute(select(Requisition.id, Requisition.title).where(Requisition.id.in_(requisition_ids)))
-        requisition_titles = dict(res.all())
+        from models.models import Client
+        res = await db.execute(
+            select(Requisition.id, Requisition.title, Requisition.sequence_number, Client.name)
+            .outerjoin(Client, Requisition.client_id == Client.id)
+            .where(Requisition.id.in_(requisition_ids))
+        )
+        for rid, title, seq, client_name in res.all():
+            requisition_meta[rid] = {"title": title, "number": seq, "company": client_name or ""}
+
+    # JobLens-originated rows never get a real requisition_id (JobLens
+    # doesn't necessarily go through the Requisition/Application system
+    # at all — a CandidateLens session can exist as a standalone JD
+    # paste) — so requisition_title always showed as blank/"—" for every
+    # one of them, even though the session it came from always has a
+    # role name. Surfacing that instead so "Isabela — Accountant" reads
+    # the same way a Talent-Pool candidate's requisition title would.
+    # Same idea as requisition_meta above, but keyed by joblens_candidate_id
+    # and using the session's own JD role/company since there's no real
+    # Requisition row to join against for a standalone CandidateLens
+    # session (see comment above).
+    joblens_meta = {}
+    if joblens_candidate_ids:
+        from models.models import JobLensCandidate, JobLensSession
+        res = await db.execute(
+            select(JobLensCandidate.id, JobLensSession.jd_role, JobLensSession.jd_company)
+            .join(JobLensSession, JobLensCandidate.session_id == JobLensSession.id)
+            .where(JobLensCandidate.id.in_(joblens_candidate_ids))
+        )
+        for cid, role, company in res.all():
+            joblens_meta[cid] = {"role": role or "Untitled role", "company": company or ""}
 
     scorecard_counts = {}
     if interview_ids:
@@ -307,14 +359,232 @@ async def list_interviews(
         )
         scorecard_counts = dict(res.all())
 
+    # Feedback links (panel-member tokenized links, see
+    # InterviewFeedbackLink's docstring) — grouped by interview_id so
+    # Interview Scheduling's Panel Interview column can show a real,
+    # clickable link (or several) instead of nothing, without the
+    # frontend having to make a separate per-row request for something
+    # already cheap to fetch in one batch here.
+    feedback_links_by_interview: dict = {}
+    if interview_ids:
+        res = await db.execute(
+            select(InterviewFeedbackLink).where(InterviewFeedbackLink.interview_id.in_(interview_ids))
+        )
+        for link in res.scalars().all():
+            feedback_links_by_interview.setdefault(link.interview_id, []).append(
+                {"interviewer_name": link.interviewer_name, "url_path": f"/interview-feedback/{link.token}"}
+            )
+
+    panel_ids = {i.panel_id for i in rows if i.panel_id}
+    panel_numbers = {}
+    if panel_ids:
+        pres = await db.execute(select(InterviewPanel.id, InterviewPanel.sequence_number).where(InterviewPanel.id.in_(panel_ids)))
+        panel_numbers = dict(pres.all())
+
     out = []
     for i in rows:
         name = candidate_names.get(i.candidate_id, "") if i.candidate_id else joblens_candidate_names.get(i.joblens_candidate_id, "")
-        d = _fmt_interview(i, name, requisition_titles.get(i.requisition_id, "") if i.requisition_id else "")
+        if i.requisition_id:
+            meta = requisition_meta.get(i.requisition_id, {})
+            req_number, req_role, req_company = meta.get("number"), meta.get("title", ""), meta.get("company", "")
+        else:
+            meta = joblens_meta.get(i.joblens_candidate_id, {})
+            req_number, req_role, req_company = None, meta.get("role", ""), meta.get("company", "")
+        d = _fmt_interview(i, name, req_role)
+        d["requisition_number"] = req_number
+        d["requisition_role"] = req_role
+        d["company"] = req_company
+        d["panel_number"] = panel_numbers.get(i.panel_id) if i.panel_id else None
         d["scorecard_count"] = scorecard_counts.get(i.id, 0)
+        d["feedback_links_summary"] = feedback_links_by_interview.get(i.id, [])
         d.pop("scorecards", None)
         out.append(d)
     return out
+
+
+class PanelInterviewerCreate(BaseModel):
+    name: str
+    expertise_area: str = ""
+    company: str = ""
+    phone: str = ""
+    email: str = ""
+    notes: str = ""
+
+
+def _fmt_panel_interviewer(p: PanelInterviewer, assignments: Optional[List[dict]] = None) -> dict:
+    return {
+        "id": p.id,
+        "name": p.name,
+        "expertise_area": p.expertise_area or "",
+        "company": p.company or "",
+        "phone": p.phone or "",
+        "email": p.email or "",
+        "notes": p.notes or "",
+        "assignments": assignments if assignments is not None else [],
+        "created_at": p.created_at.isoformat() if p.created_at else None,
+        "updated_at": p.updated_at.isoformat() if p.updated_at else None,
+    }
+
+
+class InterviewPanelCreate(BaseModel):
+    role_for: str = ""
+    company: str = ""
+    interviewer_ids: List[int] = []
+    setup_date: Optional[str] = None  # ISO date/datetime, optional
+
+
+async def _fmt_interview_panel(db: AsyncSession, p: InterviewPanel, people_by_id: Optional[dict] = None) -> dict:
+    if people_by_id is None:
+        rows = (await db.execute(select(PanelInterviewer).where(PanelInterviewer.id.in_(p.interviewer_ids or [])))).scalars().all()
+        people_by_id = {x.id: x for x in rows}
+    members = [
+        {"id": pid, "name": people_by_id[pid].name, "expertise_area": people_by_id[pid].expertise_area or "",
+         "company": people_by_id[pid].company or "", "phone": people_by_id[pid].phone or "", "email": people_by_id[pid].email or ""}
+        for pid in (p.interviewer_ids or []) if pid in people_by_id
+    ]
+    return {
+        "id": p.id,
+        "panel_number": p.sequence_number,
+        "role_for": p.role_for or "",
+        "company": p.company or "",
+        "interviewer_ids": p.interviewer_ids or [],
+        "members": members,
+        "setup_date": p.setup_date.isoformat() if p.setup_date else None,
+        "created_at": p.created_at.isoformat() if p.created_at else None,
+    }
+
+
+@router.get("/panels")
+async def list_interview_panels(current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    org = await _org(db, current_user)
+    panels = (await db.execute(
+        select(InterviewPanel).where(InterviewPanel.organisation_id == org.id).order_by(InterviewPanel.sequence_number.desc())
+    )).scalars().all()
+    if not panels:
+        return []
+    all_ids = {pid for p in panels for pid in (p.interviewer_ids or [])}
+    people = (await db.execute(select(PanelInterviewer).where(PanelInterviewer.id.in_(all_ids)))).scalars().all() if all_ids else []
+    people_by_id = {x.id: x for x in people}
+    return [await _fmt_interview_panel(db, p, people_by_id) for p in panels]
+
+
+@router.get("/panels/{panel_id}")
+async def get_interview_panel(panel_id: int, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """Used by Interview Scheduling's Panel column — clicking a panel
+    number fetches this to show the full member list in a popup."""
+    org = await _org(db, current_user)
+    p = (await db.execute(select(InterviewPanel).where(InterviewPanel.id == panel_id, InterviewPanel.organisation_id == org.id))).scalar_one_or_none()
+    if not p:
+        raise HTTPException(404, "Panel not found")
+    return await _fmt_interview_panel(db, p)
+
+
+@router.post("/panels")
+async def create_interview_panel(payload: InterviewPanelCreate, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    org = await _org(db, current_user)
+    seq = (await db.execute(select(func.max(InterviewPanel.sequence_number)).where(InterviewPanel.organisation_id == org.id))).scalar() or 0
+    setup_date = datetime.fromisoformat(payload.setup_date) if payload.setup_date else None
+    p = InterviewPanel(
+        organisation_id=org.id, sequence_number=seq + 1, role_for=payload.role_for,
+        company=payload.company, interviewer_ids=payload.interviewer_ids, setup_date=setup_date,
+    )
+    db.add(p)
+    await db.flush()
+    await db.commit()
+    return await _fmt_interview_panel(db, p)
+
+
+@router.put("/panels/{panel_id}")
+async def update_interview_panel(panel_id: int, payload: InterviewPanelCreate, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    org = await _org(db, current_user)
+    p = (await db.execute(select(InterviewPanel).where(InterviewPanel.id == panel_id, InterviewPanel.organisation_id == org.id))).scalar_one_or_none()
+    if not p:
+        raise HTTPException(404, "Panel not found")
+    p.role_for = payload.role_for
+    p.company = payload.company
+    p.interviewer_ids = payload.interviewer_ids
+    p.setup_date = datetime.fromisoformat(payload.setup_date) if payload.setup_date else None
+    p.updated_at = datetime.utcnow()
+    await db.commit()
+    return await _fmt_interview_panel(db, p)
+
+
+@router.delete("/panels/{panel_id}")
+async def delete_interview_panel(panel_id: int, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    org = await _org(db, current_user)
+    p = (await db.execute(select(InterviewPanel).where(InterviewPanel.id == panel_id, InterviewPanel.organisation_id == org.id))).scalar_one_or_none()
+    if not p:
+        raise HTTPException(404, "Panel not found")
+    # Detach any interviews still pointing at it rather than blocking the
+    # delete — a removed panel setup shouldn't make past interview rows
+    # un-deletable/un-editable.
+    await db.execute(Interview.__table__.update().where(Interview.panel_id == panel_id).values(panel_id=None))
+    await db.delete(p)
+    await db.commit()
+    return {"deleted": True}
+
+
+@router.get("/panel-interviewers")
+async def list_panel_interviewers(current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """Directory of panel experts + their DERIVED "Assignment" column —
+    every Interview Panel setup (see InterviewPanel) whose interviewer_ids
+    includes this person, i.e. which numbered panels + roles they've
+    actually been put on. Derived rather than stored so it can never
+    drift out of sync with the real panel data — a person's roster entry
+    (name, expertise, contact info) is the only thing actually owned here."""
+    org = await _org(db, current_user)
+    people = (await db.execute(
+        select(PanelInterviewer).where(PanelInterviewer.organisation_id == org.id).order_by(PanelInterviewer.name)
+    )).scalars().all()
+    if not people:
+        return []
+
+    panels = (await db.execute(select(InterviewPanel).where(InterviewPanel.organisation_id == org.id))).scalars().all()
+    assignments_by_person: dict = {}
+    for panel in panels:
+        for pid in (panel.interviewer_ids or []):
+            assignments_by_person.setdefault(pid, []).append({
+                "panel_id": panel.id, "panel_number": panel.sequence_number, "role_for": panel.role_for or "",
+            })
+
+    return [
+        _fmt_panel_interviewer(p, assignments_by_person.get(p.id, []))
+        for p in people
+    ]
+
+
+@router.post("/panel-interviewers")
+async def create_panel_interviewer(payload: PanelInterviewerCreate, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    org = await _org(db, current_user)
+    p = PanelInterviewer(organisation_id=org.id, **payload.dict())
+    db.add(p)
+    await db.flush()
+    await db.commit()
+    return _fmt_panel_interviewer(p)
+
+
+@router.put("/panel-interviewers/{interviewer_id}")
+async def update_panel_interviewer(interviewer_id: int, payload: PanelInterviewerCreate, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    org = await _org(db, current_user)
+    p = (await db.execute(select(PanelInterviewer).where(PanelInterviewer.id == interviewer_id, PanelInterviewer.organisation_id == org.id))).scalar_one_or_none()
+    if not p:
+        raise HTTPException(404, "Panel interviewer not found")
+    for k, v in payload.dict().items():
+        setattr(p, k, v)
+    p.updated_at = datetime.utcnow()
+    await db.commit()
+    return _fmt_panel_interviewer(p)
+
+
+@router.delete("/panel-interviewers/{interviewer_id}")
+async def delete_panel_interviewer(interviewer_id: int, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    org = await _org(db, current_user)
+    p = (await db.execute(select(PanelInterviewer).where(PanelInterviewer.id == interviewer_id, PanelInterviewer.organisation_id == org.id))).scalar_one_or_none()
+    if not p:
+        raise HTTPException(404, "Panel interviewer not found")
+    await db.delete(p)
+    await db.commit()
+    return {"deleted": True}
 
 
 @router.get("/interviews/{interview_id}")
@@ -424,6 +694,14 @@ async def update_interview(
     if "artifacts" in data and data["artifacts"] is not None:
         data["artifacts"] = [x if isinstance(x, dict) else x.dict() for x in data["artifacts"]]
     new_interviewers = data.get("interviewers")
+    # Same auto-populate as create_interview: picking a panel without
+    # separately retyping the same people into the interviewers list.
+    if "panel_id" in data and data["panel_id"] and new_interviewers is None:
+        panel = (await db.execute(select(InterviewPanel).where(InterviewPanel.id == data["panel_id"], InterviewPanel.organisation_id == org.id))).scalar_one_or_none()
+        if panel and panel.interviewer_ids:
+            people = (await db.execute(select(PanelInterviewer).where(PanelInterviewer.id.in_(panel.interviewer_ids)))).scalars().all()
+            new_interviewers = [{"name": p.name, "email": p.email or ""} for p in people]
+            data["interviewers"] = new_interviewers
     for field, value in data.items():
         setattr(i, field, value)
     if payload.scheduled_at and i.status == "Requested":
@@ -565,6 +843,90 @@ async def calendly_event_types(current_user: User = Depends(get_current_user), d
     return await service.fetch_calendly_event_types(creds["api_key"])
 
 
+# ── Calendly webhook — automatic booking sync ────────────────────────────
+# The docstring on Interview.calendly_scheduling_url used to say this
+# wasn't wired up ("requires a publicly reachable URL + signing secret
+# configured in the recruiter's own Calendly account, which this app
+# can't set up on their behalf"). It can, in fact, be set up on their
+# behalf — Calendly's API creates the subscription directly given their
+# own Personal Access Token, no manual dashboard step needed. Requires
+# this deployment's PUBLIC_BASE_URL env var to be set (same requirement
+# NavTalk's webhook has) since Calendly needs a real, internet-reachable
+# URL to POST to — this only works once the app is actually deployed
+# somewhere reachable, not on a bare localhost dev server.
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "")
+
+
+async def _upsert_calendly_key(db: AsyncSession, user_id: int, key_name: str, value: str) -> None:
+    existing = (await db.execute(
+        select(UserAPIKey).where(UserAPIKey.user_id == user_id, UserAPIKey.service == "calendly", UserAPIKey.key_name == key_name)
+    )).scalar_one_or_none()
+    if existing:
+        existing.key_value = value
+    else:
+        db.add(UserAPIKey(user_id=user_id, service="calendly", key_name=key_name, key_value=value, is_global=False))
+
+
+@router.get("/calendly/webhook-status")
+async def calendly_webhook_status(current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    creds = await service.get_all_credentials(db, current_user.id, "calendly")
+    return {
+        "connected": bool(creds.get("webhook_subscription_uri")),
+        "public_base_url_configured": bool(PUBLIC_BASE_URL),
+    }
+
+
+@router.post("/calendly/connect-webhook")
+async def connect_calendly_webhook(current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """Registers a Calendly webhook subscription pointed at THIS
+    deployment, so that from now on, any slot a candidate books through
+    one of this recruiter's Calendly links automatically flips the
+    matching Interview Scheduling row to Scheduled with the real booked
+    time — see public_router.calendly_webhook for the receiving side."""
+    if not PUBLIC_BASE_URL:
+        raise HTTPException(400, "This server has no PUBLIC_BASE_URL configured, so Calendly has no reachable webhook URL to call back to. Set the PUBLIC_BASE_URL environment variable to your deployed backend's public origin first.")
+    creds = await service.get_calendly_credentials(db, current_user.id)
+    if not creds["api_key"]:
+        raise HTTPException(400, "Save your Calendly Personal Access Token under Settings -> API Keys -> Calendly first — the webhook subscription is created using it.")
+
+    # Tear down any existing subscription for this user first, so
+    # reconnecting (e.g. after rotating the PAT) doesn't leave an orphaned
+    # duplicate still POSTing to the same URL from the old Calendly account.
+    existing_uri = (await service.get_all_credentials(db, current_user.id, "calendly")).get("webhook_subscription_uri")
+    if existing_uri:
+        try:
+            await service.delete_calendly_webhook_subscription(creds["api_key"], existing_uri)
+        except Exception:
+            pass  # best-effort — proceed to create the new one regardless
+
+    webhook_url = f"{PUBLIC_BASE_URL}/api/public/interviews/calendly-webhook?uid={current_user.id}"
+    result = await service.create_calendly_webhook_subscription(creds["api_key"], webhook_url)
+
+    await _upsert_calendly_key(db, current_user.id, "webhook_subscription_uri", result["subscription_uri"])
+    await _upsert_calendly_key(db, current_user.id, "webhook_signing_key", result["signing_key"])
+    await db.commit()
+    return {"connected": True, "webhook_url": webhook_url}
+
+
+@router.post("/calendly/disconnect-webhook")
+async def disconnect_calendly_webhook(current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    creds = await service.get_calendly_credentials(db, current_user.id)
+    existing_uri = (await service.get_all_credentials(db, current_user.id, "calendly")).get("webhook_subscription_uri")
+    if existing_uri and creds["api_key"]:
+        try:
+            await service.delete_calendly_webhook_subscription(creds["api_key"], existing_uri)
+        except Exception:
+            pass
+    await db.execute(
+        UserAPIKey.__table__.delete().where(
+            UserAPIKey.user_id == current_user.id, UserAPIKey.service == "calendly",
+            UserAPIKey.key_name.in_(["webhook_subscription_uri", "webhook_signing_key"]),
+        )
+    )
+    await db.commit()
+    return {"connected": False}
+
+
 @router.post("/interviews/{interview_id}/calendly-link")
 async def create_calendly_link(
     interview_id: int, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
@@ -659,6 +1021,115 @@ async def email_calendly_link(
     i.updated_at = datetime.utcnow()
     await db.commit()
     return {"sent": True, "calendly_scheduling_url": booking_url}
+
+
+# ── TELEPHONY (click-to-call + SMS scheduling — see utils/telephony.py) ──
+# Same "only Phone Interview is self-schedulable" rule as Calendly/self-
+# schedule-link above is deliberately NOT enforced here: a recruiter may
+# reasonably want to click-to-call or text a heads-up for a Video/Panel
+# round too, and neither action hands scheduling control to the
+# candidate the way a public self-schedule link would.
+
+async def _candidate_phone(db: AsyncSession, i: Interview) -> str:
+    if i.candidate_id:
+        c = (await db.execute(select(Candidate).where(Candidate.id == i.candidate_id))).scalar_one_or_none()
+        return (c.phone or "") if c else ""
+    if i.joblens_candidate_id:
+        from models.models import JobLensCandidate
+        jc = (await db.execute(select(JobLensCandidate).where(JobLensCandidate.id == i.joblens_candidate_id))).scalar_one_or_none()
+        return (jc.phone or "") if jc else ""
+    return ""
+
+
+@router.get("/telephony/status")
+async def telephony_status(current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """Lets the frontend decide whether to show the Call/Text-Schedule
+    actions at all, without exposing the credentials themselves."""
+    from utils.telephony import get_telephony_config, is_configured
+    config = await get_telephony_config(db, current_user.id)
+    return {"configured": is_configured(config), "caller_number": config["caller_number"]}
+
+
+@router.post("/interviews/{interview_id}/call")
+async def call_candidate(
+    interview_id: int, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    """Click-to-call: bridges the recruiter's own configured caller
+    number to this interview's candidate — see
+    utils.telephony.place_click_to_call for the two-leg flow. Returns
+    enough for the frontend's popup to show what's happening (who's
+    being called, from what number) while Twilio connects the call."""
+    from utils.telephony import get_telephony_config, place_click_to_call
+
+    org = await _org(db, current_user)
+    i = (await db.execute(select(Interview).where(Interview.id == interview_id, Interview.organisation_id == org.id))).scalar_one_or_none()
+    if not i:
+        raise HTTPException(404, "Interview not found")
+
+    candidate_phone = await _candidate_phone(db, i)
+    config = await get_telephony_config(db, current_user.id)
+    result = await place_click_to_call(config, candidate_phone)
+
+    i.phone_call_sid = result["sid"]
+    i.phone_call_status = result["status"]
+    i.phone_called_at = datetime.utcnow()
+    i.updated_at = datetime.utcnow()
+    await db.commit()
+    return {
+        "call_sid": result["sid"], "status": result["status"],
+        "caller_number": result["from"], "candidate_number": result["to"],
+    }
+
+
+class SendScheduleSmsRequest(BaseModel):
+    scheduled_at: str    # ISO datetime — when the candidate will be called
+    message: str = ""    # defaults to a standard "you'll be called at <time>" text if blank
+
+
+@router.post("/interviews/{interview_id}/sms-schedule")
+async def sms_schedule_call(
+    interview_id: int, payload: SendScheduleSmsRequest,
+    current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    """Texts the candidate the time they'll be called, and — this is
+    what actually puts it "on the calendar and in the table" per the
+    recruiter's own request — sets this Interview's scheduled_at/status
+    to match, the same fields Interview Scheduling's calendar/table
+    already read from for every other round. An interviewer can also
+    reach the same end state via Calendly (candidate self-schedules,
+    see create_calendly_link above) or a direct self-schedule link
+    (create_self_schedule_link) — this is the third path: the
+    interviewer picks the time themselves and just notifies the
+    candidate by text."""
+    from utils.telephony import get_telephony_config, send_sms
+
+    org = await _org(db, current_user)
+    i = (await db.execute(select(Interview).where(Interview.id == interview_id, Interview.organisation_id == org.id))).scalar_one_or_none()
+    if not i:
+        raise HTTPException(404, "Interview not found")
+
+    try:
+        scheduled_dt = datetime.fromisoformat(payload.scheduled_at.replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(400, "scheduled_at must be a valid ISO datetime string.")
+
+    candidate_phone = await _candidate_phone(db, i)
+    candidate_name = await _candidate_name(db, i.candidate_id, i.joblens_candidate_id)
+    when_display = scheduled_dt.strftime("%A, %B %d at %I:%M %p").replace(" 0", " ")
+    body = payload.message.strip() or (
+        f"Hi {candidate_name or 'there'}, this is a heads-up that we'll be calling you for your "
+        f"phone interview on {when_display}. Talk soon!"
+    )
+
+    config = await get_telephony_config(db, current_user.id)
+    await send_sms(config, candidate_phone, body)
+
+    i.scheduled_at = scheduled_dt
+    i.status = "Scheduled"
+    i.call_sms_sent_at = datetime.utcnow()
+    i.updated_at = datetime.utcnow()
+    await db.commit()
+    return {"sent": True, "scheduled_at": i.scheduled_at.isoformat(), "status": i.status}
 
 
 # ══════════════════════════════════════════════════════════════════════════

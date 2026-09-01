@@ -38,6 +38,10 @@ class InterviewCreate(BaseModel):
     approver_name: str = ""
     approver_email: str = ""
     approver_user_id: Optional[int] = None
+    # Links this round to a reusable Panel Setup (see
+    # capabilities/interview/models.py's InterviewPanel) — only
+    # meaningful when interview_type == "Panel Interview".
+    panel_id: Optional[int] = None
 
 
 class InterviewUpdate(BaseModel):
@@ -55,6 +59,7 @@ class InterviewUpdate(BaseModel):
     approver_name: Optional[str] = None
     approver_email: Optional[str] = None
     approver_user_id: Optional[int] = None
+    panel_id: Optional[int] = None
 
 
 class InterviewStatusChange(BaseModel):

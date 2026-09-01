@@ -95,7 +95,7 @@ class UserAPIKey(Base):
     is_global  = Column(Boolean, default=False, nullable=False)
     # is_global=True means this credential is a platform-wide fallback,
     # usable by every user — ONLY permitted for services in
-    # utils.credentials.SHAREABLE_SERVICES (groq/ollama/adzuna), and only
+    # utils.credentials.SHAREABLE_SERVICES (groq/ollama/apify), and only
     # settable by an admin. Enforced in routers/auth.py, not just here.
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -418,6 +418,13 @@ class JobLensSession(Base):
     weights        = Column(JSON, default=dict)
     disqualifiers  = Column(JSON, default=dict)  # see utils/scoring.DEFAULT_DISQUALIFIERS
 
+    # Same idea as weights/disqualifiers above, but for auto-deciding
+    # Video Interview's outcome from the AI analysis's three sub-scores
+    # instead of leaving that Decision column entirely manual — see
+    # utils/scoring.DEFAULT_VIDEO_DECISION_WEIGHTS/_THRESHOLDS.
+    video_decision_weights     = Column(JSON, default=dict)
+    video_decision_thresholds  = Column(JSON, default=dict)
+
     user       = relationship("User",             back_populates="joblens_sessions")
     candidates = relationship("JobLensCandidate", back_populates="session", cascade="all, delete-orphan")
 
@@ -689,6 +696,8 @@ class Client(Base):
     name              = Column(String(300), nullable=False)
     address           = Column(String(300))
     abn               = Column(String(50))
+    phone             = Column(String(50))
+    email             = Column(String(200))
     area_of_work      = Column(String(300))
     created_at        = Column(DateTime, default=datetime.utcnow)
     updated_at        = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

@@ -3,6 +3,7 @@ TalentIQ – JobHunt Router
 Endpoints: job search, resume upload, matching, cover letters, export
 """
 
+import asyncio
 import io
 from typing import List
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
@@ -23,7 +24,8 @@ from utils.auth_utils import get_current_user
 from utils.credentials import get_credential, get_groq_model, get_all_credentials, ollama_enabled
 from utils.sequencing import next_sequence_number
 from agents.jobhunt_agent import (
-    scrape_jobs_adzuna, parse_resume_text,
+    scrape_jobs_apify_seek, scrape_jobs_apify_linkedin, scrape_jobs_linkedin,
+    fetch_job_description, estimate_recency_rank, parse_resume_text,
     calculate_match, generate_cover_letter, extract_candidate_profile,
 )
 
@@ -31,7 +33,7 @@ router = APIRouter()
 
 
 async def _get_user_api_key(user_id: int, service: str, key_name: str, db: AsyncSession) -> str | None:
-    # Delegates to the centralized, policy-enforcing lookup — Adzuna and
+    # Delegates to the centralized, policy-enforcing lookup — Apify and
     # Groq (used below) are allowed to fall back to an admin-configured
     # global key; every other service never would.
     return await get_credential(db, user_id, service, key_name)
@@ -138,80 +140,136 @@ async def search_jobs(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # Get user's Adzuna keys (fallback to env defaults)
-    # No hardcoded fallback credentials — Adzuna is a shareable service, so
-    # if the current user hasn't saved their own key, this transparently
-    # falls back to whatever an admin has configured as the platform-wide
-    # global key (see utils/credentials.py). If neither exists, the search
-    # below will simply return Adzuna's own auth-failure error.
-    adzuna_id = await _get_user_api_key(current_user.id, "adzuna", "app_id", db)
-    adzuna_key = await _get_user_api_key(current_user.id, "adzuna", "app_key", db)
+    # Real sources only — LinkedIn's public guest job search needs no
+    # credentials at all; Seek runs through the user's own (or an admin's
+    # shared) Apify actor. "source" picks which to use; "both" (default)
+    # merges them so one source's outage doesn't zero out the search.
+    source = (payload.source or "both").strip().lower()
+    if source not in ("both", "linkedin", "seek"):
+        source = "both"
 
-    # Detect country code for Adzuna from location text
-    location_lower = (payload.location or "").lower()
-    country_code = "au"
-    if any(c in location_lower for c in ["usa", "united states", "new york", "california", "texas"]):
-        country_code = "us"
-    elif any(c in location_lower for c in ["uk", "united kingdom", "london", "manchester"]):
-        country_code = "gb"
-    elif any(c in location_lower for c in ["canada", "toronto", "vancouver"]):
-        country_code = "ca"
-    elif any(c in location_lower for c in ["india", "bangalore", "mumbai", "delhi"]):
-        country_code = "in"
-    elif "singapore" in location_lower:
-        country_code = "sg"
-    elif any(c in location_lower for c in ["new zealand", "auckland", "wellington"]):
-        country_code = "nz"
+    raw_jobs: list = []
+    source_errors: list[str] = []
 
-    raw_jobs = scrape_jobs_adzuna(
-        role=payload.role,
-        location=payload.location,
-        job_type=payload.job_type or "All",
-        salary_min=payload.salary_min,
-        salary_max=payload.salary_max,
-        adzuna_app_id=adzuna_id,
-        adzuna_app_key=adzuna_key,
-        country=country_code,
-    )
+    # Shared Apify credentials — used to upgrade LinkedIn to Apify's richer
+    # actor below AND for Seek (which has no non-Apify path at all).
+    apify_token = await _get_user_api_key(current_user.id, "apify", "api_token", db)
+    apify_actor_id = await _get_user_api_key(current_user.id, "apify", "actor_id", db)
 
-    adzuna_error = None
-    # If Adzuna failed or returned error dict, use simulation fallback
-    if not raw_jobs or (len(raw_jobs) == 1 and "error" in raw_jobs[0]):
-        adzuna_error = raw_jobs[0].get("error", "No results from Adzuna for this search.") if raw_jobs else "No results"
-        # Fall back to simulated jobs so the user gets data
-        from agents.jobintel_simulator import simulate_jobs
-        location = payload.location or "Australia"
-        # Detect country from location
-        country = "Australia"
-        for c in ["USA", "UK", "India", "Canada", "Singapore"]:
-            if c.lower() in location.lower():
-                country = c
-                break
-        sim_jobs = simulate_jobs(country=country, domain=payload.industry or "Technology", count=20)
-        # Filter by role keyword
-        role_lower = payload.role.lower()
-        raw_jobs = []
-        for j in sim_jobs:
-            title = (j.get("title") or "").lower()
-            # Include if title matches role keywords or include all if no match
-            if any(w in title for w in role_lower.split()) or len(raw_jobs) < 10:
-                raw_jobs.append({
-                    "title": j["title"],
-                    "company": j["company"],
-                    "location": j["location"],
-                    "job_type": j["job_type"],
-                    "description": f"Key skills: {', '.join(j.get('key_skills', [])[:5])}. "
-                                   f"Experience: {j.get('experience_years')} years. "
-                                   f"Tools: {', '.join(j.get('tools_technologies', [])[:3])}.",
-                    "source": j["source"],
-                    "apply_link": j["source_url"],
-                    "published_date": j["date_posted"],
-                    "source_site": j["source"],
-                    "salary_min": j.get("salary_min"),
-                    "salary_max": j.get("salary_max"),
-                })
-            if len(raw_jobs) >= 20:
-                break
+    max_results = payload.max_results or 25
+    date_posted = (payload.date_posted or "").strip().lower()
+    remote_type = (payload.remote_type or "").strip().lower()
+    experience_level = (payload.experience_level or "").strip().lower()
+    sort_by = (payload.sort_by or "relevance").strip().lower()
+
+    def fetch_linkedin() -> tuple[list, str | None]:
+        """Runs on a worker thread (see asyncio.to_thread below) — these
+        are blocking `requests` calls, and with "both" sources selected
+        we want LinkedIn and Seek in flight at the same time rather than
+        one fully finishing before the other starts, which was the
+        biggest reason searches felt slow."""
+        li_jobs: list = []
+        li_error = None
+        # Automatic upgrade: if the user has Apify configured, prefer the
+        # LinkedIn Jobs Scraper actor — same normalized shape, and (with
+        # detail-page fetching off, see scrape_jobs_apify_linkedin) about
+        # as fast as the free path while adding Apify's proxying/retry
+        # handling in front of it. If it fails for any reason (no Apify
+        # credits, actor unavailable, etc.) we fall back to the free
+        # scraper instead of failing the whole LinkedIn source — a paid
+        # option failing shouldn't be worse than not having it.
+        if apify_token:
+            li_jobs = scrape_jobs_apify_linkedin(
+                role=payload.role, location=payload.location,
+                job_type=payload.job_type or "All",
+                apify_api_token=apify_token, actor_id=None,  # LinkedIn actor is separate from the Seek actor_id override
+                max_results=max_results, date_posted=date_posted,
+                remote_type=remote_type, experience_level=experience_level, sort_by=sort_by,
+            )
+            if li_jobs and len(li_jobs) == 1 and "error" in li_jobs[0]:
+                li_error = li_jobs[0]["error"]
+                li_jobs = []
+        if not li_jobs:
+            fallback_jobs = scrape_jobs_linkedin(
+                role=payload.role, location=payload.location,
+                job_type=payload.job_type or "All",
+                max_results=max_results, date_posted=date_posted,
+                remote_type=remote_type, experience_level=experience_level, sort_by=sort_by,
+            )
+            if fallback_jobs and len(fallback_jobs) == 1 and "error" in fallback_jobs[0]:
+                combined = f"{li_error}; free fallback also failed: {fallback_jobs[0]['error']}" if li_error else fallback_jobs[0]["error"]
+                return [], combined
+            return fallback_jobs, None
+        return li_jobs, None
+
+    def fetch_seek() -> tuple[list, str | None]:
+        seek_jobs = scrape_jobs_apify_seek(
+            role=payload.role,
+            location=payload.location,
+            job_type=payload.job_type or "All",
+            salary_min=payload.salary_min,
+            salary_max=payload.salary_max,
+            apify_api_token=apify_token,
+            actor_id=apify_actor_id,
+            max_results=max_results,
+            date_posted=date_posted,
+        )
+        if seek_jobs and len(seek_jobs) == 1 and "error" in seek_jobs[0]:
+            return [], seek_jobs[0]["error"]
+        return seek_jobs, None
+
+    tasks = []
+    task_labels = []
+    if source in ("both", "linkedin"):
+        tasks.append(asyncio.to_thread(fetch_linkedin))
+        task_labels.append("LinkedIn")
+    if source in ("both", "seek"):
+        tasks.append(asyncio.to_thread(fetch_seek))
+        task_labels.append("Seek")
+
+    results = await asyncio.gather(*tasks)
+    for label, (jobs, error) in zip(task_labels, results):
+        if error:
+            source_errors.append(f"{label}: {error}")
+        else:
+            raw_jobs.extend(jobs)
+
+    # Deduplicate across sources (e.g. the same role could plausibly be
+    # cross-posted) using the same (title, company) key the individual
+    # scrapers already dedupe against internally.
+    seen_keys = set()
+    deduped = []
+    for j in raw_jobs:
+        key = ((j.get("title") or "").lower(), (j.get("company") or "").lower())
+        if key not in seen_keys:
+            seen_keys.add(key)
+            deduped.append(j)
+    raw_jobs = deduped
+
+    # "Most recent" merge-level sort — each source already asks for its
+    # own newest-first order where supported (LinkedIn's sortBy=DD), but
+    # merging two sources needs its own consistent ordering on top. Best
+    # effort: only jobs with a parseable relative/ISO published_date
+    # participate; anything unparseable stays in its original (already
+    # roughly-relevant) position at the end rather than being dropped.
+    # "relevance" (default) and "ats_score" (no match exists yet at
+    # search time) are left in source order — see JobHuntPage.tsx for
+    # the client-side ATS-score sort applied after matching completes.
+    if sort_by == "recent" and raw_jobs:
+        raw_jobs.sort(key=lambda j: estimate_recency_rank(j.get("published_date")))
+
+    # Honest reporting, never fabricated data: if a source failed, say so
+    # and show whatever real results the other source(s) found. Only when
+    # EVERY requested source failed/returned nothing do we tell the user
+    # there's simply nothing to show — no simulated/mock listings are
+    # substituted in either case.
+    notice = None
+    if source_errors and raw_jobs:
+        notice = "Partial results — " + "; ".join(source_errors)
+    elif source_errors and not raw_jobs:
+        notice = "No live results — " + "; ".join(source_errors)
+    elif not raw_jobs:
+        notice = "No jobs found for this search. Try a broader role or location."
 
     # Persist search
     seq_num = await next_sequence_number(db, JobSearch, current_user.id)
@@ -263,10 +321,7 @@ async def search_jobs(
         results_count=search.results_count,
         searched_at=search.searched_at,
         jobs=[JobOut.model_validate(j) for j in job_objs],
-        notice=(
-            f"Live job board unavailable ({adzuna_error}). Showing AI-simulated listings instead."
-            if adzuna_error else None
-        ),
+        notice=notice,
     )
 
 
@@ -323,6 +378,24 @@ async def match_resume(
     from utils.llm_extraction import get_taxonomy_hint
     known_terms = await get_taxonomy_hint(db)
 
+    # Backfill missing descriptions BEFORE matching — LinkedIn search
+    # results come back with an empty description (skipped at search
+    # time purely for speed, see scrape_jobs_apify_linkedin /
+    # scrape_jobs_linkedin). Without any JD text, requirement extraction
+    # has nothing to read and short-circuits straight to the keyword
+    # fallback WITHOUT ever calling Groq — which looks identical to "the
+    # AI call failed" but is really "there was no JD to send it." Fetched
+    # concurrently (off the event loop, since it's a blocking `requests`
+    # call) so this doesn't serialize into one-request-per-job. Seek jobs
+    # already have a description and are skipped here entirely.
+    async def _ensure_description(job: Job) -> None:
+        if not job.description and job.apply_link:
+            desc = await asyncio.to_thread(fetch_job_description, job.apply_link)
+            if desc:
+                job.description = desc
+
+    await asyncio.gather(*(_ensure_description(job) for job in jobs))
+
     # Extract the candidate's profile ONCE for this batch — reused across
     # every job below instead of re-extracting the same resume repeatedly.
     candidate_profile = await extract_candidate_profile(resume.raw_text or "", groq_key, groq_model)
@@ -339,7 +412,7 @@ async def match_resume(
         match_data = await calculate_match(
             resume.raw_text or "", job_dict, groq_key, candidate_profile, groq_model,
             ollama_base_url=ollama_base_url, ollama_model=ollama_model,
-            known_terms_hint=known_terms, db=db,
+            known_terms_hint=known_terms, db=db, user_id=current_user.id,
         )
         match_ai_powered_flags.append(bool(match_data.get("ai_powered")))
         cover = generate_cover_letter(
@@ -367,6 +440,9 @@ async def match_resume(
         from utils.groq_pool import record_key_outcome
         await record_key_outcome(db, key_resolution["pool_id"], success=any(match_ai_powered_flags) if match_ai_powered_flags else False)
 
+    groq_configured = bool(groq_key)
+    ollama_configured = bool(ollama_base_url)
+
     return [
         JobMatchOut(
             id=m.id,
@@ -383,6 +459,8 @@ async def match_resume(
             cover_letter=m.cover_letter,
             apply_link=j.apply_link,
             matched_at=m.matched_at,
+            groq_configured=groq_configured,
+            ollama_configured=ollama_configured,
         )
         for m, j in sorted(match_objs, key=lambda x: x[0].ats_score, reverse=True)
     ]
@@ -399,6 +477,17 @@ async def list_matches(
         .where(JobMatch.user_id == current_user.id)
         .order_by(JobMatch.ats_score.desc()).limit(50)
     )
+    # Best-effort "is AI configured RIGHT NOW" hint for historical matches
+    # too — reflects the CURRENT Settings, not necessarily what was
+    # configured at the time each match ran, but that's the useful
+    # question when a user is looking at a fallback-mode match and
+    # wondering whether fixing Settings now would help going forward.
+    from utils.groq_pool import resolve_groq_key
+    key_resolution = await resolve_groq_key(db, current_user.id)
+    groq_configured = bool(key_resolution["groq_key"])
+    ollama_creds = await get_all_credentials(db, current_user.id, "ollama") if ollama_enabled() else {}
+    ollama_configured = bool(ollama_creds.get("base_url"))
+
     return [
         JobMatchOut(
             id=m.id, job_id=m.job_id,
@@ -408,6 +497,8 @@ async def list_matches(
             summary=m.summary, strengths_breakdown=m.strengths_breakdown,
             jd_requirements=m.jd_requirements, cover_letter=m.cover_letter,
             apply_link=j.apply_link, matched_at=m.matched_at,
+            groq_configured=groq_configured,
+            ollama_configured=ollama_configured,
         )
         for m, j in result.all()
     ]

@@ -631,6 +631,291 @@ MIGRATIONS = [
     # bootstrap_secret_key), self-generated on first run, database-backed
     # rather than requiring a .env entry.
     "CREATE TABLE IF NOT EXISTS tiq_system_config (config_key VARCHAR(100) PRIMARY KEY, config_value TEXT NOT NULL)",
+
+    # Interview: telephony (click-to-call + SMS scheduling) action log —
+    # see Interview model docstring / utils/telephony.py.
+    "ALTER TABLE tiq_interviews ADD COLUMN IF NOT EXISTS phone_call_sid VARCHAR(64)",
+    "ALTER TABLE tiq_interviews ADD COLUMN IF NOT EXISTS phone_call_status VARCHAR(30)",
+    "ALTER TABLE tiq_interviews ADD COLUMN IF NOT EXISTS phone_called_at TIMESTAMP",
+    "ALTER TABLE tiq_interviews ADD COLUMN IF NOT EXISTS call_sms_sent_at TIMESTAMP",
+
+    # Interview: when a round was actually COMPLETED — distinct from
+    # scheduled_at (when it was/is due to happen). Needed so Resume
+    # Screening / Phone Interview / Video Interview completions can be
+    # auto-logged into Interview Scheduling with their own real
+    # completion date, without clobbering a genuinely booked
+    # scheduled_at (e.g. from a Calendly booking) that may already be on
+    # the same row. See routers/joblens.py's _log_joblens_interview.
+    "ALTER TABLE tiq_interviews ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP",
+
+    # Phone Interview call recording + transcript — Twilio click-to-call
+    # (see utils/telephony.py) now records the bridged call and this
+    # stores the result once it's pulled, mirroring how Video Interview
+    # already stores video_transcript on JobLensCandidate. Lives on
+    # Interview (not JobLensCandidate) because the call itself is
+    # already tracked here (phone_call_sid/phone_call_status).
+    "ALTER TABLE tiq_interviews ADD COLUMN IF NOT EXISTS phone_recording_sid VARCHAR(64)",
+    "ALTER TABLE tiq_interviews ADD COLUMN IF NOT EXISTS phone_transcript TEXT",
+    "ALTER TABLE tiq_interviews ADD COLUMN IF NOT EXISTS phone_transcript_status VARCHAR(30)",
+
+    # PipelineStage: dedupe + prevent re-duplication of org-wide DEFAULT
+    # stages (requisition_id IS NULL). ensure_default_stages() does a
+    # plain "count existing, insert if zero" check with no locking — two
+    # near-simultaneous calls (e.g. React StrictMode double-invoking an
+    # effect in dev, or just two browser tabs both loading a requisition
+    # with no custom stages for the first time) can both see zero rows
+    # before either commits, and both insert their own full set of 5
+    # defaults. Over repeated occurrences that's exactly "the same 5
+    # stage names appearing N times" on every board that falls back to
+    # defaults — since ALL requisitions without custom stages share this
+    # one org-wide default set, EVERY such board showed the same
+    # multiplied duplicates, not just one unlucky requisition.
+    #
+    # Step 1: repoint any pipeline entry currently sitting in a duplicate
+    # default stage over to the canonical (lowest id) one with the same
+    # name, so step 2 doesn't leave a dangling/incorrect reference.
+    """
+    UPDATE tiq_pipeline_entries e
+    SET current_stage_id = m.min_id
+    FROM tiq_pipeline_stages dup
+    JOIN (
+        SELECT organisation_id, name, MIN(id) AS min_id
+        FROM tiq_pipeline_stages
+        WHERE requisition_id IS NULL
+        GROUP BY organisation_id, name
+    ) m ON m.organisation_id = dup.organisation_id AND m.name = dup.name
+    WHERE dup.requisition_id IS NULL
+      AND e.current_stage_id = dup.id
+      AND dup.id <> m.min_id
+    """,
+    # Step 2: delete the now-unreferenced duplicate default stages,
+    # keeping the lowest id per (organisation_id, name).
+    """
+    DELETE FROM tiq_pipeline_stages a
+    USING tiq_pipeline_stages b
+    WHERE a.requisition_id IS NULL AND b.requisition_id IS NULL
+      AND a.organisation_id = b.organisation_id
+      AND a.name = b.name
+      AND a.id > b.id
+    """,
+    # Step 3: a partial unique index (only among requisition_id IS NULL
+    # rows — Postgres unique constraints treat NULLs as distinct from
+    # each other, so this can't be a normal 3-column unique constraint;
+    # it has to be a partial index scoped to exactly the rows that need
+    # protecting) makes any FUTURE race fail on the second insert instead
+    # of silently duplicating — see the try/except added around
+    # ensure_default_stages' insert in capabilities/pipeline/service.py.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_pipeline_stages_org_default_name ON tiq_pipeline_stages (organisation_id, name) WHERE requisition_id IS NULL",
+
+    # Precise "when was this actually sent" timestamps — Interview
+    # Scheduling's consolidated per-candidate view needs to show exactly
+    # when a Calendly link went out for Phone Interview, and when a
+    # video-round invite went out, as their OWN dates — not approximated
+    # from updated_at, which changes on every unrelated edit to the same
+    # row (recommendation notes, a status tweak, etc.) and would silently
+    # drift away from the actual send date every time something else
+    # touched that row afterward.
+    "ALTER TABLE tiq_interviews ADD COLUMN IF NOT EXISTS calendly_link_sent_at TIMESTAMP",
+    "ALTER TABLE tiq_interviews ADD COLUMN IF NOT EXISTS video_invite_sent_at TIMESTAMP",
+
+    # Panel Interviewers directory — a real roster of experts (name,
+    # expertise, company, contact info), separate from the plain JSON
+    # snapshot Interview.interviewers has always stored, so a person's
+    # details are entered once and reused. create_all() (see main.py's
+    # startup) also creates this table for a totally fresh DB; this
+    # entry only matters for a DB that already existed before this table
+    # was added to models.py.
+    """
+    CREATE TABLE IF NOT EXISTS tiq_panel_interviewers (
+        id SERIAL PRIMARY KEY,
+        organisation_id INTEGER NOT NULL REFERENCES tiq_organisations(id),
+        name VARCHAR(200) NOT NULL,
+        expertise_area VARCHAR(300),
+        company VARCHAR(300),
+        phone VARCHAR(50),
+        email VARCHAR(200),
+        notes TEXT,
+        created_at TIMESTAMP,
+        updated_at TIMESTAMP
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_panel_interviewers_org ON tiq_panel_interviewers (organisation_id)",
+    "CREATE INDEX IF NOT EXISTS idx_panel_interviewers_email ON tiq_panel_interviewers (email)",
+
+    # Interview Panel Setups — created here (before the tiq_interviews.
+    # panel_id column below) since that column's FK references this table.
+    """
+    CREATE TABLE IF NOT EXISTS tiq_interview_panels (
+        id SERIAL PRIMARY KEY,
+        organisation_id INTEGER NOT NULL REFERENCES tiq_organisations(id),
+        sequence_number INTEGER NOT NULL,
+        role_for VARCHAR(300),
+        company VARCHAR(300),
+        interviewer_ids JSON,
+        setup_date TIMESTAMP,
+        created_at TIMESTAMP,
+        updated_at TIMESTAMP
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_interview_panels_org ON tiq_interview_panels (organisation_id)",
+    "ALTER TABLE tiq_interviews ADD COLUMN IF NOT EXISTS panel_id INTEGER REFERENCES tiq_interview_panels(id)",
+
+    # Video Interview auto-decision settings — same per-session
+    # "reproducible even after defaults change" reasoning as
+    # tiq_joblens_sessions.weights/disqualifiers already has.
+    "ALTER TABLE tiq_joblens_sessions ADD COLUMN IF NOT EXISTS video_decision_weights JSON",
+    "ALTER TABLE tiq_joblens_sessions ADD COLUMN IF NOT EXISTS video_decision_thresholds JSON",
+
+    # Billing — pricing plans + per-user subscriptions (see
+    # models/billing_models.py's module docstring). create_all() (main.py
+    # startup) handles a totally fresh DB via the ORM models directly;
+    # these entries only matter for a DB that already existed before
+    # billing was added.
+    """
+    CREATE TABLE IF NOT EXISTS tiq_pricing_plans (
+        id SERIAL PRIMARY KEY,
+        slug VARCHAR(60) UNIQUE NOT NULL,
+        name VARCHAR(200) NOT NULL,
+        description TEXT,
+        price_monthly_cents INTEGER DEFAULT 0,
+        price_yearly_cents INTEGER DEFAULT 0,
+        badge VARCHAR(50),
+        highlight BOOLEAN DEFAULT FALSE,
+        is_free_demo BOOLEAN DEFAULT FALSE,
+        demo_days INTEGER DEFAULT 14,
+        features JSON,
+        sort_order INTEGER DEFAULT 0,
+        is_active BOOLEAN DEFAULT TRUE,
+        created_at TIMESTAMP,
+        updated_at TIMESTAMP
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS tiq_subscriptions (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER UNIQUE NOT NULL REFERENCES tiq_users(id),
+        plan_slug VARCHAR(60) DEFAULT '',
+        billing_period VARCHAR(10) DEFAULT '',
+        status VARCHAR(20) DEFAULT 'none',
+        start_date TIMESTAMP,
+        end_date TIMESTAMP,
+        amount_paid_cents INTEGER DEFAULT 0,
+        stripe_customer_id VARCHAR(120) DEFAULT '',
+        stripe_checkout_session_id VARCHAR(120) DEFAULT '',
+        notes TEXT DEFAULT '',
+        created_at TIMESTAMP,
+        updated_at TIMESTAMP
+    )
+    """,
+    # Seed sensible defaults ONCE — guarded per-slug (not "table is
+    # empty") so this is safe even if it happens to run again later;
+    # an admin who deletes one of these afterward keeps it deleted
+    # (this migration only ever runs again if the MIGRATIONS list
+    # content changes, not on every restart).
+    """
+    INSERT INTO tiq_pricing_plans (slug, name, description, price_monthly_cents, price_yearly_cents, badge, highlight, is_free_demo, demo_days, features, sort_order, is_active, created_at, updated_at)
+    SELECT 'free_demo', 'Free Demo', 'Avail the full platform for free — no card required.', 0, 0, 'Free', false, true, 14,
+           '["14 days full access", "Resume Screening + Phone/Video Interview", "Up to 25 candidates", "Email support"]'::json,
+           0, true, now(), now()
+    WHERE NOT EXISTS (SELECT 1 FROM tiq_pricing_plans WHERE slug = 'free_demo')
+    """,
+    """
+    INSERT INTO tiq_pricing_plans (slug, name, description, price_monthly_cents, price_yearly_cents, badge, highlight, is_free_demo, demo_days, features, sort_order, is_active, created_at, updated_at)
+    SELECT 'starter', 'Starter', 'For solo recruiters and small agencies getting started with AI screening.', 4900, 49000, '', false, false, 0,
+           '["Unlimited resume screening", "Phone + Video Interview rounds", "Up to 100 active candidates/mo", "Email support"]'::json,
+           1, true, now(), now()
+    WHERE NOT EXISTS (SELECT 1 FROM tiq_pricing_plans WHERE slug = 'starter')
+    """,
+    """
+    INSERT INTO tiq_pricing_plans (slug, name, description, price_monthly_cents, price_yearly_cents, badge, highlight, is_free_demo, demo_days, features, sort_order, is_active, created_at, updated_at)
+    SELECT 'professional', 'Professional', 'For growing teams running full-cycle recruitment end to end.', 14900, 149000, 'Popular', true, false, 0,
+           '["Everything in Starter", "Unlimited active candidates", "Interview Panel + Panel Interviewers directory", "Pipeline, Offers & Onboarding", "Priority support"]'::json,
+           2, true, now(), now()
+    WHERE NOT EXISTS (SELECT 1 FROM tiq_pricing_plans WHERE slug = 'professional')
+    """,
+    """
+    INSERT INTO tiq_pricing_plans (slug, name, description, price_monthly_cents, price_yearly_cents, badge, highlight, is_free_demo, demo_days, features, sort_order, is_active, created_at, updated_at)
+    SELECT 'enterprise', 'Enterprise', 'For staffing firms and enterprise TA teams with custom needs.', 39900, 399000, 'Best Value', false, false, 0,
+           '["Everything in Professional", "Multiple recruiters & role-based access", "Dedicated onboarding", "Custom integrations", "Priority phone support"]'::json,
+           3, true, now(), now()
+    WHERE NOT EXISTS (SELECT 1 FROM tiq_pricing_plans WHERE slug = 'enterprise')
+    """,
+    # Fix-up for the free_demo description already seeded above, on any
+    # DB where that INSERT already ran before this wording changed — an
+    # UPDATE, not another guarded INSERT, since the row already exists.
+    # Only touches it if it still has the OLD wording, so an admin who's
+    # since edited this plan's description via Admin Console keeps their
+    # own text rather than having it silently reverted.
+    """
+    UPDATE tiq_pricing_plans
+    SET description = 'Avail the full platform for free — no card required.'
+    WHERE slug = 'free_demo' AND description = 'Try the full platform free for 14 days — no card required.'
+    """,
+
+    # Client — phone/email at the company level (separate from individual
+    # ClientContact rows, which already have their own phone/email per
+    # person) — Requisitions page's simplified Clients table shows these
+    # directly instead of Address/ABN, which move to the Client Portals
+    # page instead.
+    "ALTER TABLE tiq_clients ADD COLUMN IF NOT EXISTS phone VARCHAR(50)",
+    "ALTER TABLE tiq_clients ADD COLUMN IF NOT EXISTS email VARCHAR(200)",
+
+    # Job Ads — a job posting pushed to LinkedIn/Seek. create_all() (main.py
+    # startup) handles a totally fresh DB via the ORM model directly; this
+    # entry only matters for a DB that already existed before this table
+    # was added to models/job_ads_models.py.
+    """
+    CREATE TABLE IF NOT EXISTS tiq_job_ads (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES tiq_users(id),
+        requisition_id INTEGER REFERENCES tiq_requisitions(id),
+        title VARCHAR(300) NOT NULL,
+        description TEXT,
+        location VARCHAR(300),
+        employment_type VARCHAR(100),
+        salary_min FLOAT,
+        salary_max FLOAT,
+        linkedin_status VARCHAR(20) DEFAULT 'Not Posted',
+        linkedin_post_url VARCHAR(500) DEFAULT '',
+        linkedin_error TEXT DEFAULT '',
+        seek_status VARCHAR(20) DEFAULT 'Not Posted',
+        seek_post_url VARCHAR(500) DEFAULT '',
+        seek_error TEXT DEFAULT '',
+        created_at TIMESTAMP,
+        updated_at TIMESTAMP
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_job_ads_user ON tiq_job_ads (user_id)",
+
+    # Per-plan candidate-processing quota (see models/billing_models.py's
+    # PricingPlan.max_candidates) — previously this number only ever
+    # existed as free-typed marketing text in a plan's `features` bullet
+    # list, completely disconnected from anything real, which is also
+    # why it (and demo_days) could show a stale number on the public
+    # Pricing page after being "updated" in Admin Console: editing the
+    # dedicated demo_days field never touched that separate hand-typed
+    # sentence. 0 = unlimited/not enforced.
+    "ALTER TABLE tiq_pricing_plans ADD COLUMN IF NOT EXISTS max_candidates INTEGER DEFAULT 0",
+
+    # One-time backfill: every EXISTING admin-role user gets a permanent,
+    # comped Enterprise subscription with no real end date (9999-12-31
+    # stands in for "never expires") — same policy routers/auth.py's
+    # register() now applies to brand-new admin signups going forward,
+    # applied here retroactively so an admin account created before this
+    # feature existed isn't left showing "Plan: none" in User Management.
+    # Idempotent via ON CONFLICT on tiq_subscriptions' unique user_id;
+    # only runs again if this statement's text changes (see run()'s
+    # fingerprint check below), so an admin who's since been manually
+    # moved to a different plan on purpose won't have it silently reset
+    # back on every server restart.
+    """
+    INSERT INTO tiq_subscriptions (user_id, plan_slug, billing_period, status, start_date, end_date, amount_paid_cents, notes, created_at, updated_at)
+    SELECT id, 'enterprise', '', 'active', now(), TIMESTAMP '9999-12-31', 0,
+           'Auto-granted Enterprise plan (platform admin) — no charge.', now(), now()
+    FROM tiq_users WHERE role = 'admin'
+    ON CONFLICT (user_id) DO UPDATE SET
+        plan_slug = 'enterprise', status = 'active', end_date = TIMESTAMP '9999-12-31', updated_at = now()
+    """,
 ]
 
 async def run():

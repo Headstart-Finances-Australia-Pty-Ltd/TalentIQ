@@ -221,3 +221,78 @@ async def create_calendly_single_use_link(api_key: str, event_type_uri: str) -> 
             raise HTTPException(400, "That Calendly event type couldn't be found — it may have been deleted or deactivated. Re-select it in Settings.")
         resp.raise_for_status()
         return resp.json()["resource"]["booking_url"]
+
+
+# ── Calendly webhook subscription — the missing piece the older comment
+# on Interview.calendly_scheduling_url used to say wasn't wired up. A
+# recruiter's own webhook URL is public (Calendly must be able to POST
+# to it with no TalentIQ login), so it's identified by a "uid" query
+# param carrying the recruiter's user id, and its authenticity is
+# verified using the signing_key Calendly hands back when the
+# subscription is created (see public_router.calendly_webhook).
+async def get_calendly_user_and_org_uri(api_key: str) -> tuple[str, str]:
+    """Returns (user_uri, organization_uri) for this Personal Access
+    Token's account — both required to create a webhook subscription."""
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(f"{CALENDLY_API_BASE}/users/me", headers=_calendly_headers(api_key))
+        if resp.status_code == 401:
+            raise HTTPException(401, "Calendly rejected this Personal Access Token — check it's correct and hasn't been revoked.")
+        resp.raise_for_status()
+        resource = resp.json()["resource"]
+        return resource["uri"], resource["current_organization"]
+
+
+async def create_calendly_webhook_subscription(api_key: str, webhook_url: str) -> dict:
+    """Subscribes webhook_url to invitee.created/invitee.canceled events
+    for this Calendly account (organization-scoped — covers every event
+    type owned by this user within it). Calendly only returns the
+    signing_key ONCE, at creation time — the caller must store it
+    immediately, since there's no way to retrieve it again later short of
+    deleting and recreating the subscription."""
+    user_uri, org_uri = await get_calendly_user_and_org_uri(api_key)
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(
+            f"{CALENDLY_API_BASE}/webhook_subscriptions",
+            headers=_calendly_headers(api_key),
+            json={
+                "url": webhook_url,
+                "events": ["invitee.created", "invitee.canceled"],
+                "organization": org_uri,
+                "user": user_uri,
+                "scope": "user",
+            },
+        )
+        if resp.status_code == 401:
+            raise HTTPException(401, "Calendly rejected this Personal Access Token — check it's correct and hasn't been revoked.")
+        if resp.status_code == 403:
+            raise HTTPException(403, "This Calendly plan doesn't support webhooks (Standard plan or higher is required).")
+        resp.raise_for_status()
+        resource = resp.json()["resource"]
+        return {"subscription_uri": resource["uri"], "signing_key": resource["signing_key"]}
+
+
+async def delete_calendly_webhook_subscription(api_key: str, subscription_uri: str) -> None:
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.delete(subscription_uri, headers=_calendly_headers(api_key))
+        if resp.status_code not in (200, 204, 404):
+            resp.raise_for_status()
+
+
+def verify_calendly_webhook_signature(signing_key: str, raw_body: bytes, signature_header: str) -> bool:
+    """Calendly's Calendly-Webhook-Signature header is
+    "t=<timestamp>,v1=<hmac>" — the HMAC-SHA256 of "<timestamp>.<raw body>"
+    keyed by signing_key, hex-encoded. Verified with hmac.compare_digest
+    (constant-time) to avoid a timing side-channel on the comparison
+    itself."""
+    import hashlib
+    import hmac as hmac_lib
+
+    if not signing_key or not signature_header:
+        return False
+    parts = dict(p.split("=", 1) for p in signature_header.split(",") if "=" in p)
+    timestamp, signature = parts.get("t"), parts.get("v1")
+    if not timestamp or not signature:
+        return False
+    signed_payload = f"{timestamp}.{raw_body.decode('utf-8', errors='replace')}"
+    expected = hmac_lib.new(signing_key.encode(), signed_payload.encode(), hashlib.sha256).hexdigest()
+    return hmac_lib.compare_digest(expected, signature)

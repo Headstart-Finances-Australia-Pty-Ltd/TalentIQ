@@ -222,7 +222,7 @@ def build_jobintel_agent(groq_api_key: str) -> AgentExecutor:
         Tool(
             name="ScrapeJobMarket",
             func=lambda q: f"Scraping market data for: {q}",
-            description="Scrape jobs from Adzuna for market intelligence analysis.",
+            description="Scrape Seek jobs via Apify for market intelligence analysis.",
         ),
         Tool(
             name="AnalyseSkillDemand",

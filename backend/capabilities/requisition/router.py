@@ -677,6 +677,65 @@ async def create_contact(payload: ClientContactCreate, current_user: User = Depe
     }
 
 
+@router.post("/client-contacts/pull-from-requisitions")
+async def pull_hiring_managers_from_requisitions(current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """One-time catch-up action for the Hiring Managers directory: some
+    requisitions only ever got a hiring manager typed as free-text
+    (hiring_manager_name/hiring_manager_email — the fallback fields used
+    when the person wasn't a formal ClientContact yet), so they never
+    showed up in the Hiring Managers roster at all. This finds every
+    such requisition (has a fallback name, no linked contact, and has a
+    client to attach a contact to), reuses a matching contact if one
+    already exists for that client (same name, case-insensitive) instead
+    of creating a duplicate, and links the requisition to it either way.
+
+    Requisitions with no client_id are skipped and reported separately —
+    ClientContact always belongs to a client, so there's nowhere to
+    attach one; the fallback name/email stays exactly as it was on that
+    requisition, no data lost, just not pulled into the roster.
+
+    Idempotent: safe to run more than once — a requisition already
+    linked to a contact (hiring_manager_contact_id set) is left alone.
+    """
+    org = await _org(db, current_user)
+    rows = (await db.execute(
+        select(Requisition).where(
+            Requisition.organisation_id == org.id,
+            Requisition.hiring_manager_contact_id.is_(None),
+            Requisition.hiring_manager_name.isnot(None),
+            Requisition.hiring_manager_name != "",
+        )
+    )).scalars().all()
+
+    created, linked, skipped_no_client = 0, 0, 0
+    for req in rows:
+        if not req.client_id:
+            skipped_no_client += 1
+            continue
+        name = req.hiring_manager_name.strip()
+        existing = (await db.execute(
+            select(ClientContact).where(
+                ClientContact.client_id == req.client_id,
+                func.lower(ClientContact.name) == name.lower(),
+            )
+        )).scalar_one_or_none()
+        if existing:
+            req.hiring_manager_contact_id = existing.id
+            linked += 1
+        else:
+            contact = ClientContact(
+                organisation_id=org.id, client_id=req.client_id, name=name,
+                email=(req.hiring_manager_email or "").strip(),
+            )
+            db.add(contact)
+            await db.flush()  # assigns contact.id
+            req.hiring_manager_contact_id = contact.id
+            created += 1
+
+    await db.commit()
+    return {"created": created, "linked_to_existing": linked, "skipped_no_client": skipped_no_client}
+
+
 @router.get("/client-contacts")
 async def list_contacts(client_id: Optional[int] = None, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     org = await _org(db, current_user)

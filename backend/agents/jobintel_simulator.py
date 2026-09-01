@@ -2,7 +2,7 @@
 TalentIQ - JobIntel Simulator
 Python port of the original JobIntel Agent's data generation logic.
 Generates realistic simulated job market data for any country/domain combination.
-Used when Adzuna API returns insufficient results or as primary data source.
+Used when the Apify/Seek search returns insufficient results or as primary data source.
 """
 
 import random
@@ -163,7 +163,7 @@ LOCATIONS_DB = {
 
 SOFT_SKILLS = ["Leadership","Communication","Problem Solving","Analytical Thinking","Team Collaboration","Stakeholder Management","Adaptability","Critical Thinking","Attention to Detail","Time Management","Negotiation","Emotional Intelligence","Presentation Skills","Conflict Resolution","Strategic Thinking"]
 
-JOB_PORTALS = ["LinkedIn","Indeed","Glassdoor","Company Career Portal","Monster","Seek","CareerBuilder","ZipRecruiter","Jora","Adzuna"]
+JOB_PORTALS = ["LinkedIn","Indeed","Glassdoor","Company Career Portal","Monster","Seek","CareerBuilder","ZipRecruiter","Jora"]
 EXP_LEVELS = ["Junior","Mid-Level","Senior","Principal","Director"]
 EXP_YEARS = ["1-2","2-3","3-5","5-7","7-10","10+"]
 JOB_TYPES = ["Full-time","Contract","Part-time","Casual"]

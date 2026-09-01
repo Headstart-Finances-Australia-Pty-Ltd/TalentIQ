@@ -16,9 +16,9 @@ system required. Three independent token flows share this router:
 """
 from datetime import datetime
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func
 
 from db.database import AsyncSessionLocal
 from capabilities.acquisition.models import Candidate
@@ -252,3 +252,114 @@ async def public_submit_feedback(token: str, payload: PublicFeedbackSubmit):
             await _apply_decision_side_effects(db, i.organisation_id, i, decision, i.owner_user_id)
 
         return {"submitted": True}
+
+
+@router.post("/calendly-webhook")
+async def calendly_webhook(request: Request, uid: int):
+    """Receives Calendly's invitee.created / invitee.canceled events (see
+    capabilities/interview/router.py's connect_calendly_webhook, which
+    creates the subscription pointed at this exact URL, with ?uid=<user
+    id> baked in so this otherwise-unauthenticated endpoint still knows
+    whose account a given booking belongs to).
+
+    Correlates the booking to a TalentIQ Interview row by the invitee's
+    EMAIL — Calendly's webhook payload doesn't carry any TalentIQ-side
+    identifier, so this is a best-effort match: the most recently
+    updated Interview row owned by this user, not already
+    Completed/Cancelled, whose linked candidate (JobLens or Talent Pool)
+    has that same email. If several rounds are open for the same
+    candidate at once, whichever was touched most recently wins — a
+    genuine ambiguity Calendly's payload gives no way to resolve more
+    precisely than that.
+
+    Always returns 200 (even on a no-match or verification failure) —
+    Calendly disables a subscription after enough non-2xx responses, and
+    a booking TalentIQ can't correlate is a data problem to log, not a
+    reason to make Calendly stop delivering every future event too.
+    """
+    raw_body = await request.body()
+    signature_header = request.headers.get("Calendly-Webhook-Signature", "")
+
+    async with AsyncSessionLocal() as db:
+        from models.models import User
+        user = (await db.execute(select(User).where(User.id == uid))).scalar_one_or_none()
+        if not user:
+            return {"ok": False, "reason": "unknown user"}
+
+        creds = await service.get_all_credentials(db, uid, "calendly")
+        signing_key = creds.get("webhook_signing_key", "")
+        if not service.verify_calendly_webhook_signature(signing_key, raw_body, signature_header):
+            # Logged, not raised — see docstring on why this still returns 200.
+            print(f"Calendly webhook: signature verification failed for uid={uid}")
+            return {"ok": False, "reason": "signature verification failed"}
+
+        try:
+            body = await request.json()
+        except Exception:
+            return {"ok": False, "reason": "invalid JSON"}
+
+        event = body.get("event", "")
+        payload = body.get("payload", {}) or {}
+        invitee_email = (payload.get("email") or "").strip().lower()
+        if not invitee_email or event not in ("invitee.created", "invitee.canceled"):
+            return {"ok": True, "skipped": True}
+
+        # Find the best-matching open Interview row for this user + email —
+        # JobLens-sourced candidates first (Calendly's primary use in this
+        # app so far — Phone Interview's Send Calendly Link), then Talent
+        # Pool candidates (Interview Scheduling's own "Email Calendly Link").
+        from models.models import JobLensCandidate
+
+        match = (await db.execute(
+            select(Interview)
+            .join(JobLensCandidate, Interview.joblens_candidate_id == JobLensCandidate.id)
+            .where(
+                Interview.owner_user_id == uid,
+                Interview.status.notin_(["Completed", "Cancelled"]),
+                func.lower(JobLensCandidate.email) == invitee_email,
+            )
+            .order_by(Interview.updated_at.desc())
+            .limit(1)
+        )).scalar_one_or_none()
+
+        if not match:
+            match = (await db.execute(
+                select(Interview)
+                .join(Candidate, Interview.candidate_id == Candidate.id)
+                .where(
+                    Interview.owner_user_id == uid,
+                    Interview.status.notin_(["Completed", "Cancelled"]),
+                    func.lower(Candidate.email) == invitee_email,
+                )
+                .order_by(Interview.updated_at.desc())
+                .limit(1)
+            )).scalar_one_or_none()
+
+        if not match:
+            print(f"Calendly webhook: no open Interview found for uid={uid}, email={invitee_email}")
+            return {"ok": True, "matched": False}
+
+        if event == "invitee.created":
+            start_time = (payload.get("scheduled_event") or {}).get("start_time")
+            if start_time:
+                try:
+                    match.scheduled_at = datetime.fromisoformat(start_time.replace("Z", "+00:00")).replace(tzinfo=None)
+                except ValueError:
+                    pass
+            location = (payload.get("scheduled_event") or {}).get("location") or {}
+            join_url = location.get("join_url") or location.get("location")
+            if join_url:
+                match.location_or_link = join_url
+            match.status = "Scheduled"
+            match.notes = ((match.notes or "") + "\nAuto-synced: candidate booked this slot via Calendly.").strip()
+        else:  # invitee.canceled
+            match.status = "Cancelled"
+            match.cancelled_at = datetime.utcnow()
+            match.cancelled_by = "Candidate (via Calendly)"
+            reason = (payload.get("cancellation") or {}).get("reason")
+            if reason:
+                match.cancellation_reason = reason
+
+        match.updated_at = datetime.utcnow()
+        await db.commit()
+        return {"ok": True, "matched": True, "interview_id": match.id}

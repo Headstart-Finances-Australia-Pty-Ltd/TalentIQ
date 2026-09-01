@@ -1,7 +1,7 @@
 """
 TalentIQ – JobHunt LangChain Agent
-Combines job scraping (Adzuna), resume parsing, ATS matching, and cover letter generation.
-All results persisted to PostgreSQL.
+Combines job scraping (Apify Seek scraper), resume parsing, ATS matching, and
+cover letter generation. All results persisted to PostgreSQL.
 """
 
 import re
@@ -26,8 +26,33 @@ except ImportError:
 
 
 # ─────────────────────────────────────────────
-# JOB SCRAPER (Adzuna API)
+# JOB SCRAPER (Apify — Seek scraper actor)
 # ─────────────────────────────────────────────
+
+# Default Apify Actor used for Seek job search. This can be overridden per
+# deployment by saving a value for service="apify", key_name="actor_id" in
+# Settings (see routers/jobhunt.py) — useful if an admin prefers a different
+# Seek actor from the Apify Store. "automation-lab/seek-scraper" scrapes
+# seek.com.au / seek.co.nz by keyword, location, work type, and date range,
+# and needs no login or official API key — just an Apify account token.
+DEFAULT_APIFY_SEEK_ACTOR = "automation-lab/seek-scraper"
+
+# Seek's own work-type filter vocabulary, mapped from the free-text job_type
+# values used elsewhere in TalentIQ.
+_SEEK_WORK_TYPE_MAP = {
+    "full-time": "full time",
+    "full_time": "full time",
+    "full time": "full time",
+    "part-time": "part time",
+    "part_time": "part time",
+    "part time": "part time",
+    "contract": "contract/temp",
+    "temporary": "contract/temp",
+    "contract/temp": "contract/temp",
+    "casual": "casual/vacation",
+    "vacation": "casual/vacation",
+    "casual/vacation": "casual/vacation",
+}
 
 RECRUITMENT_AGENCIES = [
     "michael page", "hays", "randstad", "adecco", "manpower", "robert half",
@@ -63,92 +88,230 @@ def normalize_location(location: str) -> str:
     return parts[-1].strip() if len(parts) > 1 else location.strip()
 
 
-def scrape_jobs_adzuna(
+def _parse_seek_salary(salary_text: Optional[str]) -> tuple[Optional[int], Optional[int]]:
+    """Best-effort extraction of a (min, max) integer salary range from
+    Seek's free-text salary string, e.g. "$120,000 – $150,000 per year"."""
+    if not salary_text:
+        return None, None
+    numbers = re.findall(r"[\d,]+(?:\.\d+)?", salary_text)
+    cleaned = []
+    for n in numbers:
+        try:
+            val = float(n.replace(",", ""))
+        except ValueError:
+            continue
+        # Ignore stray small numbers (e.g. "per year" fragments) that
+        # obviously aren't salary figures.
+        if val >= 1000:
+            cleaned.append(int(val))
+    if not cleaned:
+        return None, None
+    if len(cleaned) == 1:
+        return cleaned[0], cleaned[0]
+    return min(cleaned), max(cleaned)
+
+
+def _parse_seek_listing_date(listing_date: Optional[str], scraped_at: Optional[str]) -> str:
+    """Seek returns a relative string like "3d ago" / "Today" rather than an
+    absolute date. Convert it to an ISO date (YYYY-MM-DD) using scrapedAt (or
+    now) as the reference point, falling back to that reference date."""
+    reference = datetime.utcnow()
+    if scraped_at:
+        try:
+            reference = datetime.strptime(scraped_at[:10], "%Y-%m-%d")
+        except Exception:
+            pass
+
+    if not listing_date:
+        return reference.strftime("%Y-%m-%d")
+
+    text = listing_date.strip().lower()
+    if text in ("today", "just posted", "new"):
+        return reference.strftime("%Y-%m-%d")
+
+    match = re.match(r"(\d+)\s*(d|day|days|h|hour|hours|w|week|weeks)", text)
+    if match:
+        amount = int(match.group(1))
+        unit = match.group(2)
+        if unit.startswith("h"):
+            delta = timedelta(hours=amount)
+        elif unit.startswith("w"):
+            delta = timedelta(weeks=amount)
+        else:
+            delta = timedelta(days=amount)
+        return (reference - delta).strftime("%Y-%m-%d")
+
+    return reference.strftime("%Y-%m-%d")
+
+
+def estimate_recency_rank(published_date: Optional[str]) -> float:
+    """Best-effort 'days ago' estimate from a published_date string, used
+    to sort a MERGED list of jobs by recency across sources that report
+    dates completely differently — LinkedIn's raw relative text ("3 days
+    ago", "1 week ago", "Just now", see _linkedin_posted_display) vs
+    Seek's absolute ISO date (see _parse_seek_listing_date above). Lower
+    = more recent. Unparseable/missing strings sort LAST (treated as
+    very old) rather than raising or silently floating to the top."""
+    if not published_date:
+        return 9999.0
+    text = published_date.strip().lower()
+    if text in ("just now", "just posted", "today", "new"):
+        return 0.0
+
+    match = re.match(r"(\d+)\s*(second|minute|hour|day|week|month|year)s?\s*ago", text)
+    if match:
+        amount = int(match.group(1))
+        unit = match.group(2)
+        days_per_unit = {
+            "second": 1 / 86400, "minute": 1 / 1440, "hour": 1 / 24,
+            "day": 1, "week": 7, "month": 30, "year": 365,
+        }
+        return amount * days_per_unit[unit]
+
+    # Compact forms occasionally seen ("3d", "2mo", "1w")
+    compact = re.match(r"(\d+)\s*(mo|w|d|h)$", text)
+    if compact:
+        amount = int(compact.group(1))
+        days_per_unit = {"h": 1 / 24, "d": 1, "w": 7, "mo": 30}
+        return amount * days_per_unit[compact.group(2)]
+
+    # ISO date (Seek's format, or LinkedIn's ISO fallback when no relative
+    # text was available at all)
+    try:
+        dt = datetime.strptime(text[:10], "%Y-%m-%d")
+        return max(0.0, (datetime.utcnow() - dt).days)
+    except Exception:
+        pass
+    return 9999.0
+
+
+def scrape_jobs_apify_seek(
     role: str,
     location: str,
     job_type: str,
     salary_min: Optional[int],
     salary_max: Optional[int],
-    adzuna_app_id: str,
-    adzuna_app_key: str,
-    country: str = "au",
+    apify_api_token: str,
+    actor_id: Optional[str] = None,
+    max_results: int = 25,
+    date_posted: str = "",
 ) -> List[Dict]:
-    """Fetch jobs from Adzuna API and return normalized list.
+    """Fetch Seek (seek.com.au / seek.co.nz) job listings via an Apify actor
+    and return a normalized list.
 
-    NOTE: Adzuna aggregates listings from thousands of job boards (including
-    Seek, Indeed, and many company career sites) but does NOT expose which
-    individual board each listing came from in its API response — LinkedIn
-    jobs are not part of Adzuna's index at all (LinkedIn blocks aggregators).
-    Direct scraping of Seek/LinkedIn/Indeed search pages is blocked by their
-    anti-bot protections and is against their Terms of Service, so this
-    function uses Adzuna's official API as the legitimate aggregator.
+    Seek has no official public job-search API and blocks direct scraping
+    from generic clients, so this runs a purpose-built Apify Actor (see
+    DEFAULT_APIFY_SEEK_ACTOR) through Apify's hosted run-sync endpoint —
+    Apify handles the proxying/anti-bot handling on Seek's side, TalentIQ
+    just supplies search parameters and an Apify account token.
     """
-    base_url = f"https://api.adzuna.com/v1/api/jobs/{country}/search/1"
-    params = {
-        "app_id": adzuna_app_id,
-        "app_key": adzuna_app_key,
-        "results_per_page": 50,
-        "what": role,
-        "content-type": "application/json",
-        "sort_by": "date",
+    if not apify_api_token:
+        return [{"error": "Apify authentication failed — add your Apify API token in Settings."}]
+
+    actor = (actor_id or DEFAULT_APIFY_SEEK_ACTOR).strip() or DEFAULT_APIFY_SEEK_ACTOR
+    # Actor IDs are addressed as "owner/name" in the Apify Store but need to
+    # be "owner~name" in the REST URL.
+    actor_path = actor.replace("/", "~")
+    run_url = f"https://api.apify.com/v2/acts/{actor_path}/run-sync-get-dataset-items"
+
+    payload: Dict[str, Any] = {
+        "keywords": [role] if role else [],
+        "location": "" if (not location or location.lower() == "all") else location,
+        "maxResults": max_results,
     }
-
-    if location and location.lower() != "all":
-        params["where"] = location
-
     if job_type and job_type.lower() != "all":
-        params["full_time"] = "1" if job_type.lower() in ["full-time", "full_time"] else "0"
-
-    if salary_min:
-        params["salary_min"] = salary_min
-    if salary_max:
-        params["salary_max"] = salary_max
+        seek_work_type = _SEEK_WORK_TYPE_MAP.get(job_type.lower())
+        if seek_work_type:
+            payload["workType"] = seek_work_type
+    if date_posted:
+        seek_days = _DATE_POSTED_TO_SEEK_DAYS.get(date_posted)
+        if seek_days:
+            payload["dateRange"] = seek_days
 
     try:
-        response = requests.get(base_url, params=params, timeout=15)
+        response = requests.post(
+            run_url,
+            params={"token": apify_api_token},
+            json=payload,
+            timeout=120,
+        )
         if response.status_code == 401:
-            return [{"error": "Adzuna authentication failed — check your App ID and App Key in Settings."}]
-        if response.status_code == 403:
-            return [{"error": "Adzuna API access blocked (403). Check network egress settings allow api.adzuna.com."}]
+            return [{"error": "Apify authentication failed — check your API token in Settings."}]
+        if response.status_code == 404:
+            return [{"error": f"Apify actor '{actor}' not found — check the Actor ID in Settings."}]
+        if response.status_code >= 400:
+            # Surface Apify's own error message rather than a generic one —
+            # this is the difference between "something went wrong" and an
+            # actionable reason (insufficient balance, actor requires a
+            # proxy tier your plan doesn't include, bad input schema after
+            # the actor's maintainer changed it, etc.). Apify's error body
+            # is normally {"error": {"type": ..., "message": ...}}.
+            detail = f"HTTP {response.status_code}"
+            try:
+                body = response.json()
+                err = body.get("error")
+                if isinstance(err, dict):
+                    detail = err.get("message") or err.get("type") or detail
+                elif isinstance(err, str):
+                    detail = err
+            except Exception:
+                pass
+            return [{"error": f"Apify actor '{actor}' failed: {detail[:250]}"}]
         response.raise_for_status()
-        data = response.json()
+        items = response.json()
     except requests.exceptions.Timeout:
-        return [{"error": "Adzuna API timed out. Try again in a moment."}]
+        return [{"error": "Apify Seek search timed out. Try again in a moment, or reduce Max Results."}]
     except requests.exceptions.ConnectionError:
-        return [{"error": "Could not connect to Adzuna API. Check network/internet access."}]
+        return [{"error": "Could not connect to Apify API. Check network/internet access."}]
     except Exception as e:
-        return [{"error": f"Adzuna API error: {str(e)[:150]}"}]
+        return [{"error": f"Apify API error: {str(e)[:150]}"}]
+
+    if not isinstance(items, list):
+        return [{"error": "Unexpected response shape from Apify — check the configured Actor ID."}]
 
     jobs = []
-    cutoff = datetime.utcnow() - timedelta(days=60)
-
-    for job in data.get("results", []):
-        created_str = job.get("created", "")[:10]
-        try:
-            created_date = datetime.strptime(created_str, "%Y-%m-%d")
-        except Exception:
-            continue
-        if created_date < cutoff:
+    for job in items:
+        if not isinstance(job, dict):
             continue
 
-        company = job.get("company", {}).get("display_name", "Unknown")
-        raw_location = job.get("location", {}).get("display_name", location)
-        description = job.get("description", "")
+        company = job.get("company") or job.get("advertiserName") or "Unknown"
+        raw_location = job.get("location") or location
+        description = job.get("fullDescription") or job.get("shortDescription") or ""
+        salary_text = job.get("salary") or ""
+        s_min, s_max = _parse_seek_salary(salary_text)
+        title = job.get("title") or "Unknown"
 
         jobs.append({
-            "title": job.get("title", "Unknown"),
+            "title": title,
             "company": company,
-            "published_date": created_str,
-            "location": normalize_location(raw_location),
-            "job_type": job.get("contract_time", "N/A"),
+            "published_date": _parse_seek_listing_date(job.get("listingDate"), job.get("scrapedAt")),
+            "location": normalize_location(raw_location) if raw_location else "",
+            "job_type": job.get("workType") or job_type or "N/A",
             "description": description,
-            "source": "Adzuna",
+            "source": "Seek",
             "company_type": classify_company_type(company),
-            "apply_link": job.get("redirect_url", ""),
-            "source_site": "Adzuna",
-            "salary_min": job.get("salary_min"),
-            "salary_max": job.get("salary_max"),
+            "apply_link": job.get("url") or "",
+            "source_site": "Seek",
+            "salary_min": s_min,
+            "salary_max": s_max,
         })
+
+    # Optional client-side salary filtering — the Seek scraper actor doesn't
+    # take salary bounds as input (salary is only shown for ~20-30% of
+    # listings), so filter after the fact when the caller asked for a range.
+    if salary_min or salary_max:
+        filtered = []
+        for j in jobs:
+            j_min, j_max = j.get("salary_min"), j.get("salary_max")
+            if j_min is None and j_max is None:
+                filtered.append(j)  # keep undisclosed-salary listings rather than dropping them
+                continue
+            if salary_min and (j_max or j_min or 0) < salary_min:
+                continue
+            if salary_max and (j_min or j_max or 0) > salary_max:
+                continue
+            filtered.append(j)
+        jobs = filtered
 
     # Deduplicate
     seen = set()
@@ -159,6 +322,421 @@ def scrape_jobs_adzuna(
             seen.add(key)
             unique.append(j)
     return unique
+
+
+# ─────────────────────────────────────────────
+# JOB SCRAPER (Apify — LinkedIn Jobs Scraper actor, optional richer path)
+# ─────────────────────────────────────────────
+
+# Same publisher/family as DEFAULT_APIFY_SEEK_ACTOR, also keyed off the
+# user's existing Apify token — no separate credential needed. Runs
+# LinkedIn's own public guest jobs API server-side (through Apify's
+# proxying), same no-login approach as scrape_jobs_linkedin below, but
+# with full job-detail pages fetched (salary, seniority, applicant
+# count, full description) and Apify's proxy/retry handling in front of
+# it, which the direct in-process scraper below doesn't have. Used as
+# an automatic upgrade when the user has Apify configured (see
+# routers/jobhunt.py) — if it fails for any reason (no credits, actor
+# unavailable), the caller falls back to the free direct scraper rather
+# than failing the whole "LinkedIn" source.
+DEFAULT_APIFY_LINKEDIN_ACTOR = "automation-lab/linkedin-jobs-scraper"
+
+
+def scrape_jobs_apify_linkedin(
+    role: str,
+    location: str,
+    job_type: str,
+    apify_api_token: str,
+    actor_id: Optional[str] = None,
+    max_results: int = 25,
+    date_posted: str = "",
+    remote_type: str = "",
+    experience_level: str = "",
+    sort_by: str = "relevance",
+) -> List[Dict]:
+    """Fetch LinkedIn job listings via an Apify actor and return a
+    normalized list in the same shape as scrape_jobs_apify_seek /
+    scrape_jobs_linkedin, so all three are interchangeable to the caller.
+
+    scrapeJobDetails is deliberately OFF here (the actor's own default is
+    ON): fetching each job's full detail page is what made this path much
+    slower than the original guest-endpoint tool this was ported from —
+    the actor's own docs cite ~5s for 100 listings in list mode vs up to
+    ~60s with full details. List mode still returns title, company,
+    location, postedAt, salary and the apply URL — everything JobHunter's
+    results table and matching actually use — so the extra detail-page
+    round trip per job isn't worth trading away the speed for.
+    """
+    if not apify_api_token:
+        return [{"error": "Apify authentication failed — add your Apify API token in Settings."}]
+
+    actor = (actor_id or DEFAULT_APIFY_LINKEDIN_ACTOR).strip() or DEFAULT_APIFY_LINKEDIN_ACTOR
+    actor_path = actor.replace("/", "~")
+    run_url = f"https://api.apify.com/v2/acts/{actor_path}/run-sync-get-dataset-items"
+
+    payload: Dict[str, Any] = {
+        "searchQuery": role or "",
+        "location": "" if (not location or location.lower() == "all") else location,
+        "maxJobs": max_results,
+        "scrapeJobDetails": False,
+    }
+    if job_type and job_type.lower() != "all":
+        li_type = _LINKEDIN_JOB_TYPE_MAP.get(job_type.lower())
+        if li_type:
+            payload["jobType"] = li_type
+    if date_posted:
+        tpr = _DATE_POSTED_TO_LINKEDIN_TPR.get(date_posted)
+        if tpr:
+            payload["datePosted"] = tpr
+    if remote_type:
+        wt = _REMOTE_TYPE_TO_LINKEDIN_WT.get(remote_type)
+        if wt:
+            payload["workplaceType"] = wt
+    if experience_level:
+        exp = _EXPERIENCE_TO_LINKEDIN_E.get(experience_level)
+        if exp:
+            payload["experienceLevel"] = exp
+    if sort_by:
+        sb = _SORT_TO_LINKEDIN.get(sort_by)
+        if sb:
+            payload["sortBy"] = sb
+
+    try:
+        response = requests.post(
+            run_url, params={"token": apify_api_token}, json=payload, timeout=45,
+        )
+        if response.status_code == 401:
+            return [{"error": "Apify authentication failed — check your API token in Settings."}]
+        if response.status_code == 404:
+            return [{"error": f"Apify actor '{actor}' not found — check the Actor ID in Settings."}]
+        if response.status_code >= 400:
+            detail = f"HTTP {response.status_code}"
+            try:
+                body = response.json()
+                err = body.get("error")
+                if isinstance(err, dict):
+                    detail = err.get("message") or err.get("type") or detail
+                elif isinstance(err, str):
+                    detail = err
+            except Exception:
+                pass
+            return [{"error": f"Apify actor '{actor}' failed: {detail[:250]}"}]
+        response.raise_for_status()
+        items = response.json()
+    except requests.exceptions.Timeout:
+        return [{"error": "Apify LinkedIn search timed out. Try again in a moment, or reduce Max Results."}]
+    except requests.exceptions.ConnectionError:
+        return [{"error": "Could not connect to Apify API. Check network/internet access."}]
+    except Exception as e:
+        return [{"error": f"Apify API error: {str(e)[:150]}"}]
+
+    if not isinstance(items, list):
+        return [{"error": "Unexpected response shape from Apify — check the configured Actor ID."}]
+
+    jobs = []
+    for job in items:
+        if not isinstance(job, dict):
+            continue
+        company = job.get("companyName") or "Unknown"
+        description = job.get("descriptionText") or ""
+        s_min, s_max = _parse_seek_salary(job.get("salary") or "")  # generic $-range text parsing
+
+        jobs.append({
+            "title": job.get("title") or "Unknown",
+            "company": company,
+            "published_date": (job.get("postedAt") or "").strip(),
+            "location": normalize_location(job.get("location") or location) if (job.get("location") or location) else "",
+            "job_type": job.get("employmentType") or job_type or "N/A",
+            "description": description,
+            "source": "LinkedIn",
+            "company_type": classify_company_type(company),
+            "apply_link": job.get("applyUrl") or job.get("url") or "",
+            "source_site": "LinkedIn",
+            "salary_min": s_min,
+            "salary_max": s_max,
+        })
+
+    # Deduplicate — same reasoning as scrape_jobs_apify_seek
+    seen = set()
+    unique = []
+    for j in jobs:
+        key = (j["title"].lower(), j["company"].lower())
+        if key not in seen:
+            seen.add(key)
+            unique.append(j)
+    return unique
+
+
+# ─────────────────────────────────────────────
+# JOB SCRAPER (LinkedIn — public guest job search, no API key/login)
+# ─────────────────────────────────────────────
+
+# LinkedIn's own "jobs-guest" endpoint is what linkedin.com/jobs itself
+# calls to lazily load more results on scroll — it's served to anonymous
+# (logged-out) visitors, so it needs no LinkedIn account, cookies, or
+# API key, the same no-credential approach Seek's Apify actor uses on
+# its side (see scrape_jobs_apify_seek above). This is a direct port of
+# the well-known "linkedin-jobs-api" Node approach (guest endpoint +
+# HTML-fragment parsing) into this backend, so JobHunter's "LinkedIn"
+# source is a real, independent scraper rather than routed through a
+# third-party Apify actor.
+_LINKEDIN_GUEST_SEARCH_URL = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
+
+# Rotate through a small pool of realistic desktop-browser user agents —
+# LinkedIn's guest endpoint is more likely to serve results (rather than
+# a verification challenge) to traffic that looks like an ordinary
+# browser than to a fixed, unfamiliar UA string.
+_USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+]
+
+# LinkedIn's own work-type filter codes (f_JT), mapped from the free-text
+# job_type values used elsewhere in TalentIQ — same idea as
+# _SEEK_WORK_TYPE_MAP above, different target vocabulary. Matches the
+# shared tool's full option set (Full-time/Part-time/Contract/Temporary/
+# Volunteer/Internship) rather than the earlier partial mapping.
+_LINKEDIN_JOB_TYPE_MAP = {
+    "full-time": "F", "full_time": "F", "full time": "F",
+    "part-time": "P", "part_time": "P", "part time": "P",
+    "contract": "C",
+    "temporary": "T",
+    "volunteer": "V",
+    "internship": "I",
+}
+
+# Date-posted filter, mapped to each source's own vocabulary — "" means
+# "any time" (no filter applied) for both.
+_DATE_POSTED_TO_LINKEDIN_TPR = {"24h": "r86400", "week": "r604800", "month": "r2592000"}
+_DATE_POSTED_TO_SEEK_DAYS = {"24h": "1", "week": "7", "month": "30"}
+
+# Workplace type (remote/on-site/hybrid) — LinkedIn's f_JT-adjacent f_WT
+# filter. LinkedIn-only: Seek's actor has no equivalent input.
+_REMOTE_TYPE_TO_LINKEDIN_WT = {"onsite": "1", "remote": "2", "hybrid": "3"}
+
+# Seniority filter — LinkedIn's f_E codes. LinkedIn-only, same reason.
+_EXPERIENCE_TO_LINKEDIN_E = {
+    "internship": "1", "entry": "2", "associate": "3",
+    "senior": "4", "director": "5", "executive": "6",
+}
+
+# Sort order — LinkedIn's own sortBy param ("R" relevance / "DD" most
+# recent). "ats_score" isn't listed here — it's handled entirely
+# client-side once matching completes (see JobHuntPage.tsx), since no
+# match exists yet at search time.
+_SORT_TO_LINKEDIN = {"recent": "DD", "relevance": "R"}
+
+
+def _linkedin_posted_display(ago_time: Optional[str], iso_datetime: Optional[str]) -> str:
+    """Shows the job's posted time exactly the way the source tool this
+    was ported from does — a plain relative string like "3 days ago" or
+    "Just now" (LinkedIn's own .job-search-card__listdate text / the
+    Apify actor's postedAt field) rather than a computed absolute date.
+    Only falls back to the machine-readable <time datetime="..."> ISO
+    value, formatted as a plain date, on the rare listing where LinkedIn
+    doesn't render the relative text at all."""
+    if ago_time and ago_time.strip():
+        return ago_time.strip()
+    if iso_datetime:
+        try:
+            return datetime.fromisoformat(iso_datetime.replace("Z", "+00:00")).strftime("%Y-%m-%d")
+        except Exception:
+            pass
+    return ""
+
+
+def scrape_jobs_linkedin(
+    role: str,
+    location: str,
+    job_type: str,
+    max_results: int = 25,
+    date_posted: str = "",
+    remote_type: str = "",
+    experience_level: str = "",
+    sort_by: str = "relevance",
+) -> List[Dict]:
+    """Fetch LinkedIn job listings via LinkedIn's own public guest job
+    search endpoint (no login, no API key, no Apify account needed) and
+    return a normalized list in the same shape scrape_jobs_apify_seek
+    produces, so the caller (routers/jobhunt.py) can merge both sources
+    interchangeably.
+
+    This is a real, independent scraper — not a mock — but it IS scraping
+    a public page rather than calling an official API, so results can be
+    thinner (LinkedIn's guest cards don't expose a job description) and
+    occasionally rate-limited/blocked; both are reported back as an
+    {"error": ...} item rather than silently substituting fake data.
+    """
+    import random
+
+    session_headers = {
+        "User-Agent": random.choice(_USER_AGENTS),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.linkedin.com/jobs",
+        "X-Requested-With": "XMLHttpRequest",
+    }
+
+    keyword = (role or "").strip()
+    loc = "" if (not location or location.lower() == "all") else location.strip()
+    linkedin_job_type = _LINKEDIN_JOB_TYPE_MAP.get((job_type or "").lower(), "")
+    linkedin_tpr = _DATE_POSTED_TO_LINKEDIN_TPR.get(date_posted, "") if date_posted else ""
+    linkedin_wt = _REMOTE_TYPE_TO_LINKEDIN_WT.get(remote_type, "") if remote_type else ""
+    linkedin_exp = _EXPERIENCE_TO_LINKEDIN_E.get(experience_level, "") if experience_level else ""
+    linkedin_sort = _SORT_TO_LINKEDIN.get(sort_by, "") if sort_by else ""
+
+    def build_url(start: int) -> str:
+        params: Dict[str, str] = {}
+        if keyword:
+            params["keywords"] = keyword
+        if loc:
+            params["location"] = loc
+        if linkedin_job_type:
+            params["f_JT"] = linkedin_job_type
+        if linkedin_tpr:
+            params["f_TPR"] = linkedin_tpr
+        if linkedin_wt:
+            params["f_WT"] = linkedin_wt
+        if linkedin_exp:
+            params["f_E"] = linkedin_exp
+        if linkedin_sort:
+            params["sortBy"] = linkedin_sort
+        params["start"] = str(start)
+        from urllib.parse import urlencode
+        return f"{_LINKEDIN_GUEST_SEARCH_URL}?{urlencode(params)}"
+
+    from bs4 import BeautifulSoup
+    import time as _time
+
+    all_jobs: List[Dict] = []
+    start = 0
+    batch_size = 25
+    consecutive_empty = 0
+
+    while len(all_jobs) < max_results and consecutive_empty < 2:
+        try:
+            resp = requests.get(build_url(start), headers=session_headers, timeout=15)
+        except requests.exceptions.Timeout:
+            return [{"error": "LinkedIn job search timed out. Try again in a moment."}] if not all_jobs else all_jobs[:max_results]
+        except requests.exceptions.ConnectionError:
+            return [{"error": "Could not connect to LinkedIn. Check network/internet access."}] if not all_jobs else all_jobs[:max_results]
+
+        if resp.status_code == 429:
+            return [{"error": "LinkedIn rate-limited this search — wait a bit and try again."}] if not all_jobs else all_jobs[:max_results]
+        if resp.status_code != 200:
+            return [{"error": f"LinkedIn returned HTTP {resp.status_code} — it may be blocking automated requests right now."}] if not all_jobs else all_jobs[:max_results]
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        cards = soup.find_all("li")
+        if not cards:
+            consecutive_empty += 1
+            start += batch_size
+            continue
+
+        found_this_batch = 0
+        for card in cards:
+            title_el = card.select_one(".base-search-card__title")
+            company_el = card.select_one(".base-search-card__subtitle")
+            if not title_el or not company_el:
+                continue
+            title = title_el.get_text(strip=True)
+            company = company_el.get_text(strip=True)
+            if not title or not company:
+                continue
+
+            location_el = card.select_one(".job-search-card__location")
+            time_el = card.find("time")
+            salary_el = card.select_one(".job-search-card__salary-info")
+            link_el = card.select_one(".base-card__full-link")
+            ago_el = card.select_one(".job-search-card__listdate")
+
+            location_text = location_el.get_text(strip=True) if location_el else loc
+            salary_text = salary_el.get_text(" ", strip=True) if salary_el else ""
+            s_min, s_max = _parse_seek_salary(salary_text)  # generic "$X - $Y" text parsing, not Seek-specific
+
+            all_jobs.append({
+                "title": title,
+                "company": company,
+                "published_date": _linkedin_posted_display(
+                    ago_el.get_text(strip=True) if ago_el else None,
+                    time_el.get("datetime") if time_el else None,
+                ),
+                "location": normalize_location(location_text) if location_text else "",
+                "job_type": job_type or "N/A",
+                # LinkedIn's guest search-results cards don't include a
+                # description snippet (only the detail page does, which
+                # would need one extra request per job) — left blank
+                # rather than faked; the Apply link takes candidates
+                # straight to the real listing for the full description.
+                "description": "",
+                "source": "LinkedIn",
+                "company_type": classify_company_type(company),
+                "apply_link": (link_el.get("href") or "").split("?")[0] if link_el else "",
+                "source_site": "LinkedIn",
+                "salary_min": s_min,
+                "salary_max": s_max,
+            })
+            found_this_batch += 1
+
+        if found_this_batch == 0:
+            consecutive_empty += 1
+        else:
+            consecutive_empty = 0
+
+        start += batch_size
+        if len(all_jobs) >= max_results:
+            break
+        _time.sleep(0.6)  # be a reasonably polite guest, not a fixed hammer
+
+    return all_jobs[:max_results]
+
+
+def fetch_job_description(url: str, timeout: int = 8) -> str:
+    """Best-effort fetch of a job's full description from its own listing
+    page — used ONLY at match time (see routers/jobhunt.py's /match), for
+    jobs whose description came back empty from the search step itself.
+
+    Why this exists: LinkedIn results (both the free scraper and the
+    Apify LinkedIn actor with scrapeJobDetails off, see
+    scrape_jobs_apify_linkedin) deliberately skip the per-job detail
+    page during SEARCH to keep browsing fast — that was the single
+    biggest search-speed win. But an empty description means JD-
+    requirement extraction (extract_jd_requirements_categorized) has
+    nothing to read, which short-circuits straight to the deterministic
+    keyword fallback WITHOUT EVER CALLING GROQ AT ALL — no LLM call
+    means no failure to blame Settings for; there was simply nothing to
+    extract from. This fetch trades a small amount of one-time latency
+    at match time (once per job that needs it, not per search) to give
+    the LLM real content to work with, restoring genuine AI-powered
+    matching for LinkedIn jobs.
+
+    Handles LinkedIn's own job page structure; returns "" (never raises)
+    for any other domain or on any failure — the caller already falls
+    back to matching on just title/company when description is empty,
+    exactly as before this function existed.
+    """
+    if not url:
+        return ""
+    try:
+        import random
+        headers = {"User-Agent": random.choice(_USER_AGENTS), "Accept-Language": "en-US,en;q=0.9"}
+        resp = requests.get(url, headers=headers, timeout=timeout)
+        if resp.status_code != 200:
+            return ""
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(resp.text, "html.parser")
+        if "linkedin.com" in url:
+            node = (
+                soup.select_one(".show-more-less-html__markup")
+                or soup.select_one(".description__text")
+                or soup.select_one("[class*='description']")
+            )
+            return node.get_text(" ", strip=True)[:8000] if node else ""
+        return ""
+    except Exception:
+        return ""
 
 
 # ─────────────────────────────────────────────
@@ -375,14 +953,25 @@ async def extract_candidate_profile(resume_text: str, groq_api_key: Optional[str
     return strengths
 
 
-async def _extract_job_requirements(job: Dict, groq_api_key: Optional[str] = None, groq_model: str = DEFAULT_GROQ_MODEL) -> Dict:
+async def _extract_job_requirements(
+    job: Dict, groq_api_key: Optional[str] = None, groq_model: str = DEFAULT_GROQ_MODEL,
+    db=None, user_id: Optional[int] = None,
+) -> Dict:
     """Categorized JD requirements (Essential / Good to Have / Optional) via
     the shared extraction module — same schema CVAnalysis and CandidateLens
     use, so "similar and essential, preferred requirements from the JD" show
-    up consistently everywhere."""
+    up consistently everywhere.
+
+    Pass db + user_id to let this draw its own key from the shared Groq
+    key pool (see utils/groq_pool.py) rather than being stuck with the one
+    key resolved once at the top of routers/jobhunt.py's /match — CVAnalysis
+    already does this (see routers/cvintel.py); JobHunter's matching didn't,
+    which meant a single rate-limited/bad pool key failed EVERY job in a
+    batch with no chance to rotate, even with other healthy keys sitting
+    in the pool."""
     from utils.llm_extraction import extract_jd_requirements_categorized
     description = job.get("description", "") or ""
-    req = await extract_jd_requirements_categorized(description, groq_api_key, groq_model)
+    req = await extract_jd_requirements_categorized(description, groq_api_key, groq_model, db=db, user_id=user_id)
     # required_hard_skills kept for backward-compat with the deterministic
     # matching logic below — falls back to the old heuristic extractor if
     # the shared one came back empty (e.g. a very short description).
@@ -397,7 +986,7 @@ async def calculate_match(
     resume_text: str, job: Dict, groq_api_key: Optional[str] = None,
     candidate_profile: Optional[Dict] = None, groq_model: str = DEFAULT_GROQ_MODEL,
     ollama_base_url: Optional[str] = None, ollama_model: Optional[str] = None,
-    known_terms_hint: Optional[list] = None, db=None,
+    known_terms_hint: Optional[list] = None, db=None, user_id: Optional[int] = None,
 ) -> Dict:
     """Calculate ATS score and generate insights for a single job.
     Pass a pre-extracted `candidate_profile` (from extract_candidate_profile)
@@ -416,11 +1005,14 @@ async def calculate_match(
     Tries Ollama first when configured (see utils.llm_extraction), then
     Groq, then a deterministic heuristic. Pass `db` to enrich the shared
     skill taxonomy after a successful LLM match (best-effort, never blocks
-    or fails the match itself)."""
+    or fails the match itself). Pass `user_id` too (alongside `db`) so
+    THIS job's chunks can independently draw their own key from the
+    shared Groq key pool instead of all sharing one fixed key for the
+    whole batch — see _extract_job_requirements's docstring."""
     if candidate_profile is None:
         candidate_profile = await extract_candidate_profile(resume_text, groq_api_key, groq_model)
 
-    requirements = await _extract_job_requirements(job, groq_api_key, groq_model)
+    requirements = await _extract_job_requirements(job, groq_api_key, groq_model, db=db, user_id=user_id)
     essential = [s for s in requirements.get("essential", requirements.get("required_hard_skills", [])) if s]
     good_to_have = [s for s in requirements.get("good_to_have", []) if s]
 
@@ -428,6 +1020,7 @@ async def calculate_match(
     verdicts = await extract_candidate_strengths(
         resume_text, {"essential": essential, "good_to_have": good_to_have}, groq_api_key, groq_model,
         ollama_base_url=ollama_base_url, ollama_model=ollama_model, known_terms_hint=known_terms_hint,
+        db=db, user_id=user_id,
     )
     if db is not None and verdicts.get("ai_powered"):
         await enrich_skill_taxonomy(db, {
@@ -578,7 +1171,7 @@ def build_jobhunt_agent(groq_api_key: str) -> AgentExecutor:
         Tool(
             name="ScrapeJobs",
             func=lambda q: f"Job scraping configured for: {q}",
-            description="Scrape job listings from Adzuna API given role, location, type, salary range.",
+            description="Scrape Seek job listings via Apify given role, location, type, salary range.",
         ),
         Tool(
             name="ParseResume",
