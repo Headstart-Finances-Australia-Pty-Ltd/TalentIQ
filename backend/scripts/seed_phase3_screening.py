@@ -8,7 +8,7 @@ Screening & Matching covers two modules:
     scores, interview questions, and a shortlist.
   - MarketIntel (/api/jobintel)   — simulated job-market analytics runs
     (skill demand, salary trends, experience breakdown). This module has
-    no external dependency (no Adzuna/Groq key needed) since it uses the
+    no external dependency (no Apify/Groq key needed) since it uses the
     built-in simulator.
 
 Creates:

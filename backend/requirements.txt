@@ -25,6 +25,9 @@ langchain-core==0.3.21
 langchain-community==0.3.9
 langchain-groq==0.2.1
 
+# ── Billing / Payments ─────────────────────────────────────
+stripe==11.3.0
+
 # ── HTTP / Data ────────────────────────────────────────────
 requests==2.32.3
 httpx==0.28.1

@@ -18,6 +18,12 @@ class UserRegister(BaseModel):
     company: Optional[str] = None
     phone: Optional[str] = None
     address: Optional[str] = None
+    # Plan chosen on the Create Account page — free-demo plans get
+    # activated immediately (see routers/auth.py's register()); a paid
+    # plan just gets remembered as intent (no card is collected on this
+    # form), and the frontend sends the new user on to Pricing to
+    # actually complete Stripe checkout for it.
+    plan_slug: Optional[str] = None
 
 
 class UserLogin(BaseModel):
@@ -95,6 +101,31 @@ class JobSearchRequest(BaseModel):
     job_type: Optional[str] = "All"
     salary_min: Optional[int] = None
     salary_max: Optional[int] = None
+    # Which real source(s) to search — "both" (default) merges LinkedIn's
+    # public guest job search (no credentials needed) with Seek via the
+    # user's configured Apify actor; "linkedin"/"seek" restrict to one.
+    source: Optional[str] = "both"
+    # Date posted — "" (any time) | "24h" | "week" | "month". Mapped to
+    # each source's own vocabulary in routers/jobhunt.py (LinkedIn's
+    # f_TPR codes, Seek's dateRange days).
+    date_posted: Optional[str] = ""
+    # Workplace type — "" (any) | "onsite" | "remote" | "hybrid".
+    # LinkedIn-only — Seek's actor has no equivalent filter, so this is
+    # simply not applied to Seek results.
+    remote_type: Optional[str] = ""
+    # Seniority — "" (any) | "internship" | "entry" | "associate" |
+    # "senior" | "director" | "executive". LinkedIn-only, same reason.
+    experience_level: Optional[str] = ""
+    # "relevance" (source's own default order) | "recent" (newest first,
+    # applied both per-source where supported — LinkedIn's own sortBy —
+    # and as a best-effort merge-level sort across sources) | "ats_score"
+    # (handled entirely client-side once matching completes, since no
+    # match exists yet at search time — see JobHuntPage.tsx).
+    sort_by: Optional[str] = "relevance"
+    # How many results to fetch (applies per-source, before merging) —
+    # user-configurable instead of a fixed default, so a candidate can
+    # trade breadth for speed themselves.
+    max_results: Optional[int] = 25
 
 
 class JobOut(BaseModel):
@@ -156,6 +187,22 @@ class JobMatchOut(BaseModel):
     jd_requirements: Optional[dict] = None
     cover_letter: Optional[str] = None
     apply_link: Optional[str] = None
+    # Whether a Groq/Ollama key was actually resolved for THIS match run —
+    # lets the frontend tell "nothing configured, add a key" apart from
+    # "something is configured but the AI call itself failed" (rate
+    # limit, invalid/expired key, model issue) when ai_powered is False.
+    # See strengths_breakdown.ai_powered for whether it actually worked.
+    groq_configured: Optional[bool] = None
+    ollama_configured: Optional[bool] = None
+    # WHICH Groq key actually got used — "personal" (your own saved key,
+    # which always wins over the pool by design — see
+    # utils.groq_pool.resolve_groq_key), "pool" (an admin-managed shared
+    # key), "legacy_global" (a single admin-set key, pre-pool), or "none".
+    # Answers "I have a pool configured, why is this still falling
+    # back?" directly: if a personal key exists it's used INSTEAD of the
+    # pool, so a stale personal key can shadow a perfectly healthy pool.
+    groq_key_source: Optional[str] = None
+    groq_key_preview: Optional[str] = None
     matched_at: datetime
 
     model_config = {"from_attributes": True}

@@ -17,10 +17,14 @@ print(f"\n  TalentIQ Backend | Python {sys.version.split()[0]}")
 from db.database import engine, Base, AsyncSessionLocal
 from routers import auth, jobhunt, jobintel, linklens, dashboard
 from routers import admin as admin_router
+from routers import public_config as public_config_router
 from routers import cvintel as cvintel_router
 from routers import joblens as joblens_router
 from routers import jdcreator as jdcreator_router
 from routers import candidatetrack as candidatetrack_router
+from routers import android_caller as android_caller_router
+from routers import billing as billing_router
+from routers import job_ads as job_ads_router
 from capabilities.acquisition import router as acquisition_router
 from capabilities.acquisition import public_router as acquisition_public_router
 from capabilities.requisition import router as requisition_router
@@ -134,10 +138,14 @@ app.include_router(jobintel.router,       prefix="/api/jobintel",  tags=["JobInt
 app.include_router(linklens.router,       prefix="/api/linklens",  tags=["LinkLens"])
 app.include_router(dashboard.router,      prefix="/api/dashboard", tags=["Dashboard"])
 app.include_router(admin_router.router,   prefix="/api/admin",     tags=["Admin"])
+app.include_router(public_config_router.router, prefix="/api/public/config", tags=["Public Config"])
 app.include_router(cvintel_router.router, prefix="/api/cvintel",   tags=["CVIntel"])
 app.include_router(joblens_router.router, prefix="/api/joblens",   tags=["JobLens"])
 app.include_router(jdcreator_router.router, prefix="/api/jdcreator", tags=["JDCreator"])
 app.include_router(candidatetrack_router.router, prefix="/api/candidatetrack", tags=["CandidateTracker"])
+app.include_router(android_caller_router.router, prefix="/api/android-caller", tags=["Windows/Android Caller"])
+app.include_router(billing_router.router, prefix="/api/billing", tags=["Billing"])
+app.include_router(job_ads_router.router, prefix="/api/job-ads", tags=["Job Ads"])
 
 # ── Capability: Candidate Acquisition & Talent Pool (Phase 0 + Phase 1) ──
 # Self-contained module — see backend/capabilities/acquisition/models.py

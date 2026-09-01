@@ -56,4 +56,30 @@ def send_email(smtp_cfg: dict, to_email: str, subject: str, html_body: str):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"Failed to send email: {str(e)[:200]}")
+        # Catch-all (not just smtplib.SMTPAuthenticationError specifically)
+        # because some providers/paths surface an auth rejection as a
+        # different smtplib exception subtype (e.g. a generic
+        # SMTPResponseException, or one raised while cleaning up the
+        # connection after the real auth failure already happened) —
+        # matching on the actual error text is more reliable than
+        # trusting the exact class raised. This is the exact same
+        # smtp_cfg / send_email() used for every email TalentIQ sends
+        # (video interview invites, Phone Interview's Send Calendly Link,
+        # Interview Scheduling's Email Calendly Link), so it fails
+        # identically everywhere until the credentials are fixed.
+        text = str(e)
+        auth_failure = (
+            isinstance(e, smtplib.SMTPAuthenticationError)
+            or "535" in text
+            or "bad credentials" in text.lower()
+            or "username and password not accepted" in text.lower()
+        )
+        if auth_failure:
+            raise HTTPException(
+                400,
+                "Gmail rejected these SMTP credentials (535 Bad Credentials). Gmail no longer accepts a plain "
+                "account password for SMTP — generate a 16-character App Password instead: Google Account -> "
+                "Security -> 2-Step Verification -> App passwords, then update it under Settings -> API Keys -> "
+                "SMTP. (Or switch to a transactional email provider like SendGrid/Postmark/Resend/SES.)",
+            )
+        raise HTTPException(500, f"Failed to send email: {text[:200]}")

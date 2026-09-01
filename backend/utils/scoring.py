@@ -220,3 +220,75 @@ def compute_composite_score(technical_score: float, non_technical: dict, weights
     total_w = (w_tech + w_nontech) or 1.0
     composite = (technical_score * w_tech + non_technical["score"] * w_nontech) / total_w
     return round(composite, 1)
+
+
+# ── VIDEO INTERVIEW AUTO-DECISION ────────────────────────────────────────
+# Same "configurable weights + threshold constraints" idea as Resume
+# Screening's DEFAULT_WEIGHTS/DEFAULT_DISQUALIFIERS above, applied to the
+# three sub-scores _analyze_transcript already produces (see
+# routers/joblens.py) — communication/relevance/confidence — instead of
+# leaving the Video Interview Decision column entirely manual. The
+# composite score and resulting recommendation are only ever a starting
+# point: see _run_video_analysis's docstring on why a recruiter's own
+# manual choice, once made, is never silently overwritten by a later
+# re-analysis — only an explicit "reapply settings to this session"
+# action recomputes decisions that already exist.
+DEFAULT_VIDEO_DECISION_WEIGHTS = {
+    "communication": 0.30,
+    "relevance": 0.40,
+    "confidence": 0.30,
+}
+
+# score >= proceed_min -> "Proceed"; score <= reject_max -> "Reject";
+# anything in between -> "Hold". proceed_min and reject_max are
+# independent (not required to meet in the middle) so a recruiter can
+# widen or narrow the "Hold" band deliberately.
+DEFAULT_VIDEO_DECISION_THRESHOLDS = {
+    "proceed_min": 70,
+    "reject_max": 40,
+}
+
+
+def merge_video_decision_weights(overrides: Optional[dict]) -> dict:
+    w = dict(DEFAULT_VIDEO_DECISION_WEIGHTS)
+    if overrides:
+        for k, v in overrides.items():
+            if k in w and isinstance(v, (int, float)):
+                w[k] = max(0.0, float(v))
+    return w
+
+
+def merge_video_decision_thresholds(overrides: Optional[dict]) -> dict:
+    t = dict(DEFAULT_VIDEO_DECISION_THRESHOLDS)
+    if overrides:
+        for k, v in overrides.items():
+            if k in t and isinstance(v, (int, float)):
+                t[k] = float(v)
+    return t
+
+
+def compute_video_composite_score(analysis: dict, weights: dict) -> Optional[float]:
+    """Weighted blend of the three AI sub-scores _analyze_transcript
+    produces. Returns None if analysis is missing all three (e.g. it
+    failed and only has an "error" key) — callers should treat None as
+    "nothing to auto-decide from" rather than defaulting to 0."""
+    comm = analysis.get("communication_score")
+    rel = analysis.get("relevance_score")
+    conf = analysis.get("confidence_score")
+    if comm is None and rel is None and conf is None:
+        return None
+    parts = [
+        (comm or 0, weights["communication"]),
+        (rel or 0, weights["relevance"]),
+        (conf or 0, weights["confidence"]),
+    ]
+    total_w = sum(w for _, w in parts) or 1.0
+    return round(sum(score * w for score, w in parts) / total_w, 1)
+
+
+def compute_video_decision(composite_score: float, thresholds: dict) -> str:
+    if composite_score >= thresholds["proceed_min"]:
+        return "Proceed"
+    if composite_score <= thresholds["reject_max"]:
+        return "Reject"
+    return "Hold"

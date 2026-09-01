@@ -5,7 +5,7 @@ Security policy (enforced HERE ONLY — every router must go through these
 functions rather than querying UserAPIKey directly, so the policy can never
 drift or be accidentally bypassed in one module but not another):
 
-  * groq, ollama, adzuna — a user's OWN saved key always wins. If they
+  * groq, ollama, apify — a user's OWN saved key always wins. If they
     haven't set one, fall back to a GLOBAL key (is_global=True), which can
     only be configured by an admin (enforced in routers/auth.py). These
     three are explicitly approved to be shared platform-wide since they're
@@ -43,18 +43,30 @@ def ollama_enabled() -> bool:
 
 # Only these services may ever have a shared/global fallback. Adding a
 # service here is a deliberate security decision — do not add personal
-# platform credentials (LinkedIn, email, etc.) to this set.
+# platform credentials (LinkedIn login, personal email, etc.) to this set.
 # "interview" holds platform-wide CandidateLens video-interview settings
 # (answer time per question, TTS voice) — admin-configured, not a personal
-# credential, so it belongs in the same shareable bucket as groq/adzuna.
+# credential, so it belongs in the same shareable bucket as groq/apify.
 # "database" and "s3" hold platform infrastructure credentials (the
 # Xata Postgres connection string on record, and the object-storage
 # bucket used for video/audio) — see Admin Console > API Keys. These
 # are inherently
 # platform-wide (there's one database and one bucket for the whole
 # deployment, not one per user), so they're admin-managed only, same as
-# groq/adzuna, with no notion of a private per-user override.
-SHAREABLE_SERVICES = {"groq", "ollama", "adzuna", "interview", "database", "s3"}
+# groq/apify, with no notion of a private per-user override.
+# "apify" holds the Apify API token (and optional actor_id override) used
+# to run the Seek job-search scraper Actor — see agents/jobhunt_agent.py.
+# "stripe" holds the platform's own Stripe secret key / webhook signing
+# secret for billing checkout — there's one Stripe account for the whole
+# deployment, same reasoning as database/s3 — see routers/billing.py.
+# "linkedin_jobs" and "seek_jobs" hold a LinkedIn Talent/Jobs API access
+# token and a Seek Partner API key used to PUSH a job ad live on those
+# boards (see routers/job_ads.py) — an organizational partner-API
+# credential, not a personal login (that's the separate, strictly-private
+# "linkedin" service LinkLens uses for candidate search). One Partner API
+# agreement covers every recruiter on the deployment, admin-configured
+# only via Admin Console > API Keys, same as groq/apify/stripe.
+SHAREABLE_SERVICES = {"groq", "ollama", "apify", "interview", "database", "s3", "stripe", "linkedin_jobs", "seek_jobs"}
 
 # Fallback ONLY — used when a user (and no admin-shared global) has set a
 # Groq model. Groq periodically deprecates models (llama3-70b-8192, then
