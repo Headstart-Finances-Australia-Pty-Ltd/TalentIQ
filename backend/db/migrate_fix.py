@@ -822,7 +822,7 @@ MIGRATIONS = [
     """
     INSERT INTO tiq_pricing_plans (slug, name, description, price_monthly_cents, price_yearly_cents, badge, highlight, is_free_demo, demo_days, features, sort_order, is_active, created_at, updated_at)
     SELECT 'starter', 'Starter', 'For solo recruiters and small agencies getting started with AI screening.', 4900, 49000, '', false, false, 0,
-           '["Unlimited resume screening", "Phone + Video Interview rounds", "Up to 100 active candidates/mo", "Email support"]'::json,
+           '["Phone + Video Interview rounds", "Up to 100 active candidates/mo", "Email support"]'::json,
            1, true, now(), now()
     WHERE NOT EXISTS (SELECT 1 FROM tiq_pricing_plans WHERE slug = 'starter')
     """,
@@ -850,6 +850,50 @@ MIGRATIONS = [
     UPDATE tiq_pricing_plans
     SET description = 'Avail the full platform for free — no card required.'
     WHERE slug = 'free_demo' AND description = 'Try the full platform free for 14 days — no card required.'
+    """,
+
+    # Fix-up for Starter's seeded Features list: "Unlimited resume
+    # screening" directly contradicted the plan's own "Up to 100 active
+    # candidates/mo" bullet right next to it — a genuine, visible
+    # self-contradiction on the public Pricing page, not just noise the
+    # duplicate-bullet filter (PricingPage.tsx) already hides, since that
+    # filter only catches bullets restating an actual NUMBER and this one
+    # doesn't contain one. Removes the specific stale text element (jsonb
+    # `-` by value) rather than overwriting the whole array, so any OTHER
+    # bullet an admin has since added or edited on this plan is left
+    # exactly as-is.
+    """
+    UPDATE tiq_pricing_plans
+    SET features = (features::jsonb - 'Unlimited resume screening')::json,
+        updated_at = now()
+    WHERE slug = 'starter' AND features::jsonb ? 'Unlimited resume screening'
+    """,
+
+    # Append-only subscription history — see models/billing_models.py's
+    # SubscriptionHistory docstring. Backfilled once from whatever's
+    # currently in tiq_subscriptions, so existing users don't start with
+    # an empty history the moment this ships.
+    """
+    CREATE TABLE IF NOT EXISTS tiq_subscription_history (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES tiq_users(id),
+        plan_slug VARCHAR(60) DEFAULT '',
+        billing_period VARCHAR(10) DEFAULT '',
+        status VARCHAR(20) DEFAULT 'none',
+        start_date TIMESTAMP,
+        end_date TIMESTAMP,
+        amount_paid_cents INTEGER DEFAULT 0,
+        stripe_checkout_session_id VARCHAR(120) DEFAULT '',
+        notes TEXT DEFAULT '',
+        recorded_at TIMESTAMP
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_subscription_history_user ON tiq_subscription_history (user_id)",
+    """
+    INSERT INTO tiq_subscription_history (user_id, plan_slug, billing_period, status, start_date, end_date, amount_paid_cents, stripe_checkout_session_id, notes, recorded_at)
+    SELECT user_id, plan_slug, billing_period, status, start_date, end_date, amount_paid_cents, stripe_checkout_session_id, notes, now()
+    FROM tiq_subscriptions
+    WHERE plan_slug != '' AND NOT EXISTS (SELECT 1 FROM tiq_subscription_history WHERE tiq_subscription_history.user_id = tiq_subscriptions.user_id)
     """,
 
     # Client — phone/email at the company level (separate from individual
@@ -916,6 +960,53 @@ MIGRATIONS = [
     ON CONFLICT (user_id) DO UPDATE SET
         plan_slug = 'enterprise', status = 'active', end_date = TIMESTAMP '9999-12-31', updated_at = now()
     """,
+
+    # Screening Decision's rejection-email bulk-send action (see
+    # models/models.py's JobLensCandidate.rejection_email_sent_at doc).
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS rejection_email_sent_at TIMESTAMP",
+
+    # Deterministic per-candidate recommendation (see
+    # models/models.py's JobLensCandidate.screening_recommendation doc).
+    "ALTER TABLE tiq_joblens_candidates ADD COLUMN IF NOT EXISTS screening_recommendation TEXT",
+
+    # Interview Scheduling's "Send Invite" action (fixed-time rounds —
+    # starting with Panel Interview — that can't use Calendly self-
+    # scheduling; see capabilities/interview/models.py's Interview.invite_sent_at).
+    "ALTER TABLE tiq_interviews ADD COLUMN IF NOT EXISTS invite_sent_at TIMESTAMP",
+
+    # Interview Decision's bulk "Send Rejection Email" action (see
+    # capabilities/interview/models.py's Interview.rejection_email_sent_at).
+    "ALTER TABLE tiq_interviews ADD COLUMN IF NOT EXISTS rejection_email_sent_at TIMESTAMP",
+
+    # Interview Decision's Approval popup (see
+    # capabilities/interview/models.py's decision_approval_* fields —
+    # deliberately separate from the pre-existing approver_name/
+    # approval_status/approved_at columns, which are for scheduling
+    # sign-off, not this post-decision hiring sign-off).
+    "ALTER TABLE tiq_interviews ADD COLUMN IF NOT EXISTS decision_approval_status VARCHAR(20) DEFAULT 'Pending'",
+    "ALTER TABLE tiq_interviews ADD COLUMN IF NOT EXISTS decision_approved_by VARCHAR(255)",
+    "ALTER TABLE tiq_interviews ADD COLUMN IF NOT EXISTS decision_approved_at TIMESTAMP",
+    "ALTER TABLE tiq_interviews ADD COLUMN IF NOT EXISTS decision_approval_notes TEXT",
+    "ALTER TABLE tiq_interviews ADD COLUMN IF NOT EXISTS decision_approval_attachment_filename VARCHAR(255)",
+    "ALTER TABLE tiq_interviews ADD COLUMN IF NOT EXISTS decision_approval_attachment_blob BYTEA",
+
+    # Multiple online approvers per hiring decision (see
+    # capabilities/interview/models.py's InterviewDecisionApprover).
+    """
+    CREATE TABLE IF NOT EXISTS tiq_interview_decision_approvers (
+        id SERIAL PRIMARY KEY,
+        interview_id INTEGER NOT NULL REFERENCES tiq_interviews(id),
+        approver_name VARCHAR(200) NOT NULL,
+        approver_email VARCHAR(200) NOT NULL,
+        status VARCHAR(20) DEFAULT 'Pending',
+        comments TEXT,
+        decided_at TIMESTAMP,
+        invited_at TIMESTAMP,
+        token VARCHAR(64) UNIQUE NOT NULL,
+        created_at TIMESTAMP
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_decision_approvers_interview ON tiq_interview_decision_approvers (interview_id)",
 ]
 
 async def run():

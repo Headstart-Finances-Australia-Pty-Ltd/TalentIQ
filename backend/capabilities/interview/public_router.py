@@ -17,6 +17,7 @@ system required. Three independent token flows share this router:
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
@@ -161,6 +162,58 @@ async def public_cancel(token: str, payload: PublicApprovalDecision):
         i.updated_at = datetime.utcnow()
         await db.commit()
         return {"cancelled": True, "cancelled_at": i.cancelled_at.isoformat()}
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# HIRING-DECISION APPROVAL — Interview Decision's "send an online
+# approval request" option. Distinct from the scheduling-approval flow
+# just above: this is sign-off on the DECISION (Approve/Reject a
+# candidate), not on the interview being scheduled, and MULTIPLE
+# approvers can independently weigh in on the same round (see
+# InterviewDecisionApprover's docstring) — each has their own token,
+# their own status, and their own comments.
+# ══════════════════════════════════════════════════════════════════════════
+
+@router.get("/decision-approval/{token}")
+async def public_get_decision_approval(token: str):
+    async with AsyncSessionLocal() as db:
+        from .models import InterviewDecisionApprover
+        approver = (await db.execute(select(InterviewDecisionApprover).where(InterviewDecisionApprover.token == token))).scalar_one_or_none()
+        if not approver:
+            raise HTTPException(404, "This approval link is invalid or has expired.")
+        i = (await db.execute(select(Interview).where(Interview.id == approver.interview_id))).scalar_one_or_none()
+        if not i:
+            raise HTTPException(404, "This approval link is invalid or has expired.")
+        return {
+            **await _candidate_summary(db, i),
+            "approver_name": approver.approver_name,
+            "status": approver.status,
+            "comments": approver.comments or "",
+            "decided_at": approver.decided_at.isoformat() if approver.decided_at else None,
+        }
+
+
+class PublicDecisionApprovalSubmit(BaseModel):
+    status: str  # Approved | Rejected
+    comments: str = ""
+
+
+@router.post("/decision-approval/{token}")
+async def public_submit_decision_approval(token: str, payload: PublicDecisionApprovalSubmit):
+    async with AsyncSessionLocal() as db:
+        from .models import InterviewDecisionApprover
+        approver = (await db.execute(select(InterviewDecisionApprover).where(InterviewDecisionApprover.token == token))).scalar_one_or_none()
+        if not approver:
+            raise HTTPException(404, "This approval link is invalid or has expired.")
+        if payload.status not in ("Approved", "Rejected"):
+            raise HTTPException(400, "status must be Approved or Rejected.")
+        if approver.status != "Pending":
+            raise HTTPException(400, f"You've already submitted a decision ({approver.status}) for this request.")
+        approver.status = payload.status
+        approver.comments = payload.comments.strip()
+        approver.decided_at = datetime.utcnow()
+        await db.commit()
+        return {"submitted": True, "status": approver.status}
 
 
 # ══════════════════════════════════════════════════════════════════════════

@@ -9,7 +9,9 @@ from datetime import datetime
 from typing import List, Optional
 import os
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi.responses import StreamingResponse
+import io
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, delete as sa_delete
@@ -27,7 +29,7 @@ from capabilities.communication import service as service_communication
 from .models import (
     Interview, InterviewScorecard, InterviewFeedbackLink, PanelInterviewer, InterviewPanel,
     INTERVIEW_STATUSES, INTERVIEW_TYPES, SELF_SCHEDULABLE_TYPES,
-    DECISION_STATUSES,
+    DECISION_STATUSES, InterviewDecisionApprover,
 )
 from .schemas import (
     InterviewCreate, InterviewUpdate, InterviewStatusChange, SelfScheduleRequest,
@@ -89,9 +91,22 @@ def _fmt_feedback_link(link: InterviewFeedbackLink, submitted_names: set) -> dic
     }
 
 
+def _fmt_decision_approver(a: "InterviewDecisionApprover") -> dict:
+    return {
+        "id": a.id,
+        "approver_name": a.approver_name,
+        "approver_email": a.approver_email,
+        "status": a.status,
+        "comments": a.comments or "",
+        "decided_at": a.decided_at.isoformat() if a.decided_at else None,
+        "invited_at": a.invited_at.isoformat() if a.invited_at else None,
+    }
+
+
 def _fmt_interview(
     i: Interview, candidate_name: str = "", requisition_title: str = "",
     scorecards: Optional[List[dict]] = None, feedback_links: Optional[List[InterviewFeedbackLink]] = None,
+    decision_approvers: Optional[List[dict]] = None,
 ) -> dict:
     submitted_names = {s["interviewer_name"] for s in scorecards} if scorecards is not None else set()
     return {
@@ -117,6 +132,21 @@ def _fmt_interview(
         "calendly_scheduling_url": i.calendly_scheduling_url or "",
         "calendly_link_sent_at": i.calendly_link_sent_at.isoformat() if i.calendly_link_sent_at else None,
         "video_invite_sent_at": i.video_invite_sent_at.isoformat() if i.video_invite_sent_at else None,
+        "invite_sent_at": i.invite_sent_at.isoformat() if i.invite_sent_at else None,
+        "rejection_email_sent_at": i.rejection_email_sent_at.isoformat() if i.rejection_email_sent_at else None,
+        # Hiring-decision approval — see models.py's decision_approval_*
+        # docstring for how this differs from approval_status above.
+        "decision_approval_status": i.decision_approval_status or "Pending",
+        "decision_approved_by": i.decision_approved_by or "",
+        "decision_approved_at": i.decision_approved_at.isoformat() if i.decision_approved_at else None,
+        "decision_approval_notes": i.decision_approval_notes or "",
+        "decision_approval_attachment_filename": i.decision_approval_attachment_filename or "",
+        "has_decision_approval_attachment": bool(i.decision_approval_attachment_blob),
+        # Online approvers (see InterviewDecisionApprover) — the "send an
+        # email to the approver" alternative to filling in the manual
+        # popup fields above. Multiple people can be asked to weigh in
+        # on the same round independently.
+        "decision_approvers": decision_approvers or [],
         # Telephony (click-to-call + SMS scheduling — see utils/telephony.py)
         "phone_call_status": i.phone_call_status or "",
         "phone_called_at": i.phone_called_at.isoformat() if i.phone_called_at else None,
@@ -197,9 +227,20 @@ async def create_interview(
     db: AsyncSession = Depends(get_db),
 ):
     org = await _org(db, current_user)
-    candidate = (await db.execute(select(Candidate).where(Candidate.id == payload.candidate_id, Candidate.organisation_id == org.id))).scalar_one_or_none()
-    if not candidate:
-        raise HTTPException(404, "Candidate not found in your organisation.")
+    if not payload.candidate_id and not payload.joblens_candidate_id:
+        raise HTTPException(400, "Either candidate_id or joblens_candidate_id is required.")
+    candidate_name = ""
+    if payload.candidate_id:
+        candidate = (await db.execute(select(Candidate).where(Candidate.id == payload.candidate_id, Candidate.organisation_id == org.id))).scalar_one_or_none()
+        if not candidate:
+            raise HTTPException(404, "Candidate not found in your organisation.")
+        candidate_name = candidate.full_name
+    else:
+        from models.models import JobLensCandidate as _JLC
+        jlc = (await db.execute(select(_JLC.id, _JLC.name).where(_JLC.id == payload.joblens_candidate_id))).first()
+        if not jlc:
+            raise HTTPException(404, "Candidate not found.")
+        candidate_name = jlc.name
     if payload.requisition_id:
         req = (await db.execute(select(Requisition).where(Requisition.id == payload.requisition_id, Requisition.organisation_id == org.id))).scalar_one_or_none()
         if not req:
@@ -228,7 +269,8 @@ async def create_interview(
     interview = Interview(
         organisation_id=org.id, owner_user_id=current_user.id,
         sequence_number=await service.get_next_sequence(db, org.id),
-        candidate_id=payload.candidate_id, requisition_id=payload.requisition_id,
+        candidate_id=payload.candidate_id, joblens_candidate_id=payload.joblens_candidate_id,
+        requisition_id=payload.requisition_id,
         application_id=payload.application_id,
         round_name=payload.round_name.strip(), round_number=payload.round_number,
         interview_type=payload.interview_type,
@@ -257,17 +299,24 @@ async def create_interview(
         # interview creation even if SMTP isn't configured or no rule
         # matches (see capabilities/communication/service.py's docstring).
         req_title = await _requisition_title(db, interview.requisition_id)
+        candidate_email = None
+        if payload.candidate_id:
+            candidate_email = candidate.email or None
+        else:
+            from models.models import JobLensCandidate as _JLC2
+            jlc_row = (await db.execute(select(_JLC2.email).where(_JLC2.id == payload.joblens_candidate_id))).first()
+            candidate_email = jlc_row[0] if jlc_row else None
         await service_communication.fire_automation(
             db, org.id, "interview_scheduled",
-            context={"candidate_name": candidate.full_name, "requisition_title": req_title, "round_name": interview.round_name,
+            context={"candidate_name": candidate_name, "requisition_title": req_title, "round_name": interview.round_name,
                      "interview_time": interview.scheduled_at.strftime("%A, %B %d at %I:%M %p") if interview.scheduled_at else "",
                      "location_or_link": interview.location_or_link or ""},
-            triggering_user_id=current_user.id, to_email=candidate.email or None,
-            candidate_id=candidate.id, requisition_id=interview.requisition_id,
+            triggering_user_id=current_user.id, to_email=candidate_email,
+            candidate_id=payload.candidate_id, requisition_id=interview.requisition_id,
         )
         await db.commit()
 
-    return _fmt_interview(interview, candidate.full_name, await _requisition_title(db, interview.requisition_id))
+    return _fmt_interview(interview, candidate_name, await _requisition_title(db, interview.requisition_id))
 
 
 @router.get("/interviews")
@@ -350,6 +399,23 @@ async def list_interviews(
         for cid, role, company in res.all():
             joblens_meta[cid] = {"role": role or "Untitled role", "company": company or ""}
 
+    # Interview Decision only wants candidates who actually PASSED
+    # Screening Decision — a candidate marked "Not Qualified" there
+    # shouldn't also clutter the interview-round view (see
+    # JobLensPage.tsx's Screening Decision "status"/"shortlisted"
+    # fields, the same two checks that page itself uses to decide who
+    # counts as passed). Rows with no joblens_candidate_id at all (an
+    # ATS Candidate hired outside JobLens screening entirely) are always
+    # considered passed — there's no screening record to fail.
+    screening_passed = {}
+    if joblens_candidate_ids:
+        from models.models import JobLensCandidate as _JLC
+        res = await db.execute(
+            select(_JLC.id, _JLC.status, _JLC.shortlisted).where(_JLC.id.in_(joblens_candidate_ids))
+        )
+        for cid, status_, shortlisted_ in res.all():
+            screening_passed[cid] = bool(shortlisted_) or status_ == "Qualified"
+
     scorecard_counts = {}
     if interview_ids:
         res = await db.execute(
@@ -381,6 +447,16 @@ async def list_interviews(
         pres = await db.execute(select(InterviewPanel.id, InterviewPanel.sequence_number).where(InterviewPanel.id.in_(panel_ids)))
         panel_numbers = dict(pres.all())
 
+    # Online decision-approvers (see InterviewDecisionApprover) — batch
+    # fetched the same way scorecards/feedback links are above.
+    decision_approvers_by_interview: dict = {}
+    if interview_ids:
+        res = await db.execute(
+            select(InterviewDecisionApprover).where(InterviewDecisionApprover.interview_id.in_(interview_ids))
+        )
+        for a in res.scalars().all():
+            decision_approvers_by_interview.setdefault(a.interview_id, []).append(_fmt_decision_approver(a))
+
     out = []
     for i in rows:
         name = candidate_names.get(i.candidate_id, "") if i.candidate_id else joblens_candidate_names.get(i.joblens_candidate_id, "")
@@ -390,13 +466,14 @@ async def list_interviews(
         else:
             meta = joblens_meta.get(i.joblens_candidate_id, {})
             req_number, req_role, req_company = None, meta.get("role", ""), meta.get("company", "")
-        d = _fmt_interview(i, name, req_role)
+        d = _fmt_interview(i, name, req_role, decision_approvers=decision_approvers_by_interview.get(i.id, []))
         d["requisition_number"] = req_number
         d["requisition_role"] = req_role
         d["company"] = req_company
         d["panel_number"] = panel_numbers.get(i.panel_id) if i.panel_id else None
         d["scorecard_count"] = scorecard_counts.get(i.id, 0)
         d["feedback_links_summary"] = feedback_links_by_interview.get(i.id, [])
+        d["screening_passed"] = screening_passed.get(i.joblens_candidate_id, True) if i.joblens_candidate_id else True
         d.pop("scorecards", None)
         out.append(d)
     return out
@@ -832,6 +909,18 @@ async def calendly_status(current_user: User = Depends(get_current_user), db: As
     }
 
 
+@router.get("/meeting-link")
+async def get_meeting_link(current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """The saved default video-call link (Settings > API Keys > Meeting
+    Link) — used by the Schedule Interview form to pre-fill Location/
+    Meeting Link when left blank, so a recruiter isn't stuck manually
+    retyping (or forgetting to set) the same Zoom/Teams/Meet link every
+    time. Not a secret, so safe to return as-is rather than a
+    configured/not-configured boolean like calendly_status above."""
+    creds = await get_all_credentials(db, current_user.id, "meeting_platform")
+    return {"platform": creds.get("platform") or "", "link": creds.get("link") or ""}
+
+
 @router.get("/calendly/event-types")
 async def calendly_event_types(current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     """Used by the Settings page: fetches the recruiter's own Calendly
@@ -1021,6 +1110,273 @@ async def email_calendly_link(
     i.updated_at = datetime.utcnow()
     await db.commit()
     return {"sent": True, "calendly_scheduling_url": booking_url}
+
+
+class SendFixedInviteRequest(BaseModel):
+    to_email: str = ""
+    subject: str = ""
+    body_html: str = ""
+
+
+@router.post("/interviews/{interview_id}/send-invite")
+async def send_fixed_invite(
+    interview_id: int, payload: SendFixedInviteRequest,
+    current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    """Interview Scheduling's invite action for FIXED-time rounds — Panel
+    Interview to start with — as opposed to the Calendly self-schedule
+    flow above, which is deliberately restricted to Phone Interview only
+    (see SELF_SCHEDULABLE_TYPES). This never generates a booking link;
+    it emails the candidate the date/time the recruiter already set
+    (i.scheduled_at) plus the meeting location/link already on the round
+    (i.location_or_link — see Settings > API Keys > Meeting Link for
+    where that gets its default value from when left blank at scheduling
+    time)."""
+    org = await _org(db, current_user)
+    i = (await db.execute(select(Interview).where(Interview.id == interview_id, Interview.organisation_id == org.id))).scalar_one_or_none()
+    if not i:
+        raise HTTPException(404, "Interview not found")
+    if not i.scheduled_at:
+        raise HTTPException(400, "Set a date/time for this round before sending an invite.")
+
+    to_email = (payload.to_email or await _candidate_email(db, i)).strip()
+    if not to_email:
+        raise HTTPException(400, "This candidate has no email on file — nowhere to send the invite.")
+
+    candidate_name = await _candidate_name(db, i.candidate_id, i.joblens_candidate_id)
+    when = i.scheduled_at.strftime("%A, %d %B %Y at %I:%M %p")
+    location_html = f"<p><strong>Meeting link/location:</strong> {i.location_or_link}</p>" if i.location_or_link else ""
+    body_html = payload.body_html.strip() or (
+        f"<p>Hi {candidate_name or 'there'},</p>"
+        f"<p>You're invited to a {i.interview_type.lower()} — <strong>{i.round_name}</strong>.</p>"
+        f"<p><strong>When:</strong> {when}</p>"
+        f"{location_html}"
+        f"<p>Please reach out if this time no longer works for you.</p>"
+        f"<p>Looking forward to speaking with you.</p>"
+    )
+    subject = payload.subject.strip() or f"Interview invite: {i.round_name}"
+
+    smtp_cfg = await get_smtp_config(current_user.id, db)
+    send_email(smtp_cfg, to_email, subject, body_html)
+
+    i.invite_sent_at = datetime.utcnow()
+    if i.status not in ("Scheduled", "Completed"):
+        i.status = "Scheduled"
+    i.updated_at = datetime.utcnow()
+    await db.commit()
+    return {"sent": True, "invite_sent_at": i.invite_sent_at.isoformat()}
+
+
+class InterviewRejectionEmailRequest(BaseModel):
+    interview_ids: List[int]
+    subject: str
+    # {name} is the only placeholder — replaced with each candidate's
+    # own first name right before that candidate's individual email is
+    # sent. Pre-converted to HTML by the frontend (see JobLensPage.tsx's
+    # textToHtml) before this ever reaches the backend.
+    body_html_template: str
+
+
+@router.post("/interviews/reject-email")
+async def send_interview_rejection_emails(
+    payload: InterviewRejectionEmailRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Interview Decision's bulk 'Send Rejection Email' — the same
+    action as Screening Decision's (routers/joblens.py's
+    send_rejection_emails), just scoped to interview ROUNDS instead of
+    candidates: a candidate can be rejected at any individual round
+    without necessarily being rejected from the requisition overall.
+    Sends ONE separate, individually-addressed email per round's
+    candidate — never a shared To/CC list — so no candidate can see any
+    other candidate's name or email address."""
+    if not payload.interview_ids:
+        raise HTTPException(400, "No rows selected.")
+
+    org = await _org(db, current_user)
+    rows = (await db.execute(
+        select(Interview).where(Interview.id.in_(payload.interview_ids), Interview.organisation_id == org.id)
+    )).scalars().all()
+    by_id = {i.id: i for i in rows}
+
+    smtp_cfg = await get_smtp_config(current_user.id, db)
+
+    sent, failed = [], []
+    for iid in payload.interview_ids:
+        i = by_id.get(iid)
+        if not i:
+            failed.append({"interview_id": iid, "name": None, "error": "Round not found."})
+            continue
+        name = await _candidate_name(db, i.candidate_id, i.joblens_candidate_id)
+        email = await _candidate_email(db, i)
+        if not email:
+            failed.append({"interview_id": iid, "name": name, "error": "No email on file."})
+            continue
+        first_name = (name or "").strip().split(" ")[0] or "there"
+        body_html = payload.body_html_template.replace("{name}", first_name)
+        try:
+            send_email(smtp_cfg, email, payload.subject, body_html)
+            i.rejection_email_sent_at = datetime.utcnow()
+            sent.append({"interview_id": iid, "name": name, "email": email})
+        except HTTPException as e:
+            failed.append({"interview_id": iid, "name": name, "error": e.detail})
+            if "not configured" in str(e.detail).lower() or "rejected these smtp credentials" in str(e.detail).lower():
+                break
+        except Exception as e:
+            failed.append({"interview_id": iid, "name": name, "error": str(e)[:200]})
+
+    await db.commit()
+    return {"sent": sent, "failed": failed}
+
+
+@router.post("/interviews/{interview_id}/decision-approval")
+async def set_decision_approval(
+    interview_id: int,
+    status: str = Form(...),          # Pending | Approved | Not Approved
+    approved_by: str = Form(""),
+    approval_date: str = Form(""),    # ISO date string from the popup's date picker; defaults to now if blank
+    notes: str = Form(""),
+    attachment: Optional[UploadFile] = File(None),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Interview Decision's Approval popup — records who signed off on
+    the hiring DECISION (not the interview's scheduling — see
+    decision_approval_status's docstring in models.py), when, any notes,
+    and an optional supporting document kept for future reference. A new
+    attachment replaces any previous one for this round; there's no
+    versioning, same as every other single-attachment field in this
+    codebase (resume_file_blob, etc.)."""
+    if status not in ("Pending", "Approved", "Not Approved"):
+        raise HTTPException(400, "status must be one of: Pending, Approved, Not Approved")
+
+    org = await _org(db, current_user)
+    i = (await db.execute(select(Interview).where(Interview.id == interview_id, Interview.organisation_id == org.id))).scalar_one_or_none()
+    if not i:
+        raise HTTPException(404, "Interview not found")
+
+    i.decision_approval_status = status
+    i.decision_approved_by = approved_by.strip()
+    i.decision_approval_notes = notes.strip()
+    if approval_date.strip():
+        try:
+            i.decision_approved_at = datetime.fromisoformat(approval_date.strip())
+        except ValueError:
+            raise HTTPException(400, "approval_date must be an ISO date (YYYY-MM-DD).")
+    else:
+        i.decision_approved_at = datetime.utcnow()
+
+    if attachment is not None and attachment.filename:
+        content = await attachment.read()
+        if len(content) > 10 * 1024 * 1024:
+            raise HTTPException(400, "Attachment must be under 10MB.")
+        i.decision_approval_attachment_blob = content
+        i.decision_approval_attachment_filename = attachment.filename
+
+    i.updated_at = datetime.utcnow()
+    await db.commit()
+    return {
+        "decision_approval_status": i.decision_approval_status,
+        "decision_approved_by": i.decision_approved_by,
+        "decision_approved_at": i.decision_approved_at.isoformat() if i.decision_approved_at else None,
+        "decision_approval_attachment_filename": i.decision_approval_attachment_filename or "",
+    }
+
+
+@router.get("/interviews/{interview_id}/decision-approval/attachment")
+async def get_decision_approval_attachment(
+    interview_id: int, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    org = await _org(db, current_user)
+    i = (await db.execute(select(Interview).where(Interview.id == interview_id, Interview.organisation_id == org.id))).scalar_one_or_none()
+    if not i or not i.decision_approval_attachment_blob:
+        raise HTTPException(404, "No attachment on file for this round.")
+    filename = i.decision_approval_attachment_filename or "attachment"
+    return StreamingResponse(
+        io.BytesIO(i.decision_approval_attachment_blob),
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+class AddDecisionApproverRequest(BaseModel):
+    approver_name: str
+    approver_email: str
+    # The frontend's own origin (window.location.origin) — the backend
+    # doesn't reliably know the frontend's public URL (it may be a
+    # different domain from this API's own PUBLIC_BASE_URL in a typical
+    # SPA+API split deployment), so the browser, which DOES know it,
+    # supplies it here rather than the backend guessing.
+    approval_url_base: str
+
+
+@router.post("/interviews/{interview_id}/decision-approvers")
+async def add_decision_approver(
+    interview_id: int, payload: AddDecisionApproverRequest,
+    current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    """The 'online approval' option alongside the manual popup fields —
+    emails a named approver a tokenized link (no login) where THEY
+    record Approve/Reject plus their own comments, independently of any
+    other approver asked about the same round. Multiple approvers can
+    be added for the same round; each gets their own row and their own
+    link."""
+    org = await _org(db, current_user)
+    i = (await db.execute(select(Interview).where(Interview.id == interview_id, Interview.organisation_id == org.id))).scalar_one_or_none()
+    if not i:
+        raise HTTPException(404, "Interview not found")
+    if not payload.approver_name.strip() or not payload.approver_email.strip():
+        raise HTTPException(400, "Approver name and email are both required.")
+
+    approver = InterviewDecisionApprover(
+        interview_id=i.id,
+        approver_name=payload.approver_name.strip(),
+        approver_email=payload.approver_email.strip(),
+        token=service.generate_token(),
+        invited_at=datetime.utcnow(),
+    )
+    db.add(approver)
+    await db.commit()
+    await db.refresh(approver)
+
+    candidate_name = await _candidate_name(db, i.candidate_id, i.joblens_candidate_id)
+    requisition_title = await _requisition_title(db, i.requisition_id)
+    link = f"{payload.approval_url_base.rstrip('/')}/decision-approval/{approver.token}"
+    body_html = (
+        f"<p>Hi {approver.approver_name.split(' ')[0]},</p>"
+        f"<p>Your input is requested on a hiring decision for <strong>{candidate_name}</strong>"
+        f"{f' — {requisition_title}' if requisition_title else ''} ({i.round_name}).</p>"
+        f"<p><a href=\"{link}\">Click here to review and record your decision</a></p>"
+        f"<p>No account or login is required.</p>"
+    )
+    smtp_cfg = await get_smtp_config(current_user.id, db)
+    send_email(smtp_cfg, approver.approver_email, f"Approval requested: {candidate_name}", body_html)
+
+    return _fmt_decision_approver(approver)
+
+
+@router.delete("/interviews/decision-approvers/{approver_id}")
+async def remove_decision_approver(
+    approver_id: int, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    """Removing an approver who hasn't responded yet — e.g. added by
+    mistake, or the wrong person. Once someone HAS responded, their
+    decision stays on record (not deletable here) since it's now part
+    of the decision's audit trail."""
+    org = await _org(db, current_user)
+    approver = (await db.execute(
+        select(InterviewDecisionApprover)
+        .join(Interview, InterviewDecisionApprover.interview_id == Interview.id)
+        .where(InterviewDecisionApprover.id == approver_id, Interview.organisation_id == org.id)
+    )).scalar_one_or_none()
+    if not approver:
+        raise HTTPException(404, "Approver not found")
+    if approver.status != "Pending":
+        raise HTTPException(400, "This approver has already responded — their decision is part of the record and can't be removed.")
+    await db.delete(approver)
+    await db.commit()
+    return {"deleted": True}
 
 
 # ── TELEPHONY (click-to-call + SMS scheduling — see utils/telephony.py) ──

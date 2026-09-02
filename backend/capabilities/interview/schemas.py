@@ -15,7 +15,12 @@ class ArtifactIn(BaseModel):
 
 
 class InterviewCreate(BaseModel):
-    candidate_id: int
+    candidate_id: Optional[int] = None
+    # Alternative to candidate_id — set when this round belongs to a
+    # CandidateLens/JobLens-originated candidate rather than a real ATS
+    # Candidate row (see Interview.joblens_candidate_id). Exactly one of
+    # candidate_id/joblens_candidate_id must be provided.
+    joblens_candidate_id: Optional[int] = None
     requisition_id: Optional[int] = None
     application_id: Optional[int] = None
     round_name: str

@@ -104,3 +104,42 @@ class Subscription(Base):
             "end_date": self.end_date.isoformat() if self.end_date else None,
             "amount_paid_cents": self.amount_paid_cents or 0,
         }
+
+
+class SubscriptionHistory(Base):
+    """Append-only log of every plan term a user has ever been on — a
+    snapshot row written alongside every meaningful update to that
+    user's single current Subscription row above (upgrade, renewal,
+    free-demo activation, admin-granted Enterprise), never edited or
+    overwritten afterward. Subscription answers "what plan is this user
+    on right now"; this answers "what plans has this user ever been on,
+    and what did they pay" — the "old plan data should not be
+    overwritten, it can be pulled whenever required" record. See
+    routers/billing.py's record_subscription_history()."""
+    __tablename__ = "tiq_subscription_history"
+
+    id                       = Column(Integer, primary_key=True, index=True)
+    user_id                  = Column(Integer, ForeignKey("tiq_users.id"), index=True, nullable=False)
+    plan_slug                = Column(String(60), default="")
+    billing_period           = Column(String(10), default="")
+    status                   = Column(String(20), default="none")
+    start_date               = Column(DateTime, nullable=True)
+    end_date                 = Column(DateTime, nullable=True)
+    amount_paid_cents        = Column(Integer, default=0)
+    stripe_checkout_session_id = Column(String(120), default="")
+    notes                    = Column(Text, default="")
+    recorded_at              = Column(DateTime, default=datetime.utcnow)   # when THIS history row was written, not the plan's own start_date
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "plan_slug": self.plan_slug,
+            "billing_period": self.billing_period,
+            "status": self.status,
+            "start_date": self.start_date.isoformat() if self.start_date else None,
+            "end_date": self.end_date.isoformat() if self.end_date else None,
+            "amount_paid_cents": self.amount_paid_cents or 0,
+            "stripe_checkout_session_id": self.stripe_checkout_session_id or "",
+            "notes": self.notes or "",
+            "recorded_at": self.recorded_at.isoformat() if self.recorded_at else None,
+        }

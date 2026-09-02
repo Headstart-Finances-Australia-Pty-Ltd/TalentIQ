@@ -40,7 +40,7 @@ interviewer instead of a scattered "let me email you my thoughts."
 """
 from datetime import datetime
 from sqlalchemy import (
-    Column, Integer, String, Text, Boolean, DateTime, ForeignKey, JSON,
+    Column, Integer, String, Text, Boolean, DateTime, ForeignKey, JSON, LargeBinary,
 )
 from sqlalchemy.orm import relationship
 
@@ -70,7 +70,7 @@ INTERVIEW_STATUSES = ["Requested", "Scheduled", "Completed", "Cancelled", "No-Sh
 # this server-side): a video or panel round involves other people's
 # calendars an HR person needs to actually coordinate, so those must be
 # scheduled directly rather than left to a public, unauthenticated link.
-INTERVIEW_TYPES = ["Phone Interview", "Video Interview", "Panel Interview", "Resume Screening"]
+INTERVIEW_TYPES = ["Phone Interview", "Video Interview", "Panel Interview", "Final Interview", "HR Interview", "Resume Screening"]
 SELF_SCHEDULABLE_TYPES = {"Phone Interview"}
 
 RECOMMENDATION_OPTIONS = ["Strong Yes", "Yes", "Neutral", "No", "Strong No"]
@@ -240,6 +240,35 @@ class Interview(Base):
     # docstring for why these exist separately from updated_at.
     calendly_link_sent_at = Column(DateTime, nullable=True)  # Phone Interview's Send Calendly Link
     video_invite_sent_at  = Column(DateTime, nullable=True)  # Video Interview's Send Interview Invite / Candidate Contact
+    # A fixed-time invite email (date/time + location_or_link, no
+    # candidate-facing scheduling involved) — Interview Scheduling's
+    # "Send Invite" action for rounds that can't use Calendly
+    # self-scheduling (see SELF_SCHEDULABLE_TYPES), starting with Panel
+    # Interview, since panel coordination needs a recruiter-fixed time,
+    # not a candidate-picked one.
+    invite_sent_at        = Column(DateTime, nullable=True)
+    # Interview Decision's bulk "Send Rejection Email" action (mirrors
+    # JobLensCandidate.rejection_email_sent_at in models/models.py) —
+    # tracked per ROUND here rather than per candidate, since a
+    # candidate can be rejected at any individual round (Phone, Video,
+    # Panel…) without necessarily being rejected from the requisition
+    # as a whole.
+    rejection_email_sent_at = Column(DateTime, nullable=True)
+
+    # ── Hiring-decision approval (Interview Decision's Approval column) ──
+    # Deliberately separate from approver_name/approval_status/approved_at
+    # above, which are for a completely different thing: sign-off on the
+    # interview being SCHEDULED (an approval-gated interview type, before
+    # it happens). This is sign-off on the DECISION after it happens —
+    # e.g. a hiring manager or client confirming "yes, we're extending an
+    # offer" — with a real audit trail (who, when, and an optional
+    # supporting document) kept for future reference.
+    decision_approval_status = Column(String(20), default="Pending")   # Pending | Approved | Not Approved
+    decision_approved_by = Column(String(255), nullable=True)
+    decision_approved_at = Column(DateTime, nullable=True)
+    decision_approval_notes = Column(Text, nullable=True)
+    decision_approval_attachment_filename = Column(String(255), nullable=True)
+    decision_approval_attachment_blob = Column(LargeBinary, nullable=True)
 
     # Links a Panel Interview round to a reusable Panel Setup (see
     # InterviewPanel below) — Interview Scheduling's Panel column shows
@@ -315,6 +344,39 @@ class InterviewFeedbackLink(Base):
     created_at       = Column(DateTime, default=datetime.utcnow)
 
     interview = relationship("Interview", back_populates="feedback_links")
+
+
+class InterviewDecisionApprover(Base):
+    """One row per person asked to weigh in on a hiring DECISION (not
+    the interview's scheduling — see Interview.decision_approval_status'
+    docstring for that distinction) — Interview Decision's "send an
+    online approval request" option, alongside the manual popup where a
+    recruiter just records the outcome themselves. Deliberately a real
+    child table, not JSON on Interview, for the same reason
+    InterviewFeedbackLink is: MULTIPLE approvers can weigh in
+    independently on the same round (e.g. hiring manager + department
+    head), each with their own status/comments/date, and each needs
+    their own indexed, directly-queryable token for the public link —
+    a JSON list would work for storage but not for token lookup.
+
+    status starts "Pending" the moment the invite email goes out
+    (invited_at set then) and becomes "Approved"/"Rejected" once that
+    person submits their own decision via the tokenized public link
+    (see public_router.py's decision-approval endpoints) — there is no
+    login involved; the token itself is the approver's identity, same
+    pattern as every other public link in this capability."""
+    __tablename__ = "tiq_interview_decision_approvers"
+
+    id              = Column(Integer, primary_key=True, index=True)
+    interview_id    = Column(Integer, ForeignKey("tiq_interviews.id"), index=True, nullable=False)
+    approver_name   = Column(String(200), nullable=False)
+    approver_email  = Column(String(200), nullable=False)
+    status          = Column(String(20), default="Pending")   # Pending | Approved | Rejected
+    comments        = Column(Text, nullable=True)
+    decided_at      = Column(DateTime, nullable=True)
+    invited_at      = Column(DateTime, nullable=True)
+    token           = Column(String(64), unique=True, index=True, nullable=False)
+    created_at      = Column(DateTime, default=datetime.utcnow)
 
 
 class PanelInterviewer(Base):

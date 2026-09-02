@@ -504,6 +504,26 @@ class JobLensCandidate(Base):
     dominant_emotion    = Column(String(20), default="Neutral")
     shortlisted         = Column(Boolean, default=False)
 
+    # Screening Decision's rejection-email bulk-send action (see
+    # routers/joblens.py's send_rejection_emails) — each candidate gets
+    # their own individually-addressed email (never a shared To/CC list,
+    # so no candidate ever sees another's name or address), tracked here
+    # so the Screening Decision table can show "Sent" + the date instead
+    # of the recruiter having to remember who's already been notified.
+    rejection_email_sent_at = Column(DateTime, nullable=True)
+
+    # A deterministic, evidence-grounded recruiter recommendation —
+    # COMPOSED IN PYTHON from the essential/good-to-have verdicts already
+    # judged by the LLM (see routers/joblens.py's _build_recommendation),
+    # never a fresh separate LLM narrative. That's deliberate: asking the
+    # model to ALSO freely summarize "should this candidate advance" is
+    # exactly the kind of open-ended judgment that produced the CI/CD
+    # hallucination this recommendation exists to help catch — grounding
+    # it in the same structured, now-more-reliable matched/missing lists
+    # instead means the text can never claim a strength or gap that the
+    # verdict data itself doesn't already say.
+    screening_recommendation = Column(Text, nullable=True)
+
     # ── Resume + interview video stored directly on this row ──────────────
     # Kept as blobs (not files on disk) so the candidate's full record —
     # score, resume, and interview footage — lives in one place and is
