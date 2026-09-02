@@ -385,7 +385,7 @@ export default function InterviewsPage({ embedded = false }: { embedded?: boolea
       scheduled_at: i.scheduled_at ? i.scheduled_at.slice(0, 16) : "",
       proposed_slots: i.proposed_slots?.length ? i.proposed_slots.map((s: string) => s.slice(0, 16)) : [""],
       notes: i.notes,
-      approver_name: i.approver_name || "", approver_email: i.approver_email || "",
+      approver_name: i.approver_name || "", approver_email: i.approver_email || "", panel_id: i.panel_id ?? "",
     });
     setEditingId(i.id);
     setFormError("");
