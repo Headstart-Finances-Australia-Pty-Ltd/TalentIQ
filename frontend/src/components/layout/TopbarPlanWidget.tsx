@@ -78,16 +78,22 @@ export default function TopbarPlanWidget() {
       >
         <Clock size={12} /> {planLabel}
       </button>
-      <button
-        onClick={() => setShowPicker(true)}
-        style={{
-          display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12, fontWeight: 700,
-          color: "#fff", padding: "5px 12px", borderRadius: 6, border: "none",
-          background: "var(--teal-500, #00c7b7)", cursor: "pointer",
-        }}
-      >
-        <TrendingUp size={12} /> Upgrade Plan
-      </button>
+      {/* Already on the top plan — nothing left to upgrade TO, so the
+          button (and the "expires soon" nudge toward it below) would
+          just be pointing an Enterprise customer at a picker with
+          nothing above their current plan. */}
+      {current?.plan_slug !== "enterprise" && (
+        <button
+          onClick={() => setShowPicker(true)}
+          style={{
+            display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12, fontWeight: 700,
+            color: "#fff", padding: "5px 12px", borderRadius: 6, border: "none",
+            background: "var(--teal-500, #00c7b7)", cursor: "pointer",
+          }}
+        >
+          <TrendingUp size={12} /> Upgrade Plan
+        </button>
+      )}
 
       {showExpiryToast && daysLeft !== null && (
         <div style={{

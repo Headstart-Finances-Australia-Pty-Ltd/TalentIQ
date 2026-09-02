@@ -1254,7 +1254,11 @@ function CallCandidatePopup({
             )}
             {androidCallState === "active" ? (
               <div>
-                <div style={{ fontSize: 11, color: "#10b981", fontWeight: 700, marginBottom: 12 }}>Dialing on your phone now</div>
+                <div style={{ fontSize: 11, color: "#10b981", fontWeight: 700, marginBottom: 6 }}>Dialing on your phone now</div>
+                <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 12 }}>
+                  No sound? Check Windows' speaker icon has your phone selected (Bluetooth "Hands-Free") — or tap
+                  "Audio route" on the phone's own in-call screen once.
+                </div>
                 <button className="tiq-btn tiq-btn-outline" style={{ width: "100%" }} onClick={hangUpAndroidCall}>Hang Up</button>
               </div>
             ) : (

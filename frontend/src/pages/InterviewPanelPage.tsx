@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Plus, X, Trash2, Pencil, Users2, Search } from "lucide-react";
-import { interviewApi } from "../lib/api";
+import { interviewApi, requisitionApi } from "../lib/api";
 import { ResizableFilterHeader } from "../components/ResizableFilterHeader";
 
 const emptyForm = { role_for: "", company: "", interviewer_ids: [] as number[], setup_date: "" };
@@ -31,6 +31,7 @@ const PANEL_COLS = ["panel_number", "role_for", "company", "interviewers", "setu
 export default function InterviewPanelPage({ embedded = false }: { embedded?: boolean } = {}) {
   const [panels, setPanels] = useState<any[]>([]);
   const [people, setPeople] = useState<any[]>([]);
+  const [requisitions, setRequisitions] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -79,14 +80,24 @@ export default function InterviewPanelPage({ embedded = false }: { embedded?: bo
   const load = async () => {
     setLoading(true);
     try {
-      const [pnls, ppl] = await Promise.all([interviewApi.listInterviewPanels(), interviewApi.listPanelInterviewers()]);
+      const [pnls, ppl, reqs] = await Promise.all([
+        interviewApi.listInterviewPanels(), interviewApi.listPanelInterviewers(), requisitionApi.list(),
+      ]);
       setPanels(pnls);
       setPeople(ppl);
+      setRequisitions(reqs);
     } finally {
       setLoading(false);
     }
   };
   useEffect(() => { load(); }, []);
+
+  // Requisition titles for the Role For dropdown — deduplicated, since
+  // more than one open req can share a title (e.g. two "Data Analyst"
+  // reqs for different clients). "Role For" still accepts free text too
+  // (see the input below) for a panel set up ahead of a requisition
+  // existing yet, or for a role that was never entered as one.
+  const requisitionRoleOptions = Array.from(new Set(requisitions.map((r: any) => r.title).filter(Boolean))).sort();
 
   const openAdd = () => { setEditingId(null); setForm(emptyForm); setFormError(""); setShowForm(true); };
   const openEdit = (p: any) => {
@@ -235,7 +246,18 @@ export default function InterviewPanelPage({ embedded = false }: { embedded?: bo
             </div>
             <div className="tiq-form-group">
               <label className="tiq-label">Role For</label>
-              <input className="tiq-input" placeholder="e.g. Senior Backend Engineer" value={form.role_for} onChange={(e) => setForm({ ...form, role_for: e.target.value })} />
+              <input
+                className="tiq-input" list="panel-role-options"
+                placeholder="e.g. Senior Backend Engineer"
+                value={form.role_for}
+                onChange={(e) => setForm({ ...form, role_for: e.target.value })}
+              />
+              {/* Suggests existing requisition titles as you type, but still
+                  accepts free text — a panel can be set up before its
+                  requisition exists yet, or for a role never entered as one. */}
+              <datalist id="panel-role-options">
+                {requisitionRoleOptions.map((title) => <option key={title} value={title} />)}
+              </datalist>
             </div>
             <div className="tiq-form-group">
               <label className="tiq-label">Company</label>
@@ -252,6 +274,13 @@ export default function InterviewPanelPage({ embedded = false }: { embedded?: bo
                   <label key={pi.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 4px", cursor: "pointer", fontSize: 13 }}>
                     <input type="checkbox" checked={form.interviewer_ids.includes(pi.id)} onChange={() => toggleInterviewer(pi.id)} />
                     <span>{pi.name}</span>
+                    <span className="tiq-badge" style={{
+                      fontSize: 9.5,
+                      background: pi.interviewer_type === "External" ? "rgba(139,92,246,.12)" : "rgba(13,148,136,.12)",
+                      color: pi.interviewer_type === "External" ? "var(--violet-500, #8b5cf6)" : "var(--brand-teal, #0d9488)",
+                    }}>
+                      {pi.interviewer_type || "Internal"}
+                    </span>
                     {pi.expertise_area && <span style={{ color: "var(--text-muted)", fontSize: 11 }}>— {pi.expertise_area}</span>}
                   </label>
                 ))}

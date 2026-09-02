@@ -3,10 +3,10 @@ import { Plus, X, Trash2, Pencil, Users, Search } from "lucide-react";
 import { interviewApi } from "../lib/api";
 import { ResizableFilterHeader } from "../components/ResizableFilterHeader";
 
-const emptyForm = { name: "", expertise_area: "", company: "", phone: "", email: "", notes: "" };
+const emptyForm = { name: "", expertise_area: "", company: "", interviewer_type: "Internal", phone: "", email: "", notes: "" };
 
 const PANEL_INTERVIEWER_COL_WIDTHS: Record<string, number> = {
-  name: 170, expertise_area: 180, company: 160, phone: 140, email: 190, assignment: 220,
+  name: 170, expertise_area: 170, company: 150, type: 100, phone: 130, email: 180, assignment: 200,
 };
 
 // Raw value behind each column — used for the header filter dropdowns,
@@ -17,6 +17,7 @@ function getInterviewerColValue(p: any, key: string): string {
     case "name": return p.name || "";
     case "expertise_area": return p.expertise_area || "";
     case "company": return p.company || "";
+    case "type": return p.interviewer_type || "Internal";
     case "phone": return p.phone || "";
     case "email": return p.email || "";
     case "assignment": return (p.assignments || []).length === 0
@@ -25,7 +26,7 @@ function getInterviewerColValue(p: any, key: string): string {
     default: return "";
   }
 }
-const INTERVIEWER_COLS = ["name", "expertise_area", "company", "phone", "email", "assignment"];
+const INTERVIEWER_COLS = ["name", "expertise_area", "company", "type", "phone", "email", "assignment"];
 
 // Panel Interviewers — a real directory of subject-matter experts who sit
 // on Panel Interview rounds, entered once and reused (see
@@ -95,7 +96,7 @@ export default function PanelInterviewersPage({ embedded = false }: { embedded?:
   const openAdd = () => { setEditingId(null); setForm(emptyForm); setFormError(""); setShowForm(true); };
   const openEdit = (p: any) => {
     setEditingId(p.id);
-    setForm({ name: p.name, expertise_area: p.expertise_area, company: p.company, phone: p.phone, email: p.email, notes: p.notes });
+    setForm({ name: p.name, expertise_area: p.expertise_area, company: p.company, interviewer_type: p.interviewer_type || "Internal", phone: p.phone, email: p.email, notes: p.notes });
     setFormError("");
     setShowForm(true);
   };
@@ -186,6 +187,9 @@ export default function PanelInterviewersPage({ embedded = false }: { embedded?:
                   <ResizableFilterHeader label="Company" width={colWidths.company} onWidthChange={(w) => setColWidth("company", w)}
                     value={colFilters.company} options={colOptions("company")} onChange={(v) => setColFilter("company", v)}
                     sortDir={sort?.col === "company" ? sort.dir : null} onSortClick={() => toggleSort("company")} />
+                  <ResizableFilterHeader label="Type" width={colWidths.type} onWidthChange={(w) => setColWidth("type", w)}
+                    value={colFilters.type} options={colOptions("type")} onChange={(v) => setColFilter("type", v)}
+                    sortDir={sort?.col === "type" ? sort.dir : null} onSortClick={() => toggleSort("type")} />
                   <ResizableFilterHeader label="Phone" width={colWidths.phone} onWidthChange={(w) => setColWidth("phone", w)}
                     value={colFilters.phone} options={colOptions("phone")} onChange={(v) => setColFilter("phone", v)}
                     sortDir={sort?.col === "phone" ? sort.dir : null} onSortClick={() => toggleSort("phone")} />
@@ -201,7 +205,7 @@ export default function PanelInterviewersPage({ embedded = false }: { embedded?:
               <tbody>
                 {displayPeople.length === 0 && (
                   <tr>
-                    <td colSpan={8} style={{ textAlign: "center", padding: 28, color: "var(--text-muted)" }}>
+                    <td colSpan={9} style={{ textAlign: "center", padding: 28, color: "var(--text-muted)" }}>
                       No interviewers match the current search/filters.
                     </td>
                   </tr>
@@ -212,6 +216,14 @@ export default function PanelInterviewersPage({ embedded = false }: { embedded?:
                     <td style={{ fontWeight: 600, fontSize: 13 }}>{p.name}</td>
                     <td style={{ fontSize: 12 }}>{p.expertise_area || "—"}</td>
                     <td style={{ fontSize: 12 }}>{p.company || "—"}</td>
+                    <td style={{ fontSize: 12 }}>
+                      <span className="tiq-badge" style={{
+                        background: p.interviewer_type === "External" ? "rgba(139,92,246,.12)" : "rgba(13,148,136,.12)",
+                        color: p.interviewer_type === "External" ? "var(--violet-500, #8b5cf6)" : "var(--brand-teal, #0d9488)",
+                      }}>
+                        {p.interviewer_type || "Internal"}
+                      </span>
+                    </td>
                     <td style={{ fontSize: 12 }}>{p.phone || "—"}</td>
                     <td style={{ fontSize: 12 }}>{p.email || "—"}</td>
                     <td style={{ fontSize: 12 }}>
@@ -265,6 +277,17 @@ export default function PanelInterviewersPage({ embedded = false }: { embedded?:
               <label className="tiq-label">Company</label>
               <input className="tiq-input" value={form.company} onChange={(e) => setForm({ ...form, company: e.target.value })} />
             </div>
+            <div className="tiq-form-group">
+              <label className="tiq-label">Type</label>
+              <select className="tiq-select" value={form.interviewer_type}
+                      onChange={(e) => setForm({ ...form, interviewer_type: e.target.value })}>
+                <option value="Internal">Internal</option>
+                <option value="External">External</option>
+              </select>
+              <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 4 }}>
+                Internal — part of your own hiring org. External — a client/partner SME. A panel can freely mix both.
+              </div>
+            </div>
             <div style={{ display: "flex", gap: 10 }}>
               <div className="tiq-form-group" style={{ flex: 1 }}>
                 <label className="tiq-label">Phone</label>
@@ -308,8 +331,18 @@ export default function PanelInterviewersPage({ embedded = false }: { embedded?:
                 <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                   {panelPopup.data.members.map((m: any) => (
                     <div key={m.id} style={{ padding: "10px 12px", border: "1px solid var(--border)", borderRadius: 8 }}>
-                      <div style={{ fontWeight: 700, fontSize: 13 }}>{m.name}</div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <div style={{ fontWeight: 700, fontSize: 13 }}>{m.name}</div>
+                        <span className="tiq-badge" style={{
+                          fontSize: 10,
+                          background: m.interviewer_type === "External" ? "rgba(139,92,246,.12)" : "rgba(13,148,136,.12)",
+                          color: m.interviewer_type === "External" ? "var(--violet-500, #8b5cf6)" : "var(--brand-teal, #0d9488)",
+                        }}>
+                          {m.interviewer_type || "Internal"}
+                        </span>
+                      </div>
                       {m.expertise_area && <div style={{ fontSize: 11.5, color: "var(--text-muted)" }}>{m.expertise_area}</div>}
+                      {m.company && <div style={{ fontSize: 11.5, color: "var(--text-muted)" }}>{m.company}</div>}
                     </div>
                   ))}
                 </div>

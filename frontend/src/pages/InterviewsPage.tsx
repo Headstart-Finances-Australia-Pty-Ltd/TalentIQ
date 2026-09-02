@@ -11,31 +11,72 @@ import { ResizableFilterHeader } from "../components/ResizableFilterHeader";
 // pattern as Requisitions/Screening, keyed by the same names used in
 // getGroupColValue() below.
 const INTERVIEWS_DEFAULT_COL_WIDTHS: Record<string, number> = {
-  candidate: 160, requisition: 170, resume: 120, phoneLink: 120, phone: 150,
-  videoEmail: 120, video: 150, panelSchedule: 140, panelInterviewers: 140,
-  panelStatus: 110, panelDecision: 170,
+  candidate: 160, requisition: 170, resume: 120, phone: 200,
+  video: 200, panel: 220,
 };
 
 // Raw, sortable/filterable value behind each column of the consolidated
 // pipeline table — kept separate from the cell JSX (badges, buttons,
 // stacked dates) below, since filtering/sorting always compares the
-// underlying data, not the rendered markup.
+// underlying data, not the rendered markup. Phone/Video/Panel each
+// condense what used to be 2-4 separate columns into one hyphen-joined
+// summary string (see phoneInterviewSummary/videoInterviewSummary/
+// panelInterviewSummary below, which the cells themselves also use) —
+// same idea as resume's screening_summary from the backend.
 function getGroupColValue(g: any, key: string): string {
   const r = g.resume, p = g.phone, v = g.video, pan = g.panel;
   switch (key) {
     case "candidate": return g.candidate_name || "";
     case "requisition": return [g.requisition_role, g.company].filter(Boolean).join(" · ");
     case "resume": return r?.status || "";
-    case "phoneLink": return p?.calendly_link_sent_at ? "Sent" : "Not sent";
-    case "phone": return p?.status || "";
-    case "videoEmail": return v?.video_invite_sent_at ? "Sent" : "Not sent";
-    case "video": return v?.status || "";
-    case "panelSchedule": return pan?.scheduled_at ? new Date(pan.scheduled_at).toLocaleString() : "";
-    case "panelInterviewers": return pan?.panel_number != null ? `Panel #${pan.panel_number}` : (pan?.interviewers || []).map((x: any) => x.name).join(", ");
-    case "panelStatus": return pan?.status || "";
-    case "panelDecision": return pan?.decision || (pan ? "Pending" : "");
+    case "phone": return phoneInterviewSummary(p);
+    case "video": return videoInterviewSummary(v);
+    case "panel": return panelInterviewSummary(pan);
     default: return "";
   }
+}
+
+// "Link Sent/Not Sent - Completed/Not Completed - <date>" — same
+// hyphen-separated single-column presentation as Resume Screening's
+// screening_summary, replacing what used to be two separate columns
+// ("Phone Schedule Link" and "Phone Interview").
+function phoneInterviewSummary(p: any): string {
+  if (!p) return "—";
+  const linkPart = p.calendly_link_sent_at ? "Link Sent" : "Link Not Sent";
+  const completedPart = p.status === "Completed" ? "Completed" : "Not Completed";
+  const dateRaw = p.status === "Completed" ? p.completed_at : p.scheduled_at;
+  const datePart = dateRaw ? new Date(dateRaw).toLocaleDateString() : "—";
+  return [linkPart, completedPart, datePart].join(" - ");
+}
+
+// Same idea as phoneInterviewSummary, for what used to be "Video Email"
+// + "Video Interview".
+function videoInterviewSummary(v: any): string {
+  if (!v) return "—";
+  const emailPart = v.video_invite_sent_at ? "Email Sent" : "Email Not Sent";
+  const completedPart = v.status === "Completed" ? "Completed" : "Not Completed";
+  const dateRaw = v.status === "Completed" ? v.completed_at : v.scheduled_at;
+  const datePart = dateRaw ? new Date(dateRaw).toLocaleDateString() : "—";
+  return [emailPart, completedPart, datePart].join(" - ");
+}
+
+// Same idea again, condensing what used to be "Panel Schedule" +
+// "Panel Interviewers" + "Panel Status" + "Panel Feedback & Decision"
+// into one line: "<date/time or Not Scheduled> - <Panel #N or names> -
+// <status> - <decision>". The interactive bits that don't reduce to
+// plain text (Send Invite, View panel members, feedback links, the
+// editable status badge) stay in the cell below this summary line —
+// same "read-only summary line, then whatever's actually clickable
+// underneath" pattern the other three merged columns use.
+function panelInterviewSummary(pan: any): string {
+  if (!pan) return "—";
+  const schedulePart = pan.scheduled_at ? new Date(pan.scheduled_at).toLocaleString() : "Not Scheduled";
+  const whoPart = pan.panel_number != null
+    ? `Panel #${pan.panel_number}`
+    : (pan.interviewers || []).map((x: any) => x.name).join(", ") || "No panel";
+  const statusPart = pan.status || "Pending";
+  const decisionPart = pan.decision || "Pending";
+  return [schedulePart, whoPart, statusPart, decisionPart].join(" - ");
 }
 
 // Must match the key AdminConsolePage.tsx's Modules Management > System
@@ -172,6 +213,14 @@ export default function InterviewsPage({ embedded = false }: { embedded?: boolea
   });
   const syncCandidateLensEnabled = moduleToggles[SYNC_CANDIDATELENS_MODULE_ROUTE] ?? true;
 
+  // For the Add/Edit form's Panel picker below — only relevant when
+  // interview_type is "Panel Interview", but fetched unconditionally
+  // (cheap, and avoids a load flicker the moment that type is picked).
+  const { data: availablePanels = [] } = useQuery({
+    queryKey: ["interview-panels"],
+    queryFn: () => interviewApi.listInterviewPanels(),
+  });
+
   const [interviews, setInterviews] = useState<any[]>([]);
   const [candidates, setCandidates] = useState<any[]>([]);
   const [requisitions, setRequisitions] = useState<any[]>([]);
@@ -241,7 +290,7 @@ export default function InterviewsPage({ embedded = false }: { embedded?: boolea
     setLoading(true);
     try {
       const [iv, cands, reqs] = await Promise.all([
-        interviewApi.list(statusFilter ? { status: statusFilter } : undefined),
+        interviewApi.list({ ...(statusFilter ? { status: statusFilter } : {}), passed_screening_only: true }),
         acquisitionApi.listCandidates(),
         requisitionApi.list(),
       ]);
@@ -317,6 +366,10 @@ export default function InterviewsPage({ embedded = false }: { embedded?: boolea
           key, candidate_id: i.candidate_id, candidate_name: i.candidate_name,
           requisition_number: i.requisition_number, requisition_role: i.requisition_role, company: i.company,
           resume: null, phone: null, video: null, panel: null,
+          // Same for every interview round belonging to this candidate
+          // (all share one joblens_candidate_id) — see backend's
+          // screening_summary: "Completed - Qualified - 82% - 2026-08-20".
+          screening_summary: i.screening_summary || null,
         });
       }
       const g = groups.get(key);
@@ -334,7 +387,7 @@ export default function InterviewsPage({ embedded = false }: { embedded?: boolea
     return Array.from(groups.values());
   }, [interviews]);
 
-  const PIPELINE_COLS = ["candidate", "requisition", "resume", "phoneLink", "phone", "videoEmail", "video", "panelSchedule", "panelInterviewers", "panelStatus", "panelDecision"];
+  const PIPELINE_COLS = ["candidate", "requisition", "resume", "phone", "video", "panel"];
 
   // Unique values per column always come from the full groupedRows list
   // (not the already-filtered one) so picking a value in one column's
@@ -385,7 +438,8 @@ export default function InterviewsPage({ embedded = false }: { embedded?: boolea
       scheduled_at: i.scheduled_at ? i.scheduled_at.slice(0, 16) : "",
       proposed_slots: i.proposed_slots?.length ? i.proposed_slots.map((s: string) => s.slice(0, 16)) : [""],
       notes: i.notes,
-      approver_name: i.approver_name || "", approver_email: i.approver_email || "", panel_id: i.panel_id ?? "",
+      approver_name: i.approver_name || "", approver_email: i.approver_email || "",
+      panel_id: i.panel_id ?? "",
     });
     setEditingId(i.id);
     setFormError("");
@@ -406,6 +460,7 @@ export default function InterviewsPage({ embedded = false }: { embedded?: boolea
           interviewers, duration_minutes: Number(form.duration_minutes),
           location_or_link: form.location_or_link,
           requisition_id: form.requisition_id === "" ? null : Number(form.requisition_id),
+          panel_id: form.panel_id === "" ? null : Number(form.panel_id),
           scheduled_at: form.scheduling_mode === "fixed" && form.scheduled_at ? new Date(form.scheduled_at).toISOString() : undefined,
           notes: form.notes,
           approver_name: form.approver_name, approver_email: form.approver_email,
@@ -414,6 +469,7 @@ export default function InterviewsPage({ embedded = false }: { embedded?: boolea
         const payload: any = {
           candidate_id: Number(form.candidate_id),
           requisition_id: form.requisition_id === "" ? null : Number(form.requisition_id),
+          panel_id: form.panel_id === "" ? null : Number(form.panel_id),
           round_name: form.round_name, round_number: Number(form.round_number),
           interview_type: form.interview_type,
           interviewers, duration_minutes: Number(form.duration_minutes),
@@ -761,44 +817,28 @@ export default function InterviewsPage({ embedded = false }: { embedded?: boolea
                 <ResizableFilterHeader label="Resume Screening" width={colWidths.resume} onWidthChange={(w) => setColWidth("resume", w)}
                   value={pipelineColFilters.resume} options={pipelineColOptions("resume")} onChange={(v) => setPipelineColFilter("resume", v)}
                   sortDir={pipelineSort?.col === "resume" ? pipelineSort.dir : null} onSortClick={() => togglePipelineSort("resume")} />
-                <ResizableFilterHeader label="Phone Schedule Link" width={colWidths.phoneLink} onWidthChange={(w) => setColWidth("phoneLink", w)}
-                  value={pipelineColFilters.phoneLink} options={pipelineColOptions("phoneLink")} onChange={(v) => setPipelineColFilter("phoneLink", v)}
-                  sortDir={pipelineSort?.col === "phoneLink" ? pipelineSort.dir : null} onSortClick={() => togglePipelineSort("phoneLink")} />
                 <ResizableFilterHeader label="Phone Interview" width={colWidths.phone} onWidthChange={(w) => setColWidth("phone", w)}
                   value={pipelineColFilters.phone} options={pipelineColOptions("phone")} onChange={(v) => setPipelineColFilter("phone", v)}
                   sortDir={pipelineSort?.col === "phone" ? pipelineSort.dir : null} onSortClick={() => togglePipelineSort("phone")} />
-                <ResizableFilterHeader label="Video Email" width={colWidths.videoEmail} onWidthChange={(w) => setColWidth("videoEmail", w)}
-                  value={pipelineColFilters.videoEmail} options={pipelineColOptions("videoEmail")} onChange={(v) => setPipelineColFilter("videoEmail", v)}
-                  sortDir={pipelineSort?.col === "videoEmail" ? pipelineSort.dir : null} onSortClick={() => togglePipelineSort("videoEmail")} />
                 <ResizableFilterHeader label="Video Interview" width={colWidths.video} onWidthChange={(w) => setColWidth("video", w)}
                   value={pipelineColFilters.video} options={pipelineColOptions("video")} onChange={(v) => setPipelineColFilter("video", v)}
                   sortDir={pipelineSort?.col === "video" ? pipelineSort.dir : null} onSortClick={() => togglePipelineSort("video")} />
-                <ResizableFilterHeader label="Panel Schedule" width={colWidths.panelSchedule} onWidthChange={(w) => setColWidth("panelSchedule", w)}
-                  value={pipelineColFilters.panelSchedule} options={pipelineColOptions("panelSchedule")} onChange={(v) => setPipelineColFilter("panelSchedule", v)}
-                  sortDir={pipelineSort?.col === "panelSchedule" ? pipelineSort.dir : null} onSortClick={() => togglePipelineSort("panelSchedule")} />
-                <ResizableFilterHeader label="Panel Interviewers" width={colWidths.panelInterviewers} onWidthChange={(w) => setColWidth("panelInterviewers", w)}
-                  value={pipelineColFilters.panelInterviewers} options={pipelineColOptions("panelInterviewers")} onChange={(v) => setPipelineColFilter("panelInterviewers", v)}
-                  sortDir={pipelineSort?.col === "panelInterviewers" ? pipelineSort.dir : null} onSortClick={() => togglePipelineSort("panelInterviewers")} />
-                <ResizableFilterHeader label="Panel Status" width={colWidths.panelStatus} onWidthChange={(w) => setColWidth("panelStatus", w)}
-                  value={pipelineColFilters.panelStatus} options={pipelineColOptions("panelStatus")} onChange={(v) => setPipelineColFilter("panelStatus", v)}
-                  sortDir={pipelineSort?.col === "panelStatus" ? pipelineSort.dir : null} onSortClick={() => togglePipelineSort("panelStatus")} />
-                <ResizableFilterHeader label="Panel Feedback & Decision" width={colWidths.panelDecision} onWidthChange={(w) => setColWidth("panelDecision", w)}
-                  value={pipelineColFilters.panelDecision} options={pipelineColOptions("panelDecision")} onChange={(v) => setPipelineColFilter("panelDecision", v)}
-                  sortDir={pipelineSort?.col === "panelDecision" ? pipelineSort.dir : null} onSortClick={() => togglePipelineSort("panelDecision")} />
+                <ResizableFilterHeader label="Panel Interview" width={colWidths.panel} onWidthChange={(w) => setColWidth("panel", w)}
+                  value={pipelineColFilters.panel} options={pipelineColOptions("panel")} onChange={(v) => setPipelineColFilter("panel", v)}
+                  sortDir={pipelineSort?.col === "panel" ? pipelineSort.dir : null} onSortClick={() => togglePipelineSort("panel")} />
                 <th style={{ width: 150 }}>Actions</th>
               </tr>
             </thead>
             <tbody>
               {displayRows.length === 0 && (
                 <tr>
-                  <td colSpan={12} style={{ textAlign: "center", padding: 28, color: "var(--text-muted)" }}>
+                  <td colSpan={8} style={{ textAlign: "center", padding: 28, color: "var(--text-muted)" }}>
                     No rows match the current search/filters.
                   </td>
                 </tr>
               )}
               {displayRows.map((g, idx) => {
                 const r = g.resume, p = g.phone, v = g.video, pan = g.panel;
-                const dc = pan ? (DECISION_COLORS[pan.decision] || DECISION_COLORS.Pending) : null;
                 return (
                   <tr key={g.key}>
                     <td style={{ fontSize: 12, color: "var(--text-muted)" }}>{idx + 1}</td>
@@ -816,133 +856,106 @@ export default function InterviewsPage({ embedded = false }: { embedded?: boolea
                       ) : "—"}
                     </td>
 
-                    {/* Resume Screening — status + date stacked in one cell */}
+                    {/* Resume Screening — the compound "Completed/Pending -
+                        Qualified - ATS score - Date" summary from
+                        CandidateLens's screening decision (see backend's
+                        screening_summary), plus the Interview round's own
+                        status badge underneath when a Resume Screening
+                        round exists for this candidate. */}
                     <td>
-                      {r ? (
+                      {g.screening_summary && g.screening_summary !== "—" ? (
+                        <div style={{ fontSize: 11, fontWeight: 600 }}>{g.screening_summary}</div>
+                      ) : r ? null : <Muted />}
+                      {r && (
                         <>
                           <MiniBadge status={r.status} onChange={(s) => handleStatusChange(r.id, s)} />
                           <div style={{ fontSize: 10.5, color: "var(--text-muted)", marginTop: 3 }}>
                             {r.completed_at ? new Date(r.completed_at).toLocaleDateString() : "—"}
                           </div>
                         </>
-                      ) : <Muted />}
-                    </td>
-
-                    {/* Phone Schedule Link — sent/not-sent + date stacked */}
-                    <td>
-                      <div style={{ fontSize: 11.5, fontWeight: 600, color: p?.calendly_link_sent_at ? "#0d9488" : "var(--text-muted)" }}>
-                        {p?.calendly_link_sent_at ? "Sent" : "Not sent"}
-                      </div>
-                      <div style={{ fontSize: 10.5, color: "var(--text-muted)", marginTop: 2 }}>
-                        {p?.calendly_link_sent_at ? new Date(p.calendly_link_sent_at).toLocaleDateString() : "—"}
-                      </div>
-                    </td>
-
-                    {/* Phone Interview — status + date stacked */}
-                    <td>
-                      {p ? (
-                        <>
-                          <MiniBadge status={p.status} onChange={(s) => handleStatusChange(p.id, s)} />
-                          <div style={{ fontSize: 10.5, color: "var(--text-muted)", marginTop: 3 }}>
-                            {p.status === "Completed" && p.completed_at ? new Date(p.completed_at).toLocaleDateString()
-                              : p.scheduled_at ? new Date(p.scheduled_at).toLocaleString() : "—"}
-                          </div>
-                        </>
-                      ) : <Muted />}
-                    </td>
-
-                    {/* Video Email — sent/not-sent + date stacked */}
-                    <td>
-                      <div style={{ fontSize: 11.5, fontWeight: 600, color: v?.video_invite_sent_at ? "#0d9488" : "var(--text-muted)" }}>
-                        {v?.video_invite_sent_at ? "Sent" : "Not sent"}
-                      </div>
-                      <div style={{ fontSize: 10.5, color: "var(--text-muted)", marginTop: 2 }}>
-                        {v?.video_invite_sent_at ? new Date(v.video_invite_sent_at).toLocaleDateString() : "—"}
-                      </div>
-                    </td>
-
-                    {/* Video Interview — status + date stacked */}
-                    <td>
-                      {v ? (
-                        <>
-                          <MiniBadge status={v.status} onChange={(s) => handleStatusChange(v.id, s)} />
-                          <div style={{ fontSize: 10.5, color: "var(--text-muted)", marginTop: 3 }}>
-                            {v.status === "Completed" && v.completed_at ? new Date(v.completed_at).toLocaleDateString()
-                              : v.scheduled_at ? new Date(v.scheduled_at).toLocaleString() : "—"}
-                          </div>
-                        </>
-                      ) : <Muted />}
-                    </td>
-
-                    {/* Panel Interview */}
-                    <td style={{ fontSize: 11.5 }}>
-                      {pan?.scheduled_at ? (
-                        <>
-                          <div>{new Date(pan.scheduled_at).toLocaleString()}</div>
-                          {/* Fixed-time invite email — Panel Interview can't use
-                              the self-schedule Calendly link (SELF_SCHEDULABLE_TYPES
-                              is Phone Interview only), so this sends the already-set
-                              date/time + meeting link directly instead. */}
-                          <button
-                            className="tiq-btn tiq-btn-ghost tiq-btn-sm"
-                            style={{ padding: "1px 6px", fontSize: 10.5, marginTop: 2 }}
-                            disabled={sendingPanelInviteId === pan.id}
-                            onClick={async () => {
-                              setSendingPanelInviteId(pan.id);
-                              try {
-                                await interviewApi.sendFixedInvite(pan.id);
-                                await load();
-                              } catch (e: any) {
-                                alert(e?.response?.data?.detail || "Failed to send invite.");
-                              } finally {
-                                setSendingPanelInviteId(null);
-                              }
-                            }}
-                            title={pan.invite_sent_at ? `Invite sent ${new Date(pan.invite_sent_at).toLocaleString()} — click to resend` : "Email the candidate this date/time + meeting link"}
-                          >
-                            <Mail size={10} style={{ marginRight: 3 }} />
-                            {sendingPanelInviteId === pan.id ? "Sending…" : pan.invite_sent_at ? "Resend Invite" : "Send Invite"}
-                          </button>
-                        </>
-                      ) : "—"}
-                    </td>
-                    <td style={{ fontSize: 11.5 }}>
-                      {pan?.panel_number != null ? (
-                        <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" onClick={() => openPanelPopup(pan.panel_id)}
-                                title="View panel members">
-                          Panel #{pan.panel_number}
-                        </button>
-                      ) : (
-                        <span style={{ maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "inline-block" }}
-                              title={(pan?.interviewers || []).map((x: any) => x.name).join(", ")}>
-                          {(pan?.interviewers || []).map((x: any) => x.name).join(", ") || "—"}
-                        </span>
                       )}
                     </td>
-                    <td>{pan ? <MiniBadge status={pan.status} onChange={(s) => handleStatusChange(pan.id, s)} /> : <Muted />}</td>
 
-                    {/* Panel Feedback & Decision — link(s), decision, and
-                        decision date combined into one cell. */}
+                    {/* Phone Interview — link sent/not sent, completed/not
+                        completed, and date, hyphen-separated into one
+                        line (see phoneInterviewSummary) — replaces what
+                        used to be two separate columns. The editable
+                        status badge stays underneath since recruiters
+                        still need to change it, same pattern Resume
+                        Screening's column uses. */}
+                    <td>
+                      <div style={{ fontSize: 11, fontWeight: 600 }}>{phoneInterviewSummary(p)}</div>
+                      {p && (
+                        <div style={{ marginTop: 3 }}>
+                          <MiniBadge status={p.status} onChange={(s) => handleStatusChange(p.id, s)} />
+                        </div>
+                      )}
+                    </td>
+
+                    {/* Video Interview — same consolidation as Phone
+                        Interview above, for what used to be "Video
+                        Email" + "Video Interview". */}
+                    <td>
+                      <div style={{ fontSize: 11, fontWeight: 600 }}>{videoInterviewSummary(v)}</div>
+                      {v && (
+                        <div style={{ marginTop: 3 }}>
+                          <MiniBadge status={v.status} onChange={(s) => handleStatusChange(v.id, s)} />
+                        </div>
+                      )}
+                    </td>
+
+                    {/* Panel Interview — schedule, panel/interviewers,
+                        status, and decision all condensed into one
+                        hyphen-separated summary line (see
+                        panelInterviewSummary), with the actually-
+                        interactive bits (Send Invite, View panel
+                        members, feedback links, editable status badge)
+                        kept underneath in the same cell — replaces what
+                        used to be four separate columns. */}
                     <td style={{ fontSize: 11.5 }}>
-                      {pan ? (
-                        <>
-                          {pan.feedback_links_summary?.length ? (
-                            <div style={{ display: "flex", flexDirection: "column", gap: 2, marginBottom: 4 }}>
+                      <div style={{ fontWeight: 600, marginBottom: pan ? 4 : 0 }}>{panelInterviewSummary(pan)}</div>
+                      {pan && (
+                        <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                          {pan.scheduled_at && (
+                            <button
+                              className="tiq-btn tiq-btn-ghost tiq-btn-sm"
+                              style={{ padding: "1px 6px", fontSize: 10.5, alignSelf: "flex-start" }}
+                              disabled={sendingPanelInviteId === pan.id}
+                              onClick={async () => {
+                                setSendingPanelInviteId(pan.id);
+                                try {
+                                  await interviewApi.sendFixedInvite(pan.id);
+                                  await load();
+                                } catch (e: any) {
+                                  alert(e?.response?.data?.detail || "Failed to send invite.");
+                                } finally {
+                                  setSendingPanelInviteId(null);
+                                }
+                              }}
+                              title={pan.invite_sent_at ? `Invite sent ${new Date(pan.invite_sent_at).toLocaleString()} — click to resend` : "Email the candidate this date/time + meeting link"}
+                            >
+                              <Mail size={10} style={{ marginRight: 3 }} />
+                              {sendingPanelInviteId === pan.id ? "Sending…" : pan.invite_sent_at ? "Resend Invite" : "Send Invite"}
+                            </button>
+                          )}
+                          {pan.panel_number != null && (
+                            <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" style={{ padding: "1px 6px", fontSize: 10.5, alignSelf: "flex-start" }}
+                                    onClick={() => openPanelPopup(pan.panel_id)} title="View panel members">
+                              View panel members
+                            </button>
+                          )}
+                          {pan.feedback_links_summary?.length > 0 && (
+                            <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
                               {pan.feedback_links_summary.map((fl: any, i: number) => (
-                                <a key={i} href={fl.url_path} target="_blank" rel="noreferrer" style={{ color: "var(--brand-teal, #0d9488)" }}>
-                                  {fl.interviewer_name || `Link ${i + 1}`}
+                                <a key={i} href={fl.url_path} target="_blank" rel="noreferrer" style={{ color: "var(--brand-teal, #0d9488)", fontSize: 10.5 }}>
+                                  {fl.interviewer_name || `Feedback link ${i + 1}`}
                                 </a>
                               ))}
                             </div>
-                          ) : <div style={{ color: "var(--text-muted)", marginBottom: 4 }}>No feedback links</div>}
-                          <span style={{ fontSize: 11, fontWeight: 700, color: dc!.fg, background: dc!.bg, padding: "3px 9px", borderRadius: 999 }}>
-                            {pan.decision || "Pending"}
-                          </span>
-                          <div style={{ fontSize: 10.5, color: "var(--text-muted)", marginTop: 3 }}>
-                            {pan.decision_finalized_at ? new Date(pan.decision_finalized_at).toLocaleDateString() : "—"}
-                          </div>
-                        </>
-                      ) : <Muted />}
+                          )}
+                          <MiniBadge status={pan.status} onChange={(s) => handleStatusChange(pan.id, s)} />
+                        </div>
+                      )}
                     </td>
 
                     <td>
@@ -1018,7 +1031,11 @@ export default function InterviewsPage({ embedded = false }: { embedded?: boolea
             <div className="tiq-form-group">
               <label className="tiq-label">Interview Type</label>
               <select className="tiq-select" value={form.interview_type}
-                      onChange={(e) => setForm({ ...form, interview_type: e.target.value, scheduling_mode: SELF_SCHEDULABLE_TYPES.has(e.target.value) ? form.scheduling_mode : "fixed" })}>
+                      onChange={(e) => setForm({
+                        ...form, interview_type: e.target.value,
+                        scheduling_mode: SELF_SCHEDULABLE_TYPES.has(e.target.value) ? form.scheduling_mode : "fixed",
+                        panel_id: e.target.value === "Panel Interview" ? form.panel_id : "",
+                      })}>
                 {INTERVIEW_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
               </select>
               <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 4 }}>
@@ -1027,6 +1044,28 @@ export default function InterviewsPage({ embedded = false }: { embedded?: boolea
                   : "This round type must be scheduled directly by a recruiter — no self-scheduling link is available for it."}
               </div>
             </div>
+
+            {form.interview_type === "Panel Interview" && (
+              <div className="tiq-form-group">
+                <label className="tiq-label">Panel</label>
+                <select className="tiq-select" value={form.panel_id}
+                        onChange={(e) => setForm({ ...form, panel_id: e.target.value })}>
+                  <option value="">No panel — enter interviewers manually below</option>
+                  {availablePanels.map((pn: any) => (
+                    <option key={pn.id} value={pn.id}>
+                      Panel #{pn.panel_number}{pn.role_for ? ` — ${pn.role_for}` : ""}{pn.company ? ` (${pn.company})` : ""}
+                    </option>
+                  ))}
+                </select>
+                <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 4 }}>
+                  {form.panel_id
+                    ? "This round will use every interviewer already set up on that panel."
+                    : availablePanels.length === 0
+                      ? "No panels set up yet — create one on the Interview Panel page, or list interviewers manually below."
+                      : "Pick an existing panel to reuse its interviewers, or leave blank and enter them manually below."}
+                </div>
+              </div>
+            )}
 
             <div className="tiq-form-group">
               <label className="tiq-label">Interviewers</label>
@@ -1307,7 +1346,16 @@ export default function InterviewsPage({ embedded = false }: { embedded?: boolea
                   <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                     {panelPopup.data.members.map((m: any) => (
                       <div key={m.id} style={{ padding: "10px 12px", border: "1px solid var(--border)", borderRadius: 8 }}>
-                        <div style={{ fontWeight: 700, fontSize: 13 }}>{m.name}</div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                          <div style={{ fontWeight: 700, fontSize: 13 }}>{m.name}</div>
+                          <span className="tiq-badge" style={{
+                            fontSize: 10,
+                            background: m.interviewer_type === "External" ? "rgba(139,92,246,.12)" : "rgba(13,148,136,.12)",
+                            color: m.interviewer_type === "External" ? "var(--violet-500, #8b5cf6)" : "var(--brand-teal, #0d9488)",
+                          }}>
+                            {m.interviewer_type || "Internal"}
+                          </span>
+                        </div>
                         {m.expertise_area && <div style={{ fontSize: 11.5, color: "var(--text-muted)" }}>{m.expertise_area}</div>}
                         {m.company && <div style={{ fontSize: 11.5, color: "var(--text-muted)" }}>{m.company}</div>}
                         <div style={{ fontSize: 11.5, marginTop: 4 }}>

@@ -729,6 +729,24 @@ export default function SettingsPage() {
               is paired over Wi-Fi. See the app's README for one-time phone/laptop setup.
             </p>
 
+            {/* This dials only — ADB has no audio path at all. Two-way
+                audio is a one-time Bluetooth pairing between the phone
+                and this Windows laptop (an OS setting, not a TalentIQ
+                feature) — see windows-android-caller/README.md's
+                "Two-way audio (Bluetooth)" section for exact steps and
+                why the first call on an unfamiliar phone model can need
+                one manual "switch audio to PC" tap. */}
+            <div style={{
+              fontSize: 12, color: "var(--text-secondary)", background: "var(--slate-100)",
+              border: "1px solid var(--border)", borderRadius: 8, padding: "10px 12px", marginBottom: 16, lineHeight: 1.6,
+            }}>
+              <strong>Hearing/speaking on the call:</strong> dialing above doesn't carry audio by itself — pair your
+              phone to this Windows laptop over Bluetooth once (Settings → Bluetooth & devices → Add device, keep
+              "Phone calls" enabled for it), the same way you'd pair a headset. Most phones then route call audio to
+              the PC automatically; a few need one tap on the phone's in-call screen ("Audio route" → your PC) the
+              very first time. See the README's "Two-way audio (Bluetooth)" section for details.
+            </div>
+
             <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, marginBottom: 14, cursor: "pointer" }}>
               <input type="checkbox" checked={androidCallerEnabled}
                 onChange={e => setAndroidCallerEnabled(e.target.checked)} />

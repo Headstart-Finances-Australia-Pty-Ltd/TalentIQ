@@ -163,7 +163,7 @@ export const candidateLensSettingsApi = {
 };
 
 export const interviewApi = {
-  list: (params?: { candidate_id?: number; requisition_id?: number; status?: string; upcoming_only?: boolean }) =>
+  list: (params?: { candidate_id?: number; requisition_id?: number; status?: string; upcoming_only?: boolean; passed_screening_only?: boolean }) =>
     api.get("/api/interviews/interviews", { params }).then((r) => r.data),
   get: (id: number) => api.get(`/api/interviews/interviews/${id}`).then((r) => r.data),
   create: (data: any) => api.post("/api/interviews/interviews", data).then((r) => r.data),

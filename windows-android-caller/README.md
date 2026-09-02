@@ -186,6 +186,65 @@ The phone's IP can change if your router reassigns it — if "phone
 connected" drops later, just re-run Connect with the current IP (or set a
 DHCP reservation for the phone on your router so the IP never changes).
 
+## Two-way audio (Bluetooth) — hearing and speaking on the call
+
+ADB (both modes above) only controls the phone's dialer — it doesn't
+carry any audio. To actually **talk** on the call from your PC, pair the
+phone to Windows over Bluetooth once, the same way you'd pair a
+headset. This is a phone/Windows Bluetooth setting, not a TalentIQ
+feature — there's no code involved, and it works whether you're using
+Direct or Relay mode above.
+
+### One-time setup
+
+1. **On Windows:** Settings → Bluetooth & devices → Add device → pick
+   your phone. Accept the pairing prompt on both sides.
+2. **On the phone:** when the pairing prompt appears, make sure
+   **"Phone calls"** / **"Call audio"** is left switched ON for this
+   Windows device (some phones show this toggle during pairing, others
+   under the paired device's own settings afterward). This is the
+   toggle that enables Bluetooth **HFP** (Hands-Free Profile) — the
+   actual audio path — as opposed to just file transfer or media audio.
+3. In Windows Sound settings, you should now see the phone listed as a
+   **"Hands-Free"** input AND output device. Windows usually switches to
+   it automatically the moment a call is active; if not, click the
+   speaker icon in the taskbar and pick it manually.
+
+### Placing a call after that
+
+Dial as normal from TalentIQ's Call popup (Direct or Relay mode, same
+as above). Once the phone shows the call as connected:
+
+- **Most phones**: audio switches to the PC automatically within a
+  second or two.
+- **Some phones/OEM skins**: the call stays on the earpiece/speaker
+  until you tap **"Audio route" → [your PC's name]** on the phone's own
+  in-call screen — a one-time tap per phone, not per call, on the ones
+  that need it at all.
+
+### Why this isn't 100% automatic on every phone
+
+The ADB dialer control above is a plain Android API every manufacturer
+implements identically, which is why it's been reliable regardless of
+phone brand. Bluetooth call-audio routing isn't standardized the same
+way — it lives inside each manufacturer's own dialer app and call-audio
+stack:
+
+- **OEM skins differ** (Samsung One UI, Xiaomi MIUI, stock/Pixel
+  Android, etc.) on whether an active call auto-routes to an already-
+  connected Bluetooth device, or waits for you to pick it manually.
+- **HFP protocol version** varies by phone age (1.6 vs 1.7/1.8) —
+  affects audio quality/codec (CVSD vs the clearer mSBC), not whether
+  it works.
+- **Android's background-activity restrictions** (Android 10+) can
+  occasionally affect how promptly some OEM dialers come to the
+  foreground after an ADB-triggered call intent.
+
+None of this affects whether calling itself works (that's plain ADB,
+unaffected by any of the above) — worst case on an unfamiliar phone is
+one extra tap the first time to route audio to the PC, which the phone
+then remembers.
+
 ## Files
 
 - `server/adb.js` — shared driver: all the actual `adb` calls, used by
