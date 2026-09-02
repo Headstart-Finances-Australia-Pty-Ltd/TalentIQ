@@ -38,6 +38,14 @@ import asyncio
 import concurrent.futures
 from typing import List, Optional
 
+# Bump this whenever an extraction prompt's judgment logic changes
+# meaningfully — see _extraction_cache_key's docstring for why. Raised to
+# 2 for the "matched a distinct-but-related skill it shouldn't have"
+# hallucination fix (e.g. crediting CI/CD pipeline experience purely
+# because the resume showed test automation experience) in the essential/
+# good-to-have verdict prompts below.
+_PROMPT_VERSION = 2
+
 
 def _mask_key_for_log(key_value: Optional[str]) -> str:
     """Masked identifier (last 4 chars) for log lines — lets a specific
@@ -486,8 +494,17 @@ import hashlib
 
 def _extraction_cache_key(extraction_type: str, *parts) -> str:
     """sha256 over the extraction type + every meaningful input part,
-    stringified in a stable way. Same inputs -> same key, always."""
-    raw = extraction_type + "||" + "||".join(
+    stringified in a stable way. Same inputs -> same key, always.
+
+    Includes _PROMPT_VERSION so that editing an extraction prompt
+    invalidates every previously-cached result for it automatically —
+    without this, ExtractionCache's whole point (skip re-calling the LLM
+    for a genuine repeat) would also mean a prompt fix silently keeps
+    serving the OLD, now-wrong cached verdict for any resume/JD pair
+    already scored before the fix, since the cache key was otherwise
+    unchanged. Bump _PROMPT_VERSION whenever a prompt's judgment logic
+    changes meaningfully (not for comment-only edits)."""
+    raw = extraction_type + "||v" + str(_PROMPT_VERSION) + "||" + "||".join(
         json.dumps(p, sort_keys=True) if not isinstance(p, str) else p
         for p in parts
     )
@@ -1158,13 +1175,37 @@ async def _extract_candidate_strengths_impl(
 
         def _build(resume_limit: int) -> str:
             return f"""You are an expert recruiter. For EACH numbered requirement below, judge
-whether the resume provides genuine evidence for it — reading for meaning
-and equivalent experience, not exact wording. A requirement may be a
-specific skill ("Data Modeling") or a broad capability statement — judge
-both the same way: does the resume's actual content support this, even if
-described using different terms or a more specific technique? For
-example, a resume mentioning "Dimensional Modeling", "Data Vault", or
-"Star Schema design" DOES satisfy a requirement for "Data Modeling".
+whether the resume provides genuine, SPECIFIC evidence for it.
+
+Two different failure modes to avoid — most systems only guard against
+the first one, which is why the second one slips through constantly:
+
+1. Being too LITERAL. A requirement may be phrased generally or use one
+specific term while the resume uses another. Equivalent terminology for
+the SAME underlying skill should count. Example: a resume mentioning
+"Dimensional Modeling", "Data Vault", or "Star Schema design" DOES
+satisfy a requirement for "Data Modeling" — these are specific techniques
+that ARE data modeling.
+
+2. Being too GENEROUS by inferring a DIFFERENT, DISTINCT skill just
+because the candidate does broadly-related work. This is the more
+dangerous mistake because it silently passes underqualified candidates
+through. Example: a resume showing Selenium/Playwright test-automation
+experience does NOT, by itself, prove "CI/CD pipeline integration"
+experience — automation and pipeline integration are related but
+SEPARATE skills. Only mark a CI/CD requirement matched if the resume
+explicitly names a CI/CD tool (Jenkins, Bamboo, GitLab CI, CircleCI,
+GitHub Actions, Azure DevOps Pipelines, etc.) or explicitly describes
+building/configuring/maintaining a pipeline. The same logic applies to
+every other requirement: judge only what this specific resume explicitly
+states or concretely describes — never what a job title or adjacent
+skill "usually implies" from general knowledge of the field.
+
+When genuinely uncertain, mark it false. A missed skill the candidate
+actually has is a minor loss (a recruiter can still notice it manually);
+crediting a skill that isn't there sends an unqualified candidate
+through to a real interview — a much costlier mistake, and the one this
+process exists to prevent.
 {hint_block}
 
 REQUIREMENTS:
@@ -1206,6 +1247,13 @@ exactly {len(items)} booleans, one per requirement above, IN THE SAME ORDER:
             )
             if pre_extracted_facts is not None:
                 return f"""You are an expert recruiter reading a resume. {gth_instructions}
+Judge each requirement conservatively: only mark it matched if the resume
+explicitly names the skill/tool, or a genuinely equivalent specific
+technique (e.g. "Dimensional Modeling" satisfies "Data Modeling"). Do NOT
+infer a distinct skill just because the candidate does broadly-related
+work (e.g. writing automated tests does not by itself prove CI/CD
+pipeline experience). When uncertain, mark it false — under-crediting is
+far less costly than passing an unqualified candidate through.
 {hint_block}
 
 RESUME:
@@ -1216,6 +1264,11 @@ Return ONLY valid JSON, no markdown, no commentary:
   "good_to_have_matched": [true, false]
 }}"""
             return f"""You are an expert recruiter reading a resume. {gth_instructions}
+Judge each requirement above conservatively: only mark it matched if the
+resume explicitly names the skill/tool, or a genuinely equivalent
+specific technique. Do NOT infer a distinct skill just because the
+candidate does broadly-related work. When uncertain, mark it false.
+
 Also extract the following from the resume itself (not tied to any
 specific requirement):
 {hint_block}

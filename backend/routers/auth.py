@@ -12,7 +12,7 @@ from sqlalchemy import select, func
 
 from db.database import get_db
 from models.models import User, UserAPIKey, AuditLog, GroqKeyPool
-from models.billing_models import Subscription, PricingPlan
+from models.billing_models import Subscription, PricingPlan, SubscriptionHistory
 from schemas.schemas import (
     UserRegister, UserLogin, UserOut, TokenOut,
     PasswordResetRequest, PasswordReset, UserUpdate,
@@ -79,15 +79,18 @@ async def register(payload: UserRegister, request: Request, db: AsyncSession = D
             select(PricingPlan).where(PricingPlan.slug == "enterprise")
         )).scalar_one_or_none()
         if enterprise:
+            now = datetime.utcnow()
+            end = datetime(9999, 12, 31)
+            notes = f"{now.date()}: Auto-granted Enterprise plan (platform admin) — no charge."
             db.add(Subscription(
-                user_id=user.id,
-                plan_slug="enterprise",
-                billing_period="",
-                status="active",
-                start_date=datetime.utcnow(),
-                end_date=datetime(9999, 12, 31),
-                amount_paid_cents=0,
-                notes=f"{datetime.utcnow().date()}: Auto-granted Enterprise plan (platform admin) — no charge.",
+                user_id=user.id, plan_slug="enterprise", billing_period="", status="active",
+                start_date=now, end_date=end, amount_paid_cents=0, notes=notes,
+            ))
+            # Preserved alongside the current-state row above — see
+            # models/billing_models.py's SubscriptionHistory docstring.
+            db.add(SubscriptionHistory(
+                user_id=user.id, plan_slug="enterprise", billing_period="", status="active",
+                start_date=now, end_date=end, amount_paid_cents=0, notes=notes, recorded_at=now,
             ))
     elif payload.plan_slug:
         plan = (await db.execute(
@@ -95,15 +98,15 @@ async def register(payload: UserRegister, request: Request, db: AsyncSession = D
         )).scalar_one_or_none()
         if plan and plan.is_free_demo:
             now = datetime.utcnow()
+            end = now + timedelta(days=plan.demo_days or 14)
+            notes = f"{now.date()}: Started {plan.demo_days}-day free demo ({plan.name}) at signup."
             db.add(Subscription(
-                user_id=user.id,
-                plan_slug=plan.slug,
-                billing_period="",
-                status="demo",
-                start_date=now,
-                end_date=now + timedelta(days=plan.demo_days or 14),
-                amount_paid_cents=0,
-                notes=f"{now.date()}: Started {plan.demo_days}-day free demo ({plan.name}) at signup.",
+                user_id=user.id, plan_slug=plan.slug, billing_period="", status="demo",
+                start_date=now, end_date=end, amount_paid_cents=0, notes=notes,
+            ))
+            db.add(SubscriptionHistory(
+                user_id=user.id, plan_slug=plan.slug, billing_period="", status="demo",
+                start_date=now, end_date=end, amount_paid_cents=0, notes=notes, recorded_at=now,
             ))
         # A chosen paid plan is intentionally not persisted as a
         # Subscription row here — see comment above.

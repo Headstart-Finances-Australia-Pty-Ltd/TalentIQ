@@ -27,7 +27,7 @@ from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks, Request
 from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, or_
+from sqlalchemy import select, or_, func
 from pydantic import BaseModel
 
 from db.database import get_db, AsyncSessionLocal
@@ -629,6 +629,59 @@ def _score_from_verdicts(strengths: dict, cv_text: str, essential_count: int, go
     }
 
 
+def _build_recommendation(
+    matched: list, missing: list, matched_good_to_have: list,
+    status: str, score: float, is_disqualified: bool, disqualify_reason: str,
+) -> str:
+    """A short, evidence-grounded recruiter recommendation for THIS
+    candidate against THIS JD — composed here in plain Python from the
+    essential/good-to-have verdicts the LLM already judged (see
+    utils/llm_extraction.py's _verdict_chunk), never generated as a
+    fresh, separate LLM narrative. Deliberately deterministic: the whole
+    point is a recommendation that can never claim a strength or gap the
+    underlying matched/missing lists don't already contain, so it can't
+    reintroduce the exact "inferred a skill that isn't there" failure
+    mode the matching prompt itself was just tightened to avoid.
+
+    Used for the Screening (Resume Screening tab) and Screening Decision
+    views — with multiple candidates applying to the same requisition,
+    every one of them gets their OWN independently-computed matched/
+    missing lists and their OWN recommendation text; nothing here is
+    shared or averaged across candidates in the same batch."""
+    essential_total = len(matched) + len(missing)
+
+    def _list(items: list, n: int) -> str:
+        return ", ".join(items[:n])
+
+    if is_disqualified:
+        reason = disqualify_reason or "a hard requirement (salary, notice period, or location) for this role"
+        return (
+            f"Not recommended to advance — disqualified on {reason}, independent of skills match "
+            f"({len(matched)}/{essential_total} essential requirements met)."
+        )
+
+    if essential_total == 0:
+        parts = [f"ATS score {round(score)}% — no essential requirements were specified for this JD to check against."]
+    else:
+        parts = [f"Meets {len(matched)} of {essential_total} essential requirements"]
+        if matched:
+            parts.append(f", including {_list(matched, 3)}")
+        parts.append(".")
+        if missing:
+            parts.append(f" Gaps: {_list(missing, 3)}.")
+        if matched_good_to_have:
+            parts.append(f" Also brings {_list(matched_good_to_have, 2)} (good-to-have).")
+
+    if status == "Qualified":
+        verdict = " Recommend advancing to the next round (phone screening)."
+    elif status == "Review":
+        verdict = " Borderline — worth a phone screen to clarify the gaps above before deciding, rather than an outright pass."
+    else:
+        verdict = " Recommend not advancing — the gaps above cover core requirements for this role."
+
+    return "".join(parts) + verdict
+
+
 def calculate_score(cv_text: str, jd_skills: list) -> dict:
     """Direct port of the original JS calculateScore function, with matching
     made tolerant of synonyms/abbreviations/spelling and specific-technique
@@ -893,6 +946,7 @@ def _fmt(c: JobLensCandidate, phone_schedule: Optional[dict] = None) -> dict:
         "filename": c.filename,
         "ats_score": round(c.ats_score, 1),
         "status": c.status,
+        "screening_recommendation": c.screening_recommendation or "",
         "matched_skills": c.matched_skills or [],
         "missing_skills": c.missing_skills or [],
         "bonus": c.bonus,
@@ -958,6 +1012,12 @@ def _fmt(c: JobLensCandidate, phone_schedule: Optional[dict] = None) -> dict:
         "call_sms_sent_at": ps.get("call_sms_sent_at"),
         "phone_transcript": ps.get("phone_transcript", ""),
         "phone_transcript_status": ps.get("phone_transcript_status", ""),
+        # ── Screening Decision's "Send Rejection Email" bulk action ──────
+        # Was being set correctly by send_rejection_emails() but never
+        # actually returned here, so the Screening Decision table always
+        # showed "Not sent" no matter how many times an email went out —
+        # the send genuinely worked, this was purely a serialization gap.
+        "rejection_email_sent_at": c.rejection_email_sent_at.isoformat() if c.rejection_email_sent_at else None,
     }
 
 
@@ -1023,6 +1083,48 @@ async def fetch_jd_url(
     return result
 
 
+async def _check_candidate_quota(db: AsyncSession, user: User, requested_count: int) -> None:
+    """Enforces the current plan's Max Candidates cap — checked BEFORE
+    any resume processing starts (JD extraction, LLM calls, etc.), so a
+    batch that would blow through the limit is rejected up front rather
+    than partway through, after quota-consuming work has already run.
+
+    Counted as "candidates processed this calendar month" across ALL of
+    this user's JobLens sessions combined — the plan's quota is a
+    monthly allowance for the whole account, not a per-JD/per-session
+    limit, so uploading against three different JDs in the same month
+    still draws from one shared pool.
+
+    No plan on record, or a plan with max_candidates=0 (unlimited),
+    both skip the check entirely rather than blocking — this is an
+    additive safety net, not the only gate on who can use the feature at
+    all."""
+    from models.billing_models import Subscription, PricingPlan
+    sub = (await db.execute(select(Subscription).where(Subscription.user_id == user.id))).scalar_one_or_none()
+    if not sub or not sub.plan_slug:
+        return
+    plan = (await db.execute(select(PricingPlan).where(PricingPlan.slug == sub.plan_slug))).scalar_one_or_none()
+    if not plan or not plan.max_candidates:
+        return
+
+    now = datetime.utcnow()
+    month_start = datetime(now.year, now.month, 1)
+    processed_this_month = (await db.execute(
+        select(func.count(JobLensCandidate.id))
+        .join(JobLensSession, JobLensCandidate.session_id == JobLensSession.id)
+        .where(JobLensSession.user_id == user.id, JobLensCandidate.created_at >= month_start)
+    )).scalar() or 0
+
+    if processed_this_month + requested_count > plan.max_candidates:
+        remaining = max(0, plan.max_candidates - processed_this_month)
+        raise HTTPException(
+            403,
+            f"This batch of {requested_count} would exceed your {plan.name} plan's monthly limit of "
+            f"{plan.max_candidates} candidates ({processed_this_month} already processed this month, "
+            f"{remaining} remaining). Upgrade your plan to continue, or reduce this batch to {remaining} or fewer.",
+        )
+
+
 @router.post("/run")
 async def run_joblens(
     jd_text: str = Form(""),
@@ -1061,6 +1163,16 @@ async def run_joblens(
         raise HTTPException(400, "disqualifiers must be a valid JSON object")
     session_weights = merge_weights(weight_overrides)
     session_disqualifiers = merge_disqualifiers(disqualifier_overrides)
+
+    # Plan quota — checked here, before ANY resume processing (JD
+    # extraction, LLM calls) starts, using an upper-bound count of every
+    # possible candidate source in this request (uploaded files +
+    # sourced tracked-candidates + submitted applications combined).
+    requested_count = len(cv_files or [])
+    requested_count += len([x for x in source_candidate_ids.split(",") if x.strip()])
+    requested_count += len([x for x in source_application_ids.split(",") if x.strip()])
+    if requested_count > 0:
+        await _check_candidate_quota(db, current_user, requested_count)
 
     # ── Requisition source: resolves requisition_id into whichever of
     # jd_record_id / a direct JD file it carries, so everything below
@@ -1424,6 +1536,11 @@ async def run_joblens(
             # would actually triage.
             status = "Not Qualified"
 
+        recommendation = _build_recommendation(
+            result["matched"], result["missing"], result.get("matched_good_to_have", []),
+            status, score, is_disqualified, disqualify_reason,
+        )
+
         questions = questions_result[0] if groq_key and questions_result else _default_questions(info["name"], result["matched"])
 
         fname_lower = (filename or "").lower()
@@ -1451,6 +1568,7 @@ async def run_joblens(
             filename=filename,
             ats_score=score,
             status=status,
+            screening_recommendation=recommendation,
             matched_skills=result["matched"],
             missing_skills=result["missing"],
             bonus=result["matched_good_to_have"] and min(15, len(result["matched_good_to_have"]) * 5) or 0,
@@ -2068,6 +2186,70 @@ async def send_invite(
     _send_email(smtp_cfg, payload.to_email, payload.subject, payload.body_html)
 
     return {"sent": True}
+
+
+class RejectionEmailRequest(BaseModel):
+    candidate_ids: List[int]
+    subject: str
+    # {name} is the only placeholder — replaced with each candidate's own
+    # first name right before that candidate's individual email is sent.
+    body_html_template: str
+
+
+@router.post("/candidates/reject-email")
+async def send_rejection_emails(
+    payload: RejectionEmailRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Screening Decision's bulk 'Send Rejection Email' action — sends
+    ONE separate, individually-addressed email per candidate (a loop of
+    single-recipient send_email() calls, never one email with everyone
+    in To/CC), so no candidate can ever see another candidate's name or
+    email address. Each send is independent: one candidate's SMTP/email
+    failure doesn't stop the rest, and the response reports exactly who
+    succeeded and who didn't so the recruiter can retry just the
+    failures instead of guessing whether "Send" actually worked for
+    everyone. Every successful send stamps rejection_email_sent_at,
+    which the Screening Decision table shows directly (see
+    JobLensPage.tsx's "candidateContact"-style column)."""
+    if not payload.candidate_ids:
+        raise HTTPException(400, "No candidates selected.")
+
+    smtp_cfg = await _get_smtp_config(current_user.id, db)
+
+    rows = (await db.execute(
+        select(JobLensCandidate).where(JobLensCandidate.id.in_(payload.candidate_ids))
+    )).scalars().all()
+    by_id = {c.id: c for c in rows}
+
+    sent, failed = [], []
+    for cid in payload.candidate_ids:
+        c = by_id.get(cid)
+        if not c:
+            failed.append({"candidate_id": cid, "name": None, "error": "Candidate not found."})
+            continue
+        if not c.email:
+            failed.append({"candidate_id": cid, "name": c.name, "error": "No email on file."})
+            continue
+        first_name = (c.name or "").strip().split(" ")[0] or "there"
+        body_html = payload.body_html_template.replace("{name}", first_name)
+        try:
+            _send_email(smtp_cfg, c.email, payload.subject, body_html)
+            c.rejection_email_sent_at = datetime.utcnow()
+            sent.append({"candidate_id": cid, "name": c.name, "email": c.email})
+        except HTTPException as e:
+            # SMTP misconfiguration (bad credentials, host unreachable)
+            # affects every remaining send too — stop the loop early
+            # instead of repeating the same failure for every candidate.
+            failed.append({"candidate_id": cid, "name": c.name, "error": e.detail})
+            if "not configured" in str(e.detail).lower() or "rejected these smtp credentials" in str(e.detail).lower():
+                break
+        except Exception as e:
+            failed.append({"candidate_id": cid, "name": c.name, "error": str(e)[:200]})
+
+    await db.commit()
+    return {"sent": sent, "failed": failed}
 
 
 async def _get_or_create_joblens_interview(

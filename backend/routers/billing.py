@@ -26,13 +26,35 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.database import get_db
 from models.models import User
-from models.billing_models import PricingPlan, Subscription
+from models.billing_models import PricingPlan, Subscription, SubscriptionHistory
 from utils.auth_utils import get_current_user, require_admin
 from utils.credentials import get_global_credentials
 
 router = APIRouter()
 
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "")
+
+
+async def record_subscription_history(db: AsyncSession, sub: Subscription) -> None:
+    """Snapshots the CURRENT state of a user's single Subscription row
+    into the append-only SubscriptionHistory table — call this BEFORE
+    mutating sub's plan_slug/status/dates to the new plan, while it
+    still holds the OLD term's values, so the old term is preserved as
+    its own row rather than silently lost the moment Subscription's one
+    row gets overwritten in place. (Calling this AFTER mutating sub
+    would log a duplicate of the new state instead of the old one it's
+    meant to preserve — the entire point of this function.) Does not
+    commit — the caller's own db.commit() covers this insert too.
+    No-ops if sub has no real prior plan to preserve (a brand new
+    Subscription row with an empty plan_slug — nothing to lose there)."""
+    if not sub.plan_slug:
+        return
+    db.add(SubscriptionHistory(
+        user_id=sub.user_id, plan_slug=sub.plan_slug, billing_period=sub.billing_period,
+        status=sub.status, start_date=sub.start_date, end_date=sub.end_date,
+        amount_paid_cents=sub.amount_paid_cents, stripe_checkout_session_id=sub.stripe_checkout_session_id,
+        notes=sub.notes, recorded_at=datetime.utcnow(),
+    ))
 
 
 async def _get_stripe(db: AsyncSession):
@@ -67,6 +89,24 @@ async def my_subscription(current_user: User = Depends(get_current_user), db: As
     return sub.to_dict()
 
 
+@router.get("/my-plan-history")
+async def my_plan_history(current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """Current plan + every past plan term this user has ever had —
+    "old plan data should not be overwritten, it can be pulled whenever
+    required" (see SubscriptionHistory's docstring). Used by the app
+    topbar's plan badge popup."""
+    sub = (await db.execute(select(Subscription).where(Subscription.user_id == current_user.id))).scalar_one_or_none()
+    rows = (await db.execute(
+        select(SubscriptionHistory).where(SubscriptionHistory.user_id == current_user.id).order_by(SubscriptionHistory.recorded_at.desc())
+    )).scalars().all()
+    plan_names = {p.slug: p.name for p in (await db.execute(select(PricingPlan))).scalars().all()}
+    return {
+        "current": {**(sub.to_dict() if sub else {"status": "none", "plan_slug": "", "billing_period": "", "start_date": None, "end_date": None, "amount_paid_cents": 0}),
+                    "plan_name": plan_names.get(sub.plan_slug, sub.plan_slug) if sub and sub.plan_slug else ""},
+        "history": [{**h.to_dict(), "plan_name": plan_names.get(h.plan_slug, h.plan_slug)} for h in rows],
+    }
+
+
 # ── Free demo — no payment required ──────────────────────────────────────
 
 @router.post("/start-free-demo")
@@ -84,6 +124,11 @@ async def start_free_demo(current_user: User = Depends(get_current_user), db: As
     if not sub:
         sub = Subscription(user_id=current_user.id)
         db.add(sub)
+    else:
+        # Preserve whatever plan this user was on before, if any — must
+        # happen BEFORE the mutations below, while sub still holds the
+        # OLD term's values (see record_subscription_history's docstring).
+        await record_subscription_history(db, sub)
     sub.plan_slug = plan.slug
     sub.billing_period = ""
     sub.status = "demo"
@@ -183,6 +228,11 @@ async def stripe_webhook(request: Request, stripe_signature: str = Header(None, 
                 if not sub:
                     sub = Subscription(user_id=user_id)
                     db.add(sub)
+                else:
+                    # Preserve the OLD plan term before overwriting it
+                    # below — must happen while sub still holds the old
+                    # values (see record_subscription_history's docstring).
+                    await record_subscription_history(db, sub)
                 # Renewing/upgrading extends from today, not stacked onto
                 # a stale previous end_date — this endpoint fires once
                 # per completed checkout, so "start today, run one period"
