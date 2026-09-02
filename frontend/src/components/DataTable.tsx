@@ -314,7 +314,7 @@ export default function DataTable({
                 const filterActive = colFilters[c] !== undefined;
                 return (
                   <th key={c} style={{ position: "relative", userSelect: "none", padding: 0 }}>
-                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 4, padding: "8px 6px 8px 10px", overflow: "hidden", textAlign: "left" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 4, padding: "8px 6px 8px 10px", overflow: "hidden" }}>
                       <span
                         onClick={() => toggleSort(c)}
                         style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "pointer", flex: 1 }}
