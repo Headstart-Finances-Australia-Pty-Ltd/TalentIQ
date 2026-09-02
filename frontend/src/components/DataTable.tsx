@@ -317,7 +317,7 @@ export default function DataTable({
                     <div style={{ display: "flex", alignItems: "center", gap: 4, padding: "8px 6px 8px 10px", overflow: "hidden" }}>
                       <span
                         onClick={() => toggleSort(c)}
-                        style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "pointer", flex: 1 }}
+                        style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "pointer"}}
                         title="Click to sort"
                       >
                         {columnLabels?.[c] ?? c}
