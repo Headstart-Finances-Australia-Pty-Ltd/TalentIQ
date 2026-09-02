@@ -8,6 +8,7 @@ import {
 import { useAuth } from "../../hooks/useAuth";
 import { api } from "../../lib/api";
 import { CAPABILITIES, CORE_PIPELINE_CAPABILITIES, SUPPORTING_CAPABILITIES, JOBSEEKER_MODULES } from "../../lib/capabilities";
+import TopbarPlanWidget from "./TopbarPlanWidget";
 
 // Matches .tiq-nav-item's own font exactly (14px / 500 / rgba(255,255,255,.6))
 // so a capability header reads at the same weight as the module links inside
@@ -192,6 +193,7 @@ export default function AppLayout() {
             <span className="tiq-badge tiq-badge-violet">Admin</span>
           )}
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginLeft: "auto" }}>
+            <TopbarPlanWidget />
             <Link to="/" style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12, fontWeight: 600, color: "var(--text-muted)", textDecoration: "none", padding: "5px 10px", borderRadius: 6, border: "1px solid var(--border)" }}
               onMouseEnter={e => { e.currentTarget.style.color = "var(--text-primary)"; e.currentTarget.style.background = "var(--bg-secondary)"; }}
               onMouseLeave={e => { e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.background = "transparent"; }}>

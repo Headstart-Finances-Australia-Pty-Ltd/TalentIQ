@@ -50,7 +50,7 @@ const STATUS_FLOW = ["Requested", "Scheduled", "Completed", "Cancelled", "No-Sho
 // "Video Interview" covers every delivery mode — a live human video
 // call, CandidateLens's webcam+emotion-analysis flow, or an AI Avatar
 // session (Bot icon below) — chosen per round rather than a separate type.
-const INTERVIEW_TYPES = ["Phone Interview", "Video Interview", "Panel Interview"];
+const INTERVIEW_TYPES = ["Phone Interview", "Video Interview", "Panel Interview", "Final Interview", "HR Interview"];
 const AVATAR_INTERVIEW_TYPE = "Video Interview";
 // Only "Phone Interview" is ever self-schedulable — enforced
 // server-side too (see backend capabilities/interview/router.py), this
@@ -193,6 +193,14 @@ export default function InterviewsPage({ embedded = false }: { embedded?: boolea
     return null;
   });
   const [pipelineSearch, setPipelineSearch] = useState("");
+
+  // Settings > API Keys > Meeting Link's saved default — see openAdd
+  // below for where this gets used.
+  const [defaultMeetingLink, setDefaultMeetingLink] = useState("");
+  useEffect(() => {
+    interviewApi.meetingLink().then((r: any) => setDefaultMeetingLink(r.link || "")).catch(() => {});
+  }, []);
+  const [sendingPanelInviteId, setSendingPanelInviteId] = useState<number | null>(null);
 
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -359,7 +367,12 @@ export default function InterviewsPage({ embedded = false }: { embedded?: boolea
   }, [groupedRows, pipelineSearch, pipelineColFilters, pipelineSort]);
 
   const openAdd = () => {
-    setForm(emptyForm); setEditingId(null); setFormError(""); setShowForm(true);
+    // Pre-fill Location/Meeting Link from the recruiter's saved default
+    // (Settings > API Keys > Meeting Link) so Zoom/Teams/Meet doesn't
+    // need retyping — or worse, get left blank — every time. Only
+    // applied when opening a brand-new form; openEdit below always uses
+    // whatever's already saved on that specific round.
+    setForm({ ...emptyForm, location_or_link: defaultMeetingLink }); setEditingId(null); setFormError(""); setShowForm(true);
   };
   const openEdit = (i: any) => {
     setForm({
@@ -372,9 +385,7 @@ export default function InterviewsPage({ embedded = false }: { embedded?: boolea
       scheduled_at: i.scheduled_at ? i.scheduled_at.slice(0, 16) : "",
       proposed_slots: i.proposed_slots?.length ? i.proposed_slots.map((s: string) => s.slice(0, 16)) : [""],
       notes: i.notes,
-      approver_name: i.approver_name || "", 
-      approver_email: i.approver_email || "",
-      panel_id: i.panel_id ?? "",
+      approver_name: i.approver_name || "", approver_email: i.approver_email || "",
     });
     setEditingId(i.id);
     setFormError("");
@@ -864,7 +875,37 @@ export default function InterviewsPage({ embedded = false }: { embedded?: boolea
                     </td>
 
                     {/* Panel Interview */}
-                    <td style={{ fontSize: 11.5 }}>{pan?.scheduled_at ? new Date(pan.scheduled_at).toLocaleString() : "—"}</td>
+                    <td style={{ fontSize: 11.5 }}>
+                      {pan?.scheduled_at ? (
+                        <>
+                          <div>{new Date(pan.scheduled_at).toLocaleString()}</div>
+                          {/* Fixed-time invite email — Panel Interview can't use
+                              the self-schedule Calendly link (SELF_SCHEDULABLE_TYPES
+                              is Phone Interview only), so this sends the already-set
+                              date/time + meeting link directly instead. */}
+                          <button
+                            className="tiq-btn tiq-btn-ghost tiq-btn-sm"
+                            style={{ padding: "1px 6px", fontSize: 10.5, marginTop: 2 }}
+                            disabled={sendingPanelInviteId === pan.id}
+                            onClick={async () => {
+                              setSendingPanelInviteId(pan.id);
+                              try {
+                                await interviewApi.sendFixedInvite(pan.id);
+                                await load();
+                              } catch (e: any) {
+                                alert(e?.response?.data?.detail || "Failed to send invite.");
+                              } finally {
+                                setSendingPanelInviteId(null);
+                              }
+                            }}
+                            title={pan.invite_sent_at ? `Invite sent ${new Date(pan.invite_sent_at).toLocaleString()} — click to resend` : "Email the candidate this date/time + meeting link"}
+                          >
+                            <Mail size={10} style={{ marginRight: 3 }} />
+                            {sendingPanelInviteId === pan.id ? "Sending…" : pan.invite_sent_at ? "Resend Invite" : "Send Invite"}
+                          </button>
+                        </>
+                      ) : "—"}
+                    </td>
                     <td style={{ fontSize: 11.5 }}>
                       {pan?.panel_number != null ? (
                         <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" onClick={() => openPanelPopup(pan.panel_id)}

@@ -165,13 +165,13 @@ export default function PricingPage() {
                         admin changes the actual demo_days/max_candidates
                         value in Admin Console. */}
                     {plan.is_free_demo && !!plan.demo_days && (
-                      <li style={{ display: "flex", gap: 8, fontSize: 13.5, color: "#334155", marginBottom: 10, lineHeight: 1.4, fontWeight: 700 }}>
+                      <li style={{ display: "flex", gap: 8, fontSize: 13.5, color: "#334155", marginBottom: 10, lineHeight: 1.4 }}>
                         <Check size={15} color="#00c7b7" style={{ flexShrink: 0, marginTop: 1 }} />
                         {plan.demo_days}-day free access
                       </li>
                     )}
                     {!!plan.max_candidates && (
-                      <li style={{ display: "flex", gap: 8, fontSize: 13.5, color: "#334155", marginBottom: 10, lineHeight: 1.4, fontWeight: 700 }}>
+                      <li style={{ display: "flex", gap: 8, fontSize: 13.5, color: "#334155", marginBottom: 10, lineHeight: 1.4 }}>
                         <Check size={15} color="#00c7b7" style={{ flexShrink: 0, marginTop: 1 }} />
                         Up to {plan.max_candidates.toLocaleString()} candidates
                       </li>

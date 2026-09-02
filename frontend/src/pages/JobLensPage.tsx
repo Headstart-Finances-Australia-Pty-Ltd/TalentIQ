@@ -257,6 +257,14 @@ const jobLensApi = {
     api.get(`/api/joblens/requisition-options`).then(r => r.data),
   requisitionCandidates: (requisitionId: number) =>
     api.get(`/api/joblens/requisition-candidates`, { params: { requisition_id: requisitionId } }).then(r => r.data),
+  // Screening Decision's bulk "Send Rejection Email" — one individually
+  // addressed email per candidate (never a shared To/CC list), so no
+  // candidate ever sees another's name or address. {name} in
+  // body_html_template is replaced with each candidate's own first name
+  // right before THEIR email goes out. Returns which sends succeeded vs
+  // failed so the popup can report exactly that, not just "done".
+  sendRejectionEmails: (data: { candidate_ids: number[]; subject: string; body_html_template: string }) =>
+    api.post(`/api/joblens/candidates/reject-email`, data).then(r => r.data),
 };
 
 // ─── HELPERS ───────────────────────────────────────────────────────────────
@@ -1296,7 +1304,8 @@ type PopoverState = { kind: PopoverKind; x: number; y: number; width: number; an
 
 function CandidateRow({
   c, rank, sessionId, lowT, highT, onRefresh, theadRef, jdEssential, jdGoodToHave, jdOptional, mode = "resume", focusCandidateId,
-}: { c: any; rank: number; sessionId: number; lowT: number; highT: number; onRefresh: () => void; theadRef: React.RefObject<HTMLTableSectionElement>; jdEssential: string[]; jdGoodToHave: string[]; jdOptional: string[]; mode?: "resume" | "phone" | "video" | "final"; focusCandidateId?: number | null }) {
+  selectable = false, selected = false, onToggleSelect,
+}: { c: any; rank: number; sessionId: number; lowT: number; highT: number; onRefresh: () => void; theadRef: React.RefObject<HTMLTableSectionElement>; jdEssential: string[]; jdGoodToHave: string[]; jdOptional: string[]; mode?: "resume" | "phone" | "video" | "final"; focusCandidateId?: number | null; selectable?: boolean; selected?: boolean; onToggleSelect?: () => void }) {
   const isFocused = focusCandidateId === c.id;
   const rowRef = useRef<HTMLTableRowElement>(null);
   const navigate = useNavigate();
@@ -1568,7 +1577,12 @@ function CandidateRow({
 
   return (
     <>
-      <tr ref={rowRef} style={{ background: isFocused ? "rgba(139,92,246,.10)" : shortlisted ? "rgba(0,199,183,.05)" : undefined }}>
+      <tr ref={rowRef} style={{ background: isFocused ? "rgba(139,92,246,.10)" : c.rejection_email_sent_at ? "rgba(239,68,68,.05)" : shortlisted ? "rgba(0,199,183,.05)" : undefined }}>
+        {selectable && (
+          <td style={{ textAlign: "center" }}>
+            <input type="checkbox" checked={selected} onChange={onToggleSelect} />
+          </td>
+        )}
         <td style={{ fontWeight: 700, color: "var(--text-muted)", fontSize: 12 }}>#{rank}</td>
 
         {/* Candidate */}
@@ -1685,6 +1699,19 @@ function CandidateRow({
                 ({c.disqualify_reason})
               </div>
             )}
+          </td>
+        )}
+
+        {/* Recommendation — composed deterministically in Python from the
+            already-judged essential/good-to-have verdicts (see
+            routers/joblens.py's _build_recommendation), never a fresh LLM
+            narrative, so it can't claim a strength/gap those verdicts
+            don't already contain. Shown on both Resume Screening and
+            Screening Decision — every candidate applying to this same JD
+            gets their own independently-computed text here. */}
+        {(mode === "resume" || mode === "final") && (
+          <td style={{ fontSize: 11.5, lineHeight: 1.5, color: "#334155", maxWidth: 320 }}>
+            {c.screening_recommendation || <span style={{ color: "var(--text-muted)" }}>—</span>}
           </td>
         )}
 
@@ -2039,6 +2066,23 @@ function CandidateRow({
         {mode === "final" && (
           <td style={{ textAlign: "center" }}>
             <input type="checkbox" checked={shortlisted} onChange={() => shortlistMut.mutate()} />
+          </td>
+        )}
+        {/* Rejection Email — tracks the Screening Decision bulk "Send
+            Rejection Email" action (see the toolbar button + popup in
+            JobLensWorkspace below); nothing to click here, just status. */}
+        {mode === "final" && (
+          <td style={{ fontSize: 11.5 }}>
+            {c.rejection_email_sent_at ? (
+              <span style={{ color: "#ef4444", fontWeight: 700 }}>
+                Sent Rejection Letter<br />
+                <span style={{ fontWeight: 400, color: "var(--text-muted)", fontSize: 10.5 }}>
+                  {new Date(c.rejection_email_sent_at).toLocaleDateString()}
+                </span>
+              </span>
+            ) : (
+              <span style={{ color: "var(--text-muted)" }}>Not sent</span>
+            )}
           </td>
         )}
       </tr>
@@ -2407,12 +2451,24 @@ function CandidateRow({
 // This is deliberately separate from how CandidateRow actually renders
 // each cell (badges, buttons, progress bars…): filtering/sorting always
 // compares the underlying data, never the JSX.
+// Converts a plain-text email draft (blank line = new paragraph) into
+// HTML — used only right before sending/previewing, so the "Send
+// Rejection Email" composer can be a normal-looking text editor instead
+// of exposing raw markup for someone to accidentally mangle.
+function textToHtml(text: string): string {
+  const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return text
+    .split(/\n{2,}/)
+    .map((para) => `<p>${esc(para).replace(/\n/g, "<br/>")}</p>`)
+    .join("");
+}
+
 const CANDIDATE_TABLE_COLS: Record<string, "text" | "number"> = {
   candidate: "text", email: "text", phone: "text", vendor: "text", resumeSummary: "text",
   atsScore: "number", keyStrength: "text", considerations: "text", status: "text",
   interviewQuestions: "text", videoInterview: "text", phoneScreeningDecision: "text",
   videoInterviewScore: "number", phoneScreening: "text", decision: "text", comments: "text",
-  candidateContact: "text", shortlist: "text",
+  candidateContact: "text", shortlist: "text", rejectionEmail: "text", recommendation: "text",
 };
 
 function getCandidateColValue(c: any, key: string): string | number | null {
@@ -2438,6 +2494,8 @@ function getCandidateColValue(c: any, key: string): string | number | null {
     case "comments": return c.video_screening_notes || "";
     case "candidateContact": return c.contacted ? "Sent" : "Not Sent";
     case "shortlist": return c.shortlisted ? "Yes" : "No";
+    case "rejectionEmail": return c.rejection_email_sent_at ? "Sent" : "Not Sent";
+    case "recommendation": return c.screening_recommendation || "";
     default: return null;
   }
 }
@@ -2591,6 +2649,7 @@ export default function JobLensWorkspace({ mode = "resume", embedded = false }: 
     atsScore: 130, keyStrength: 180, considerations: 170, status: 110, interviewQuestions: 220,
     videoInterview: 200, phoneScreeningDecision: 150, videoInterviewScore: 150, nextSteps: 210,
     phoneScreening: 230, decision: 160, comments: 190, candidateContact: 180, details: 90, shortlist: 100,
+    rejectionEmail: 150, selectCol: 40, recommendation: 280,
   });
   const setColWidth = (key: string, w: number) => setColWidths((prev) => ({ ...prev, [key]: w }));
 
@@ -2615,6 +2674,36 @@ export default function JobLensWorkspace({ mode = "resume", embedded = false }: 
     if (prev.dir === "asc") return { col, dir: "desc" };
     return null;
   });
+
+  // Screening Decision's "Send Rejection Email" bulk action — a
+  // checkbox per row (mode === "final" only) plus a popup composer.
+  // Reset alongside the filter/sort/search state above, same reasoning:
+  // a selection left over from a different session/tab shouldn't
+  // silently carry into the next one.
+  const [selectedForRejection, setSelectedForRejection] = useState<Set<number>>(new Set());
+  const [showRejectionComposer, setShowRejectionComposer] = useState(false);
+  const [rejectionSubject, setRejectionSubject] = useState("Update on your application");
+  // Plain text, not HTML — the composer is a normal-looking email editor
+  // (blank line = new paragraph), not a raw-markup box. textToHtml()
+  // below converts it right before sending/previewing, so nobody has to
+  // read or edit "<p>" tags to draft a rejection letter.
+  const [rejectionBody, setRejectionBody] = useState(
+    "Hi {name},\n\n" +
+    "Thank you for taking the time to apply and for the effort you put into the interview process with us. " +
+    "We really enjoyed learning about your background.\n\n" +
+    "After careful consideration, we've decided to move forward with other candidates whose experience more " +
+    "closely matches what we need for this particular role. This wasn't an easy decision, and it isn't a " +
+    "reflection of your skills or potential.\n\n" +
+    "We'll keep your details on file and would love to consider you for future opportunities that may be a " +
+    "better fit. We wish you all the very best in your job search.\n\n" +
+    "Warm regards,\nThe Hiring Team"
+  );
+  const [sendingRejection, setSendingRejection] = useState(false);
+  const [rejectionResult, setRejectionResult] = useState<{ sent: any[]; failed: any[] } | null>(null);
+  useEffect(() => {
+    setSelectedForRejection(new Set());
+    setRejectionResult(null);
+  }, [mode, activeSessionId]);
   useEffect(() => {
     if (activeSessionId || userPickedSession || searchParams.get("session")) return;
     if (sessions.length > 0) {
@@ -2731,7 +2820,16 @@ export default function JobLensWorkspace({ mode = "resume", embedded = false }: 
   // checkbox for were invisible here — Phone/Video Interview looked
   // empty even with a session full of Qualified candidates sitting one
   // page away.
-  const candidates: any[] = mode === "resume" ? allCandidates : allCandidates.filter(c => c.shortlisted || c.status === "Qualified");
+  //
+  // Screening Decision (mode === "final") is the odd one out: it's the
+  // end-of-process summary for EVERY candidate's outcome, not another
+  // funnel stage, so a "Not Qualified" candidate belongs there too —
+  // that's specifically where a recruiter needs to see them, to send
+  // the rejection email. Excluding them here (as this filter otherwise
+  // correctly does for Phone/Video) meant a candidate who failed
+  // screening simply vanished from the app with no record and no way
+  // to notify them.
+  const candidates: any[] = (mode === "resume" || mode === "final") ? allCandidates : allCandidates.filter(c => c.shortlisted || c.status === "Qualified");
   const qualified  = candidates.filter(c => c.status === "Qualified").length;
   const review     = candidates.filter(c => c.status === "Review").length;
   const shortlisted = candidates.filter(c => c.shortlisted).length;
@@ -3237,6 +3335,22 @@ export default function JobLensWorkspace({ mode = "resume", embedded = false }: 
                   <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 6 }}>
                     {displayCandidates.length}{displayCandidates.length !== candidates.length ? ` / ${candidates.length}` : ""} candidates
                   </div>
+                  {mode === "final" && (
+                    <div style={{ marginTop: 10 }}>
+                      <button
+                        className="tiq-btn tiq-btn-outline tiq-btn-sm"
+                        disabled={selectedForRejection.size === 0}
+                        onClick={() => { setRejectionResult(null); setShowRejectionComposer(true); }}
+                      >
+                        <Mail size={12} /> Send Rejection Email {selectedForRejection.size > 0 ? `(${selectedForRejection.size})` : ""}
+                      </button>
+                      {selectedForRejection.size === 0 && (
+                        <span style={{ fontSize: 11, color: "var(--text-muted)", marginLeft: 8 }}>
+                          Tick candidates in the table below to enable this.
+                        </span>
+                      )}
+                    </div>
+                  )}
                 </div>
                 {mode === "video" && showVideoDecisionPanel && (
                   <div style={{ padding: "14px 16px", borderBottom: "1px solid var(--border)" }}>
@@ -3316,6 +3430,19 @@ export default function JobLensWorkspace({ mode = "resume", embedded = false }: 
                   <table className="tiq-table" style={{ minWidth: mode === "resume" ? 1200 : mode === "video" ? 1150 : mode === "phone" ? 900 : 850, width: "100%", tableLayout: "fixed" }}>
                     <thead ref={theadRef}>
                       <tr>
+                        {mode === "final" && (
+                          <th style={{ width: colWidths.selectCol, textAlign: "center" }}>
+                            <input
+                              type="checkbox"
+                              title="Select all visible"
+                              checked={displayCandidates.length > 0 && displayCandidates.every((c) => selectedForRejection.has(c.id))}
+                              onChange={(e) => {
+                                if (e.target.checked) setSelectedForRejection(new Set(displayCandidates.map((c) => c.id)));
+                                else setSelectedForRejection(new Set());
+                              }}
+                            />
+                          </th>
+                        )}
                         {/* # is the row's rank in the current view (after
                             any sort/filter), not a data field, so it's
                             neither filterable nor sortable itself. */}
@@ -3347,6 +3474,12 @@ export default function JobLensWorkspace({ mode = "resume", embedded = false }: 
                         {mode === "resume" && <ResizableFilterHeader label="Status" width={colWidths.status} onWidthChange={(w) => setColWidth("status", w)}
                           value={candColFilters.status} options={candColOptions("status")} onChange={(v) => setCandColFilter("status", v)}
                           sortDir={candSort?.col === "status" ? candSort.dir : null} onSortClick={() => toggleCandSort("status")} />}
+                        {/* Free-text, essentially unique per candidate — a
+                            dropdown filter wouldn't be useful here, so this
+                            is sortable but not filterable, like Next Steps/
+                            Details below. */}
+                        {(mode === "resume" || mode === "final") && <ResizableFilterHeader label="Recommendation" filterable={false} width={colWidths.recommendation} onWidthChange={(w) => setColWidth("recommendation", w)}
+                          sortDir={candSort?.col === "recommendation" ? candSort.dir : null} onSortClick={() => toggleCandSort("recommendation")} />}
                         {(mode === "phone" || mode === "video") && <ResizableFilterHeader label="Interview Questions" width={colWidths.interviewQuestions} onWidthChange={(w) => setColWidth("interviewQuestions", w)}
                           value={candColFilters.interviewQuestions} options={candColOptions("interviewQuestions")} onChange={(v) => setCandColFilter("interviewQuestions", v)}
                           sortDir={candSort?.col === "interviewQuestions" ? candSort.dir : null} onSortClick={() => toggleCandSort("interviewQuestions")} />}
@@ -3381,6 +3514,9 @@ export default function JobLensWorkspace({ mode = "resume", embedded = false }: 
                         {mode === "final" && <ResizableFilterHeader label="Shortlist" width={colWidths.shortlist} onWidthChange={(w) => setColWidth("shortlist", w)}
                           value={candColFilters.shortlist} options={candColOptions("shortlist")} onChange={(v) => setCandColFilter("shortlist", v)}
                           sortDir={candSort?.col === "shortlist" ? candSort.dir : null} onSortClick={() => toggleCandSort("shortlist")} />}
+                        {mode === "final" && <ResizableFilterHeader label="Rejection Email" width={colWidths.rejectionEmail} onWidthChange={(w) => setColWidth("rejectionEmail", w)}
+                          value={candColFilters.rejectionEmail} options={candColOptions("rejectionEmail")} onChange={(v) => setCandColFilter("rejectionEmail", v)}
+                          sortDir={candSort?.col === "rejectionEmail" ? candSort.dir : null} onSortClick={() => toggleCandSort("rejectionEmail")} />}
                       </tr>
                     </thead>
                     <tbody>
@@ -3399,6 +3535,13 @@ export default function JobLensWorkspace({ mode = "resume", embedded = false }: 
                           jdOptional={activeSession.jd_optional_skills || []}
                           mode={mode}
                           focusCandidateId={focusCandidateId}
+                          selectable={mode === "final"}
+                          selected={selectedForRejection.has(c.id)}
+                          onToggleSelect={() => setSelectedForRejection((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(c.id)) next.delete(c.id); else next.add(c.id);
+                            return next;
+                          })}
                         />
                       ))}
                       {displayCandidates.length === 0 && (
@@ -3426,6 +3569,114 @@ export default function JobLensWorkspace({ mode = "resume", embedded = false }: 
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {/* ── Send Rejection Email popup (Screening Decision only) ──────
+          One individually-addressed email per selected candidate — see
+          jobLensApi.sendRejectionEmails / the backend's
+          send_rejection_emails for why this is a loop of single sends,
+          never a shared To/CC list. {name} in the body is replaced with
+          each candidate's own first name right before their email goes
+          out, so this editable draft is a genuine template, not a
+          literal message sent verbatim to everyone. */}
+      {showRejectionComposer && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", zIndex: 1200, display: "flex", alignItems: "center", justifyContent: "center" }}
+          onMouseDown={(e) => { if (e.target === e.currentTarget && !sendingRejection) setShowRejectionComposer(false); }}>
+          <div style={{ background: "#ffffff", color: "#111827", borderRadius: 14, padding: 24, maxWidth: 560, width: "94%", maxHeight: "88vh", overflowY: "auto", boxShadow: "0 25px 60px rgba(0,0,0,.4)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+              <div style={{ fontWeight: 800, fontSize: 16 }}>
+                <Mail size={16} style={{ display: "inline", marginRight: 8, verticalAlign: "middle" }} />
+                Send Rejection Email
+              </div>
+              {!sendingRejection && (
+                <button onClick={() => setShowRejectionComposer(false)} style={{ background: "none", border: "none", cursor: "pointer" }}><X size={18} /></button>
+              )}
+            </div>
+            <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 16 }}>
+              Going to <strong>{selectedForRejection.size}</strong> candidate{selectedForRejection.size === 1 ? "" : "s"} — each gets their own
+              separate email addressed to them by name; no candidate will see any other candidate's name or email address.
+            </div>
+
+            {!rejectionResult ? (
+              <>
+                <div className="tiq-form-group">
+                  <label className="tiq-label">Subject</label>
+                  <input className="tiq-input" value={rejectionSubject} onChange={(e) => setRejectionSubject(e.target.value)} disabled={sendingRejection} />
+                </div>
+                <div className="tiq-form-group">
+                  <label className="tiq-label">Message — use <code>{"{name}"}</code> where the candidate's first name should go</label>
+                  <textarea
+                    className="tiq-input" rows={12} value={rejectionBody}
+                    onChange={(e) => setRejectionBody(e.target.value)}
+                    disabled={sendingRejection}
+                    placeholder="Write like a normal email — leave a blank line between paragraphs."
+                    style={{ fontSize: 13, lineHeight: 1.5, resize: "vertical" }}
+                  />
+                </div>
+                <div style={{ background: "var(--slate-50, #f8fafc)", border: "1px solid var(--border)", borderRadius: 8, padding: 12, marginBottom: 16 }}>
+                  <div style={{ fontSize: 10.5, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 6 }}>
+                    Preview (as the first selected candidate would see it)
+                  </div>
+                  <div
+                    style={{ fontSize: 13, lineHeight: 1.5 }}
+                    dangerouslySetInnerHTML={{
+                      __html: textToHtml(rejectionBody.replace(/\{name\}/g, (() => {
+                        const firstId = Array.from(selectedForRejection)[0];
+                        const cand = candidates.find((c: any) => c.id === firstId);
+                        return (cand?.name || "").split(" ")[0] || "there";
+                      })())),
+                    }}
+                  />
+                </div>
+                <div className="tiq-flex-end">
+                  <button className="tiq-btn tiq-btn-ghost" onClick={() => setShowRejectionComposer(false)} disabled={sendingRejection}>Cancel</button>
+                  <button
+                    className="tiq-btn tiq-btn-primary"
+                    disabled={sendingRejection || !rejectionSubject.trim() || !rejectionBody.trim()}
+                    onClick={async () => {
+                      setSendingRejection(true);
+                      try {
+                        const res = await jobLensApi.sendRejectionEmails({
+                          candidate_ids: Array.from(selectedForRejection),
+                          subject: rejectionSubject.trim(),
+                          body_html_template: textToHtml(rejectionBody),
+                        });
+                        setRejectionResult(res);
+                        setSelectedForRejection(new Set());
+                        refetchSession();
+                      } catch (e: any) {
+                        alert(e?.response?.data?.detail || "Failed to send rejection emails.");
+                      } finally {
+                        setSendingRejection(false);
+                      }
+                    }}
+                  >
+                    {sendingRejection ? "Sending…" : `Send to ${selectedForRejection.size} Candidate${selectedForRejection.size === 1 ? "" : "s"}`}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <div>
+                {rejectionResult.sent.length > 0 && (
+                  <div className="tiq-alert tiq-alert-success" style={{ marginBottom: 10 }}>
+                    Sent to {rejectionResult.sent.length}: {rejectionResult.sent.map((s: any) => s.name).join(", ")}
+                  </div>
+                )}
+                {rejectionResult.failed.length > 0 && (
+                  <div className="tiq-alert tiq-alert-error" style={{ marginBottom: 10 }}>
+                    <div style={{ fontWeight: 700, marginBottom: 4 }}>Failed for {rejectionResult.failed.length}:</div>
+                    {rejectionResult.failed.map((f: any, i: number) => (
+                      <div key={i} style={{ fontSize: 12 }}>{f.name || `Candidate #${f.candidate_id}`} — {f.error}</div>
+                    ))}
+                  </div>
+                )}
+                <div className="tiq-flex-end">
+                  <button className="tiq-btn tiq-btn-primary" onClick={() => { setShowRejectionComposer(false); setRejectionResult(null); }}>Done</button>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>

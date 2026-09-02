@@ -5,6 +5,7 @@ import { Settings, Key, User, Shield, Trash2, Pencil, Home} from "lucide-react";
 import { authApi, candidateLensSettingsApi, api } from "../lib/api";
 import { useAuth } from "../hooks/useAuth";
 import DataTable from "../components/DataTable";
+import { MeetingLinkPanel } from "./admin/PlatformIntegrationsPanels";
 
 export default function SettingsPage() {
   const navigate = useNavigate();
@@ -405,7 +406,7 @@ export default function SettingsPage() {
   // catch-all "Saved keys" table at the bottom only needs to show
   // whatever's left: services with no dedicated settings window
   // anywhere in the app.
-  const DEDICATED_UI_SERVICES = ["apify", "groq", "linkedin", "calendly", "navtalk", "ollama", "morphcast", "smtp", "telephony", "android_caller", "interview", "database", "s3"];
+  const DEDICATED_UI_SERVICES = ["apify", "groq", "linkedin", "calendly", "navtalk", "ollama", "morphcast", "smtp", "telephony", "android_caller", "interview", "database", "s3", "meeting_platform"];
   const otherSavedKeys = savedKeys.filter((k: any) => !DEDICATED_UI_SERVICES.includes(k.service));
 
   // ── ADMIN USERS ──────────────────────────────────────────────────
@@ -513,6 +514,12 @@ export default function SettingsPage() {
               {savingService === "linkedin" ? "Saving…" : "Save LinkedIn Credentials"}
             </button>
           </div>
+
+          {/* Meeting Link — a personal default (each recruiter has their
+              own recurring room), so unlike Apify/Calendly/etc. below,
+              this belongs directly here for every user, not behind
+              Admin Console. */}
+          <MeetingLinkPanel />
 
           {/* Apify/Groq/Ollama/Calendly/NavTalk/MorphCast are now
               managed by admins from Admin Console → API Keys, not here
@@ -949,9 +956,9 @@ export default function SettingsPage() {
             <div className="tiq-card-title">All users ({users.length})</div>
             <div className="tiq-table-wrap">
               <DataTable
-                columns={["name", "email", "role", "company", "is_active", "last_login"]}
-                columnLabels={{ name: "Name", email: "Email (User ID)", role: "Role", company: "Company", is_active: "Status", last_login: "Last login" }}
-                rows={users}
+                columns={["idx", "name", "email", "role", "company", "is_active", "last_login"]}
+                columnLabels={{ idx: "#", name: "Name", email: "Email (User ID)", role: "Role", company: "Company", is_active: "Status", last_login: "Last login" }}
+                rows={users.map((u: any, i: number) => ({ ...u, idx: i + 1 }))}
                 getRowKey={(u: any) => u.id}
                 actionsLabel=""
                 actionsWidth={100}
@@ -963,6 +970,7 @@ export default function SettingsPage() {
                 )}
                 renderCell={(u: any, col: string) => {
                   switch (col) {
+                    case "idx": return <span style={{ fontSize: 12, color: "var(--text-muted)" }}>{u.idx}</span>;
                     case "name": return <span style={{ fontWeight: 600 }}>{u.name}</span>;
                     case "email": return <span style={{ fontSize: 13 }}>{u.email}</span>;
                     case "role": return <span className={`tiq-badge ${u.role === "admin" ? "tiq-badge-violet" : "tiq-badge-slate"}`}>{u.role}</span>;

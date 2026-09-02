@@ -32,6 +32,7 @@ import PublicClientPortalPage from "./pages/PublicClientPortalPage";
 import PublicVendorPortalPage from "./pages/PublicVendorPortalPage";
 import PublicInterviewSchedulePage from "./pages/PublicInterviewSchedulePage";
 import PublicInterviewApprovalPage from "./pages/PublicInterviewApprovalPage";
+import PublicDecisionApprovalPage from "./pages/PublicDecisionApprovalPage";
 import PublicInterviewFeedbackPage from "./pages/PublicInterviewFeedbackPage";
 import ComingSoonPage     from "./pages/ComingSoonPage";
 import SettingsPage   from "./pages/SettingsPage";
@@ -78,6 +79,7 @@ export default function App() {
             <Route path="/hm/:token" element={<HiringManagerViewPage />} />
             <Route path="/schedule-interview/:token" element={<PublicInterviewSchedulePage />} />
             <Route path="/interview-approval/:token" element={<PublicInterviewApprovalPage />} />
+            <Route path="/decision-approval/:token" element={<PublicDecisionApprovalPage />} />
             <Route path="/interview-feedback/:token" element={<PublicInterviewFeedbackPage />} />
             <Route path="/client-portal/:token" element={<PublicClientPortalPage />} />
             <Route path="/vendor-portal/:token" element={<PublicVendorPortalPage />} />

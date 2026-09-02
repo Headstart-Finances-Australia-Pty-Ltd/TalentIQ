@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo, ReactNode } from "react";
-import { ChevronUp, ChevronDown, ChevronsUpDown, RotateCcw, Filter, Search, X } from "lucide-react";
+import { ChevronUp, ChevronDown, ChevronsUpDown, RotateCcw, Search, X } from "lucide-react";
 
 const DEFAULT_COL_WIDTH = 170;
 const MIN_COL_WIDTH = 80;
@@ -68,10 +68,12 @@ interface DataTableProps {
 
 /**
  * Generic data grid: drag-to-resize columns, click-to-sort headers, an
- * Excel-style per-column filter dropdown (funnel icon next to the sort
- * arrow), a global search box above the table, and a contextual "Reset
- * Columns" button that appears centered above the table once you've
- * actually resized something.
+ * Excel-style per-column filter dropdown (checkbox list with Select
+ * All/Clear, opened via a chevron right next to the sort arrow — same
+ * icon and placement as ResizableFilterHeader's non-DataTable tables,
+ * so every table in the app reads identically), a global search box
+ * above the table, and a contextual "Reset Columns" button that appears
+ * centered above the table once you've actually resized something.
  */
 export default function DataTable({
   columns, rows, getRowKey, rowStyle, actionsLabel, actionsWidth, renderActions,
@@ -84,7 +86,7 @@ export default function DataTable({
   const [sort, setSort] = useState<{ col: string; dir: "asc" | "desc" } | null>(null);
   const [colFilters, setColFilters] = useState<Record<string, Set<string>>>({});
   const [search, setSearch] = useState("");
-  const [openFilter, setOpenFilter] = useState<{ col: string; x: number; y: number } | null>(null);
+  const [openFilter, setOpenFilter] = useState<string | null>(null);
   const [filterSearch, setFilterSearch] = useState("");
   const [cellPopup, setCellPopup] = useState<{ x: number; y: number; text: string } | null>(null);
   const [internalSelection, setInternalSelection] = useState<Array<string | number>>([]);
@@ -217,13 +219,12 @@ export default function DataTable({
 
   const openFilterFor = (col: string) => (e: React.MouseEvent) => {
     e.stopPropagation(); // don't also trigger sort
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     setFilterSearch("");
-    setOpenFilter(prev => (prev?.col === col ? null : { col, x: rect.left, y: rect.bottom + 6 }));
+    setOpenFilter(prev => (prev === col ? null : col));
   };
 
   const filterValuesForOpen = openFilter
-    ? (uniqueValuesByCol[openFilter.col] || []).filter(v => v.toLowerCase().includes(filterSearch.toLowerCase()))
+    ? (uniqueValuesByCol[openFilter] || []).filter(v => v.toLowerCase().includes(filterSearch.toLowerCase()))
     : [];
 
   // A cell is considered truncated using the same rule renderCellDisplay
@@ -256,7 +257,7 @@ export default function DataTable({
   return (
     <div>
       {/* Toolbar: global search on the left, contextual Reset Columns centered */}
-      <div style={{ position: "relative", display: "flex", alignItems: "center", justifyContent: "flex-start", padding: "10px 16px", borderBottom: "1px solid var(--border)", gap: 12 }}>
+      <div style={{ position: "relative", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 16px", borderBottom: "1px solid var(--border)", gap: 12 }}>
         <div style={{ position: "relative", maxWidth: 280, flex: "0 1 280px" }}>
           <Search size={13} style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", color: "var(--text-muted)" }} />
           <input
@@ -311,39 +312,106 @@ export default function DataTable({
                 </th>
               )}
               {columns.map(c => {
-                const filterActive = colFilters[c] !== undefined;
+                const totalOptions = uniqueValuesByCol[c]?.length ?? 0;
+                const selectedCount = getSelectedSet(c).size;
+                const filterActive = colFilters[c] !== undefined && selectedCount !== totalOptions;
                 return (
                   <th key={c} style={{ position: "relative", userSelect: "none", padding: 0 }}>
+                    {/* Label + sort + filter clustered together right after
+                        the text (gap, not space-between) — same layout as
+                        ResizableFilterHeader (Requisitions/Pricing Plans/
+                        Interview Scheduling…) so every table's header reads
+                        identically regardless of which component renders it. */}
                     <div style={{ display: "flex", alignItems: "center", gap: 4, padding: "8px 6px 8px 10px", overflow: "hidden" }}>
                       <span
                         onClick={() => toggleSort(c)}
-                        style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "pointer"}}
+                        style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "pointer", minWidth: 0, flexShrink: 1 }}
                         title="Click to sort"
                       >
                         {columnLabels?.[c] ?? c}
                       </span>
                       <span
                         onClick={() => toggleSort(c)}
-                        style={{ cursor: "pointer", display: "flex", flexShrink: 0 }}
+                        style={{ cursor: "pointer", display: "flex", flexShrink: 0, opacity: sort?.col === c ? 1 : .4 }}
                         title="Click to sort"
                       >
                         {sort?.col === c
                           ? (sort.dir === "asc" ? <ChevronUp size={12} /> : <ChevronDown size={12} />)
-                          : <ChevronsUpDown size={11} style={{ opacity: .35 }} />}
+                          : <ChevronsUpDown size={11} />}
                       </span>
-                      <span
+                      <button
                         onClick={openFilterFor(c)}
-                        style={{ cursor: "pointer", display: "flex", flexShrink: 0, color: filterActive ? "var(--teal-500)" : "inherit", opacity: filterActive ? 1 : .45 }}
                         title="Filter this column"
+                        style={{
+                          display: "flex", alignItems: "center", gap: 2, background: "none", border: "none", cursor: "pointer",
+                          font: "inherit", fontWeight: "inherit", color: filterActive ? "var(--violet-500)" : "inherit",
+                          opacity: filterActive ? 1 : .55, padding: 0, flexShrink: 0,
+                        }}
                       >
+                        {filterActive && <span style={{ fontSize: 10, flexShrink: 0 }}>({selectedCount})</span>}
                         <ChevronDown size={12} />
-                      </span>
+                      </button>
                     </div>
                     {/* Resize handle — visible light bar, teal on hover/drag */}
                     <span
                       onMouseDown={startResize(c)}
                       className={`tiq-col-resize-handle${resizingCol === c ? " tiq-resizing" : ""}`}
                     />
+                    {/* Filter dropdown — anchored to THIS column's own <th>
+                        (position: absolute, relative to the th above), not
+                        to the filter icon's screen coordinates, so it
+                        always opens flush with the column's own left edge
+                        instead of wherever the icon happens to sit. Same
+                        anchoring approach as ResizableFilterHeader. */}
+                    {openFilter === c && (
+                      <>
+                        <div style={{ position: "fixed", inset: 0, zIndex: 1499 }} onClick={() => setOpenFilter(null)} />
+                        <div style={{
+                          position: "absolute", top: "100%", left: 0, marginTop: 4, width: 240,
+                          background: "#ffffff", color: "#111827", border: "1px solid #e5e7eb",
+                          borderRadius: 10, boxShadow: "0 8px 28px rgba(0,0,0,.18)", overflow: "hidden",
+                          zIndex: 1500, textAlign: "left", fontWeight: 400,
+                        }}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <div style={{ padding: 10, borderBottom: "1px solid #e5e7eb" }}>
+                            <input
+                              autoFocus
+                              value={filterSearch}
+                              onChange={e => setFilterSearch(e.target.value)}
+                              placeholder="Search values…"
+                              style={{ width: "100%", fontSize: 12, padding: "6px 8px", borderRadius: 6, border: "1px solid #e5e7eb", outline: "none", boxSizing: "border-box" }}
+                            />
+                          </div>
+                          <div style={{ display: "flex", gap: 6, padding: "8px 10px", borderBottom: "1px solid #e5e7eb" }}>
+                            <button onClick={() => selectAllValues(c)}
+                              style={{ fontSize: 11, background: "none", border: "none", color: "var(--teal-500)", cursor: "pointer", padding: 0, fontWeight: 600 }}>
+                              Select All
+                            </button>
+                            <button onClick={() => clearAllValues(c)}
+                              style={{ fontSize: 11, background: "none", border: "none", color: "var(--rose-500)", cursor: "pointer", padding: 0, fontWeight: 600 }}>
+                              Clear
+                            </button>
+                          </div>
+                          <div style={{ maxHeight: 220, overflowY: "auto", padding: "4px 10px" }}>
+                            {filterValuesForOpen.length === 0 ? (
+                              <div style={{ fontSize: 11, color: "#9ca3af", padding: "8px 0" }}>No matching values</div>
+                            ) : filterValuesForOpen.map(v => {
+                              const valSelected = getSelectedSet(c).has(v);
+                              return (
+                                <label key={v} style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0", fontSize: 12, cursor: "pointer", fontWeight: 400 }}>
+                                  <input type="checkbox" checked={valSelected} onChange={() => toggleFilterValue(c, v)} />
+                                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v}</span>
+                                </label>
+                              );
+                            })}
+                          </div>
+                          <div style={{ padding: 10, borderTop: "1px solid #e5e7eb", textAlign: "right" }}>
+                            <button className="tiq-btn tiq-btn-primary tiq-btn-sm" onClick={() => setOpenFilter(null)}>Done</button>
+                          </div>
+                        </div>
+                      </>
+                    )}
                   </th>
                 );
               })}
@@ -399,46 +467,6 @@ export default function DataTable({
           </tbody>
         </table>
       </div>
-
-      {openFilter && (
-        <FilterPopover x={openFilter.x} y={openFilter.y} onClose={() => setOpenFilter(null)}>
-          <div style={{ padding: 10, borderBottom: "1px solid #e5e7eb" }}>
-            <input
-              autoFocus
-              value={filterSearch}
-              onChange={e => setFilterSearch(e.target.value)}
-              placeholder="Search values…"
-              style={{ width: "100%", fontSize: 12, padding: "6px 8px", borderRadius: 6, border: "1px solid #e5e7eb", outline: "none", boxSizing: "border-box" }}
-            />
-          </div>
-          <div style={{ display: "flex", gap: 6, padding: "8px 10px", borderBottom: "1px solid #e5e7eb" }}>
-            <button onClick={() => selectAllValues(openFilter.col)}
-              style={{ fontSize: 11, background: "none", border: "none", color: "var(--teal-500)", cursor: "pointer", padding: 0 }}>
-              Select All
-            </button>
-            <button onClick={() => clearAllValues(openFilter.col)}
-              style={{ fontSize: 11, background: "none", border: "none", color: "var(--rose-500)", cursor: "pointer", padding: 0 }}>
-              Clear
-            </button>
-          </div>
-          <div style={{ maxHeight: 220, overflowY: "auto", padding: "4px 10px" }}>
-            {filterValuesForOpen.length === 0 ? (
-              <div style={{ fontSize: 11, color: "#9ca3af", padding: "8px 0" }}>No matching values</div>
-            ) : filterValuesForOpen.map(v => {
-              const selected = getSelectedSet(openFilter.col).has(v);
-              return (
-                <label key={v} style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0", fontSize: 12, cursor: "pointer" }}>
-                  <input type="checkbox" checked={selected} onChange={() => toggleFilterValue(openFilter.col, v)} />
-                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v}</span>
-                </label>
-              );
-            })}
-          </div>
-          <div style={{ padding: 10, borderTop: "1px solid #e5e7eb", textAlign: "right" }}>
-            <button className="tiq-btn tiq-btn-primary tiq-btn-sm" onClick={() => setOpenFilter(null)}>Done</button>
-          </div>
-        </FilterPopover>
-      )}
 
       {cellPopup && (
         <FilterPopover x={cellPopup.x} y={cellPopup.y} width={420} onClose={() => setCellPopup(null)}>

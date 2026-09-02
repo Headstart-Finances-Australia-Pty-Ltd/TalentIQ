@@ -431,6 +431,50 @@ export function CalendlyPanel() {
   );
 }
 
+// ── Meeting Link (Zoom / Teams / Google Meet) ─────────────────────────
+// A personal default — each recruiter has their own recurring meeting
+// room, so this is deliberately NOT in SHAREABLE_SERVICES (same as
+// Calendly above). Used to pre-fill Interview Scheduling's Location/
+// Meeting Link field whenever it's left blank at scheduling time (see
+// InterviewsPage.tsx), and by Panel Interview's "Send Invite" action —
+// Calendly itself has no API for switching which video platform a
+// booking uses (that's configured on the Calendly event type itself),
+// so this is the practical equivalent: one saved link, reused instead
+// of typed fresh (or left blank) every time.
+export function MeetingLinkPanel() {
+  const [meeting, setMeeting] = useState({ platform: "zoom", link: "" });
+  const [msg, setMsg] = useState("");
+  const { save, saving } = useSaveFields("meeting_platform", false, (m) => { setMsg(m); setTimeout(() => setMsg(""), 3000); });
+
+  return (
+    <div className="tiq-card tiq-mb-6">
+      <div className="tiq-card-title">Meeting Link — Zoom / Teams / Google Meet</div>
+      <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14, lineHeight: 1.5 }}>
+        Your default video-call link, used to pre-fill the Location/Meeting Link field whenever it's left blank
+        while scheduling a Video or Panel Interview round, and for Panel Interview's "Send Invite" email. Paste
+        your own recurring Zoom Personal Meeting Room, Microsoft Teams meeting, or Google Meet link — this doesn't
+        create new meetings automatically, it just saves you retyping (or forgetting to set) the same link every time.
+      </p>
+      <StatusMsg msg={msg} />
+      <SavedKeysBar service="meeting_platform" />
+      <div className="tiq-form-group">
+        <label className="tiq-label">Platform</label>
+        <select className="tiq-input tiq-select" value={meeting.platform} onChange={(e) => setMeeting({ ...meeting, platform: e.target.value })}>
+          <option value="zoom">Zoom</option>
+          <option value="teams">Microsoft Teams</option>
+          <option value="meet">Google Meet</option>
+          <option value="other">Other</option>
+        </select>
+      </div>
+      <Field label="Meeting Link" value={meeting.link} onChange={(v) => setMeeting({ ...meeting, link: v })}
+        placeholder="https://zoom.us/j/…, https://teams.microsoft.com/…, or https://meet.google.com/…" />
+      <button className="tiq-btn tiq-btn-primary" onClick={() => save(meeting)} disabled={saving || !meeting.link.trim()}>
+        {saving ? "Saving…" : "Save Meeting Link"}
+      </button>
+    </div>
+  );
+}
+
 // ── Groq Key Pool — scale capacity automatically ─────────────────────
 export function GroqKeyPoolPanel() {
   const { data: poolKeys = [], refetch: refetchPool } = useQuery({ queryKey: ["groq-pool"], queryFn: groqPoolApi.list });

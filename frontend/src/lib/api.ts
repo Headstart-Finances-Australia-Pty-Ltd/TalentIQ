@@ -182,6 +182,44 @@ export const interviewApi = {
     api.post(`/api/interviews/interviews/${id}/calendly-link/email`, data || {}).then((r) => r.data),
   calendlyStatus: () => api.get("/api/interviews/calendly/status").then((r) => r.data),
   calendlyEventTypes: () => api.get("/api/interviews/calendly/event-types").then((r) => r.data),
+  // Settings > API Keys > Meeting Link — pre-fills the Schedule
+  // Interview form's Location/Meeting Link field when left blank.
+  meetingLink: () => api.get("/api/interviews/meeting-link").then((r) => r.data),
+  // Fixed-time invite email (date/time + location/link, no candidate
+  // self-scheduling) — for rounds like Panel Interview that can't use
+  // the Calendly self-schedule flow above.
+  sendFixedInvite: (id: number, data?: { to_email?: string; subject?: string; body_html?: string }) =>
+    api.post(`/api/interviews/interviews/${id}/send-invite`, data || {}).then((r) => r.data),
+  // Interview Decision's bulk "Send Rejection Email" — one individually
+  // addressed email per round's candidate, mirroring jobLensApi's
+  // sendRejectionEmails in JobLensPage.tsx.
+  sendInterviewRejectionEmails: (data: { interview_ids: number[]; subject: string; body_html_template: string }) =>
+    api.post(`/api/interviews/interviews/reject-email`, data).then((r) => r.data),
+  // Interview Decision's Approval popup — multipart because of the
+  // optional attachment file.
+  setDecisionApproval: (id: number, data: { status: string; approved_by?: string; approval_date?: string; notes?: string; attachment?: File | null }) => {
+    const form = new FormData();
+    form.append("status", data.status);
+    if (data.approved_by) form.append("approved_by", data.approved_by);
+    if (data.approval_date) form.append("approval_date", data.approval_date);
+    if (data.notes) form.append("notes", data.notes);
+    if (data.attachment) form.append("attachment", data.attachment);
+    return api.post(`/api/interviews/interviews/${id}/decision-approval`, form, {
+      headers: { "Content-Type": "multipart/form-data" },
+    }).then((r) => r.data);
+  },
+  // Interview Decision's Approval popup — downloads the attachment as a
+  // blob (not a plain <a href>) since auth here is a Bearer header, not
+  // a cookie a browser navigation would carry automatically.
+  downloadDecisionApprovalAttachment: (id: number) =>
+    api.get(`/api/interviews/interviews/${id}/decision-approval/attachment`, { responseType: "blob" }).then((r) => r.data),
+  // Online approver — the "send an email to the approver" alternative
+  // to filling in the manual popup fields. Multiple approvers can be
+  // added for the same round.
+  addDecisionApprover: (id: number, data: { approver_name: string; approver_email: string }) =>
+    api.post(`/api/interviews/interviews/${id}/decision-approvers`, { ...data, approval_url_base: window.location.origin }).then((r) => r.data),
+  removeDecisionApprover: (approverId: number) =>
+    api.delete(`/api/interviews/interviews/decision-approvers/${approverId}`).then((r) => r.data),
 
   // Panel Interviewers directory — a roster of experts, separate from the
   // per-round interviewers JSON snapshot; assignments are derived server
@@ -244,6 +282,15 @@ export const publicInterviewApprovalApi = {
 export const publicInterviewFeedbackApi = {
   get: (token: string) => api.get(`/api/public/interviews/feedback/${token}`).then((r) => r.data),
   submit: (token: string, data: any) => api.post(`/api/public/interviews/feedback/${token}`, data).then((r) => r.data),
+};
+
+// ── Public: hiring-decision approval (no login) — Interview Decision's
+// "send an online approval request" option; distinct from the
+// scheduling-approval flow above.
+export const publicDecisionApprovalApi = {
+  get: (token: string) => api.get(`/api/public/interviews/decision-approval/${token}`).then((r) => r.data),
+  submit: (token: string, data: { status: "Approved" | "Rejected"; comments?: string }) =>
+    api.post(`/api/public/interviews/decision-approval/${token}`, data).then((r) => r.data),
 };
 
 // ── AI Avatar Interviews (extends Interviews + CandidateLens) ──
@@ -593,6 +640,7 @@ export const candidateTrackApi = {
 export const billingApi = {
   listPlans: () => api.get("/api/billing/plans").then((r) => r.data),
   mySubscription: () => api.get("/api/billing/my-subscription").then((r) => r.data),
+  myPlanHistory: () => api.get("/api/billing/my-plan-history").then((r) => r.data),
   startFreeDemo: () => api.post("/api/billing/start-free-demo").then((r) => r.data),
   createCheckout: (plan_slug: string, billing_period: "monthly" | "yearly") =>
     api.post("/api/billing/create-checkout", { plan_slug, billing_period }).then((r) => r.data),
