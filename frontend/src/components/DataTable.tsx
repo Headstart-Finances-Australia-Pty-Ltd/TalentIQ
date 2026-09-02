@@ -256,7 +256,7 @@ export default function DataTable({
   return (
     <div>
       {/* Toolbar: global search on the left, contextual Reset Columns centered */}
-      <div style={{ position: "relative", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 16px", borderBottom: "1px solid var(--border)", gap: 12 }}>
+      <div style={{ position: "relative", display: "flex", alignItems: "center", justifyContent: "flex-start", padding: "10px 16px", borderBottom: "1px solid var(--border)", gap: 12 }}>
         <div style={{ position: "relative", maxWidth: 280, flex: "0 1 280px" }}>
           <Search size={13} style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", color: "var(--text-muted)" }} />
           <input
@@ -336,7 +336,7 @@ export default function DataTable({
                         style={{ cursor: "pointer", display: "flex", flexShrink: 0, color: filterActive ? "var(--teal-500)" : "inherit", opacity: filterActive ? 1 : .45 }}
                         title="Filter this column"
                       >
-                        <Filter size={12} />
+                        <ChevronDown size={12} />
                       </span>
                     </div>
                     {/* Resize handle — visible light bar, teal on hover/drag */}
