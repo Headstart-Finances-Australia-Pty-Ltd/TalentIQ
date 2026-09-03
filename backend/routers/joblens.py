@@ -292,6 +292,19 @@ def extract_candidate_info(text: str, filename: str) -> dict:
     norm_text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
     norm_text = re.sub(r'(\d)([a-zA-Z])', r'\1 \2', norm_text)
 
+    # PDFs go the OTHER way too: a contact-icon glyph (the envelope/phone
+    # icon many resume templates place right before the email/phone)
+    # frequently gets extracted as stray whitespace, splitting
+    # "name@gmail.com" into "name @gmail.com" or "name@ gmail.com" — a
+    # space the email regex below won't tolerate right around the "@",
+    # so the whole email silently failed to match even though it's right
+    # there in the text. Collapse whitespace immediately touching an "@"
+    # back together before matching, but only when it's actually part of
+    # an email-shaped token (word chars on one side, a domain+TLD on the
+    # other) — this never touches a genuine "meet @ 3pm"-style sentence.
+    norm_text = re.sub(r'([\w.+-])\s+@\s*([\w.-]+\.[a-zA-Z]{2,6})', r'\1@\2', norm_text)
+    norm_text = re.sub(r'([\w.+-])\s*@\s+([\w.-]+\.[a-zA-Z]{2,6})', r'\1@\2', norm_text)
+
     # Email
     email_m = re.search(r"[a-zA-Z][\w.+-]*@[\w.-]+\.[a-zA-Z]{2,6}", norm_text)
     email = email_m.group() if email_m else ""
@@ -299,9 +312,22 @@ def extract_candidate_info(text: str, filename: str) -> dict:
     # Phone — original regex: (+?\d{1,4}[\s-]?\(?\d{1,4}\)?[\s-]?\d{3,4}[\s-]?\d{3,4})
     phone_m = re.search(r"(\+?\d{1,4}[\s\-]?\(?\d{1,4}\)?[\s\-]?\d{3,4}[\s\-]?\d{3,4})", text)
     phone = phone_m.group().replace(" ", "").strip() if phone_m else ""
-    # Reject cert numbers: must have spaces/dashes or start with +
+    # Reject cert/reference numbers that happen to be digit runs with no
+    # phone-style separator — UNLESS the run is exactly a plausible phone
+    # length (10-13 digits, covering a bare local number up through a
+    # full +countrycode number). Plenty of real resumes — this one
+    # included — write a mobile number as one unbroken 10-digit run with
+    # no space/dash/parens at all (very common for Indian mobile numbers
+    # specifically), and the old version rejected every one of those as
+    # if it were a certificate ID, discarding a perfectly valid phone
+    # number. Genuine cert/reference numbers are the ones that fall
+    # OUTSIDE this length band (shorter, or noticeably longer), so this
+    # keeps the original guard for those while no longer punishing a
+    # correctly-formatted-but-unspaced phone number.
     if phone and not re.search(r"[\s\-\+\(\)]", phone_m.group() if phone_m else ""):
-        phone = ""
+        digits_only = re.sub(r"\D", "", phone)
+        if not (10 <= len(digits_only) <= 13):
+            phone = ""
 
     # Name — mirrors original: first non-email, non-4digit, <=5 word line
     name = ""
@@ -3739,8 +3765,26 @@ async def delete_session(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Delete a CandidateLens session and all its candidates."""
-    from sqlalchemy import delete as sql_delete
+    """Delete a CandidateLens session and all its candidates.
+
+    Deleting the candidates isn't always safe on its own: a candidate can
+    have been carried into Interview Scheduling (Video/Phone Interview's
+    "Start Interview" or "Candidate reached by phone" create a
+    tiq_interviews row via joblens_candidate_id) or into an Avatar
+    Interview session, BOTH of which reference tiq_joblens_candidates.id
+    with no ON DELETE behavior set on the foreign key — Postgres's default
+    there is RESTRICT. Deleting a candidate that's still referenced used
+    to raise an IntegrityError straight out of this endpoint as a bare
+    500, which the frontend's mutation didn't surface either — from the
+    UI it just looked like "Delete" silently did nothing. Detaching those
+    references first (nulling the now-nullable joblens_candidate_id column
+    rather than deleting the interview/avatar rows themselves) keeps that
+    interview history intact while unblocking the delete, and this now
+    also fails loudly with a clear message on any OTHER integrity issue
+    instead of a bare 500.
+    """
+    from sqlalchemy import delete as sql_delete, update as sql_update
+    from sqlalchemy.exc import IntegrityError
     result = await db.execute(
         select(JobLensSession).where(
             JobLensSession.id == session_id,
@@ -3750,9 +3794,31 @@ async def delete_session(
     session = result.scalar_one_or_none()
     if not session:
         raise HTTPException(404, "Session not found")
+
+    candidate_ids_r = await db.execute(
+        select(JobLensCandidate.id).where(JobLensCandidate.session_id == session_id)
+    )
+    candidate_ids = [r[0] for r in candidate_ids_r.all()]
+
+    if candidate_ids:
+        from capabilities.interview.models import Interview
+        from capabilities.avatarinterview.models import AvatarInterviewSession
+        await db.execute(
+            sql_update(Interview).where(Interview.joblens_candidate_id.in_(candidate_ids))
+            .values(joblens_candidate_id=None)
+        )
+        await db.execute(
+            sql_update(AvatarInterviewSession).where(AvatarInterviewSession.joblens_candidate_id.in_(candidate_ids))
+            .values(joblens_candidate_id=None)
+        )
+
     await db.execute(sql_delete(JobLensCandidate).where(JobLensCandidate.session_id == session_id))
     await db.delete(session)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as e:
+        await db.rollback()
+        raise HTTPException(409, f"Could not delete this session — it's still referenced elsewhere: {e}")
     return {"message": "Deleted"}
 
 
@@ -3761,14 +3827,36 @@ async def delete_all_sessions(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Delete ALL sessions for the current user."""
-    from sqlalchemy import delete as sql_delete
+    """Delete ALL sessions for the current user. Same joblens_candidate_id
+    detach step as delete_session above, and for the same reason — see
+    that docstring."""
+    from sqlalchemy import delete as sql_delete, update as sql_update
+    from sqlalchemy.exc import IntegrityError
     ids_r = await db.execute(
         select(JobLensSession.id).where(JobLensSession.user_id == current_user.id)
     )
     ids = [r[0] for r in ids_r.all()]
     if ids:
+        candidate_ids_r = await db.execute(
+            select(JobLensCandidate.id).where(JobLensCandidate.session_id.in_(ids))
+        )
+        candidate_ids = [r[0] for r in candidate_ids_r.all()]
+        if candidate_ids:
+            from capabilities.interview.models import Interview
+            from capabilities.avatarinterview.models import AvatarInterviewSession
+            await db.execute(
+                sql_update(Interview).where(Interview.joblens_candidate_id.in_(candidate_ids))
+                .values(joblens_candidate_id=None)
+            )
+            await db.execute(
+                sql_update(AvatarInterviewSession).where(AvatarInterviewSession.joblens_candidate_id.in_(candidate_ids))
+                .values(joblens_candidate_id=None)
+            )
         await db.execute(sql_delete(JobLensCandidate).where(JobLensCandidate.session_id.in_(ids)))
         await db.execute(sql_delete(JobLensSession).where(JobLensSession.user_id == current_user.id))
-        await db.commit()
+        try:
+            await db.commit()
+        except IntegrityError as e:
+            await db.rollback()
+            raise HTTPException(409, f"Could not delete all sessions — some candidates are still referenced elsewhere: {e}")
     return {"message": f"Deleted {len(ids)} sessions"}
