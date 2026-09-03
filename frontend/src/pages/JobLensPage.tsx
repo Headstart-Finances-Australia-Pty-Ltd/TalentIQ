@@ -2017,7 +2017,7 @@ function CandidateRow({
             <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
               {["Proceed", "Hold", "Reject"].map((r) => (
                 <button key={r} type="button"
-                  onClick={() => { setVideoRecommendation(r); videoResultMut.mutate({ recommendation: r }); }}
+                  onClick={() => setVideoRecommendation(r)}
                   style={{
                     padding: "4px 9px", borderRadius: 999, fontSize: 10, fontWeight: 700, cursor: "pointer",
                     border: videoRecommendation === r ? "1.5px solid var(--violet-500)" : "1px solid var(--border)",
@@ -2227,7 +2227,7 @@ function CandidateRow({
             <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 8 }}>
               {["Proceed", "Hold", "Reject"].map((r) => (
                 <button key={r} type="button"
-                  onClick={() => { setPhoneRecommendation(r); phoneResultMut.mutate({ recommendation: r }); }}
+                  onClick={() => setPhoneRecommendation(r)}
                   style={{
                     padding: "4px 9px", borderRadius: 999, fontSize: 10, fontWeight: 700, cursor: "pointer",
                     border: phoneRecommendation === r ? "1.5px solid var(--violet-500)" : "1px solid var(--border)",
