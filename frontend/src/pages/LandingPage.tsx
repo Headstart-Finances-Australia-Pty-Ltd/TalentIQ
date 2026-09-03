@@ -10,14 +10,17 @@ import {
 import { CAPABILITIES, CORE_PIPELINE_CAPABILITIES, SUPPORTING_CAPABILITIES, JOBSEEKER_MODULES } from "../lib/capabilities";
 import RecruitmentWorkflow from "../components/RecruitmentWorkflow";
 
+const ALL_MODULES = CAPABILITIES.flatMap((cap) => cap.modules.map((m) => ({ ...m, capability: cap.name })));
+
+// Derived from CAPABILITIES itself (not hardcoded) so this can never
+// drift out of sync again if a capability is later added, removed, or
+// merged into another one.
 const STATS = [
-  { value: "9", label: "Capabilities" },
+  { value: String(CAPABILITIES.length), label: "Capabilities" },
   { value: "100%", label: "Data Ownership" },
   { value: "1", label: "Database" },
   { value: "AI", label: "LLM Powered" },
 ];
-
-const ALL_MODULES = CAPABILITIES.flatMap((cap) => cap.modules.map((m) => ({ ...m, capability: cap.name })));
 const BUILT_MODULE_COUNT = ALL_MODULES.filter((m) => m.built).length;
 
 // Same on/off map Admin Console > Modules Management edits and the app
@@ -111,7 +114,7 @@ function NavDropdown({ label, items }: { label: string; items: { name: string; r
 }
 
 // Grouped mega-menu for "Recruitment Platform" — the flat list was hard to
-// scan with 9 capabilities' worth of modules in it. Grouped by capability,
+// scan with all of CAPABILITIES' worth of modules in it. Grouped by capability,
 // each with its emoji + name as a non-clickable header, links below it.
 function CapabilityColumn({ cap }: { cap: (typeof CAPABILITIES)[0] }) {
   return (
@@ -414,7 +417,7 @@ export default function LandingPage() {
             End-to-end, not a bundle of tools
           </h2>
           <p style={{ fontSize: 16, color: "#64748b", maxWidth: 600, margin: "0 auto" }}>
-            A requisition flows through one connected pipeline — sourcing to placement — while four supporting
+            A requisition flows through one connected pipeline — sourcing to placement — while {SUPPORTING_CAPABILITIES.length} supporting
             capabilities operate underneath the whole thing, not bolted on at the edges.
           </p>
         </div>
@@ -426,13 +429,13 @@ export default function LandingPage() {
       <section style={{ padding: "96px 5% 48px", maxWidth: 1200, margin: "0 auto" }}>
         <div style={{ textAlign: "center", marginBottom: 40 }}>
           <div style={{ fontSize: 12, fontWeight: 700, letterSpacing: "2px", textTransform: "uppercase", color: "#94a3b8", marginBottom: 12 }}>
-            NINE CAPABILITIES, ONE PLATFORM
+            {CAPABILITIES.length} CAPABILITIES, ONE PLATFORM
           </div>
           <h2 style={{ fontSize: "clamp(28px,4vw,44px)", fontWeight: 800, letterSpacing: "-1px", color: "#0f172a", marginBottom: 16 }}>
             Every tool you need to hire smarter
           </h2>
           <p style={{ fontSize: 17, color: "#64748b", maxWidth: 620, margin: "0 auto" }}>
-            The recruitment platform is architected as nine capabilities, from candidate acquisition through to
+            The recruitment platform is architected as {CAPABILITIES.length} capabilities, from candidate acquisition through to
             reporting — each one a complete, working part of the hiring pipeline, built in order — plus a set of
             standalone <strong>job seeker tools</strong>. Everything shares the same database, so your data compounds.
           </p>
