@@ -1544,9 +1544,29 @@ function CandidateRow({
     // there isn't room above — e.g. the row is right under the sticky
     // header already — so it's never rendered off-screen or under the
     // header either way.
+    // AnchoredPopover caps itself at maxHeight 320 (see its own comment)
+    // — that box has to actually fit somewhere in the viewport, not just
+    // avoid the header. The old fallback clamped `y` to
+    // `window.innerHeight - 60`, which put the popover's TOP that close
+    // to the bottom of the screen and let its body (up to 320px tall)
+    // run straight off the bottom edge — invisible, and with no way to
+    // scroll it into view since it's position:fixed, not part of page
+    // flow. Below, "opening below" is only chosen when the popover's
+    // full height actually fits in the remaining space; otherwise it
+    // opens above regardless of the row's position, and as a last
+    // resort (a row that's both hard up against the header AND the
+    // bottom of a short viewport) the whole thing is clamped inside the
+    // viewport rather than letting either edge escape it.
+    const POPOVER_MAX_HEIGHT = 320;
     const roomAbove = cellRect.top - headerBottom;
-    const openAbove = roomAbove > 160;
-    const y = openAbove ? cellRect.top - 6 : Math.min(Math.max(cellRect.bottom + 6, headerBottom + 6), window.innerHeight - 60);
+    const roomBelow = window.innerHeight - cellRect.bottom;
+    const openAbove = roomAbove >= Math.min(POPOVER_MAX_HEIGHT, roomBelow) || roomBelow < 160;
+    const y = openAbove
+      ? Math.min(cellRect.top - 6, window.innerHeight - 8)
+      : Math.max(
+          headerBottom + 6,
+          Math.min(cellRect.bottom + 6, window.innerHeight - POPOVER_MAX_HEIGHT - 8),
+        );
     setPopover({ kind, x: cellRect.left, y, width: cellRect.width, anchor, openAbove });
   };
 

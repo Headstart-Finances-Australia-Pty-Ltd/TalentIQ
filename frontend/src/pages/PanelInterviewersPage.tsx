@@ -46,6 +46,10 @@ export default function PanelInterviewersPage({ embedded = false }: { embedded?:
   // same idea as Interview Scheduling's panel popup, kept local here
   // rather than shared, since it's a small, self-contained lookup.
   const [panelPopup, setPanelPopup] = useState<{ loading: boolean; data: any | null; error: string } | null>(null);
+  // Clicking an interviewer's name in the directory table shows their
+  // full record in a lightweight popup — same as the equivalent click
+  // inside the New Panel form's interviewer checklist.
+  const [nameDetail, setNameDetail] = useState<any | null>(null);
 
   // Per-column dropdown filter + sort + a global search box — same
   // pattern as Interview Scheduling's pipeline table.
@@ -213,7 +217,12 @@ export default function PanelInterviewersPage({ embedded = false }: { embedded?:
                 {displayPeople.map((p, idx) => (
                   <tr key={p.id}>
                     <td style={{ fontSize: 12, color: "var(--text-muted)" }}>{idx + 1}</td>
-                    <td style={{ fontWeight: 600, fontSize: 13 }}>{p.name}</td>
+                    <td style={{ fontWeight: 600, fontSize: 13 }}>
+                      <span onClick={() => setNameDetail(p)} title="View interviewer details"
+                        style={{ cursor: "pointer", textDecoration: "underline", textDecorationStyle: "dotted", textUnderlineOffset: 2 }}>
+                        {p.name}
+                      </span>
+                    </td>
                     <td style={{ fontSize: 12 }}>{p.expertise_area || "—"}</td>
                     <td style={{ fontSize: 12 }}>{p.company || "—"}</td>
                     <td style={{ fontSize: 12 }}>
@@ -259,7 +268,16 @@ export default function PanelInterviewersPage({ embedded = false }: { embedded?:
       {showForm && (
         <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center" }}
              onMouseDown={(e) => { if (e.target === e.currentTarget) setShowForm(false); }}>
-          <div style={{ background: "#fff", borderRadius: 14, padding: 24, maxWidth: 460, width: "94%", boxShadow: "0 25px 60px rgba(0,0,0,.4)" }}>
+          {/* maxHeight + overflowY: without these, this card rendered at
+              its full natural height with no cap — on a shorter viewport
+              (laptop at 100% zoom, a smaller window) it simply overflowed
+              past both the top and bottom of the screen with no way to
+              reach the Save/Cancel buttons or any field below the fold,
+              since the backdrop itself doesn't scroll. Capped to 90% of
+              the viewport height with its own scrollbar, same pattern
+              already used by the New Panel form and the panel details
+              popup below. */}
+          <div style={{ background: "#fff", borderRadius: 14, padding: 24, maxWidth: 460, width: "94%", maxHeight: "90vh", overflowY: "auto", boxShadow: "0 25px 60px rgba(0,0,0,.4)" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
               <div style={{ fontWeight: 800, fontSize: 16 }}>{editingId ? "Edit Panel Interviewer" : "Add Panel Interviewer"}</div>
               <button onClick={() => setShowForm(false)} style={{ background: "none", border: "none", cursor: "pointer" }}><X size={18} /></button>
@@ -348,6 +366,37 @@ export default function PanelInterviewersPage({ embedded = false }: { embedded?:
                 </div>
               </>
             ) : null}
+          </div>
+        </div>
+      )}
+
+      {nameDetail && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 1100, display: "flex", alignItems: "center", justifyContent: "center" }}
+             onMouseDown={(e) => { if (e.target === e.currentTarget) setNameDetail(null); }}>
+          <div style={{ background: "#fff", color: "#111827", borderRadius: 14, padding: 24, maxWidth: 380, width: "92%", maxHeight: "80vh", overflowY: "auto", boxShadow: "0 25px 60px rgba(0,0,0,.4)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+              <div style={{ fontWeight: 800, fontSize: 16 }}>{nameDetail.name}</div>
+              <button onClick={() => setNameDetail(null)} style={{ background: "none", border: "none", cursor: "pointer" }}><X size={18} /></button>
+            </div>
+            <span className="tiq-badge" style={{
+              fontSize: 10, marginBottom: 12, display: "inline-block",
+              background: nameDetail.interviewer_type === "External" ? "rgba(139,92,246,.12)" : "rgba(13,148,136,.12)",
+              color: nameDetail.interviewer_type === "External" ? "var(--violet-500, #8b5cf6)" : "var(--brand-teal, #0d9488)",
+            }}>
+              {nameDetail.interviewer_type || "Internal"}
+            </span>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, fontSize: 13 }}>
+              <div><span style={{ color: "var(--text-muted)" }}>Expertise: </span>{nameDetail.expertise_area || "—"}</div>
+              <div><span style={{ color: "var(--text-muted)" }}>Company: </span>{nameDetail.company || "—"}</div>
+              <div><span style={{ color: "var(--text-muted)" }}>Phone: </span>{nameDetail.phone || "—"}</div>
+              <div><span style={{ color: "var(--text-muted)" }}>Email: </span>{nameDetail.email || "—"}</div>
+              {nameDetail.notes && (
+                <div><span style={{ color: "var(--text-muted)" }}>Notes: </span>{nameDetail.notes}</div>
+              )}
+              <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                {(nameDetail.assignments || []).length === 0 ? "Not assigned to any panel." : `Assigned: ${nameDetail.assignments.map((a: any) => `Panel #${a.panel_number}`).join(", ")}`}
+              </div>
+            </div>
           </div>
         </div>
       )}

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "../hooks/useAuth";
@@ -56,10 +56,28 @@ function slugify(name: string) {
 
 function NavDropdown({ label, items }: { label: string; items: { name: string; route: string; capability?: string; emoji?: string }[] }) {
   const [open, setOpen] = useState(false);
+  // The panel below renders with `marginTop: 4` and is taken out of
+  // normal flow (position: absolute), so this wrapper's own hoverable
+  // box only ever covers the button itself — it does NOT grow to
+  // include the panel floating underneath it. The instant the pointer
+  // crosses that 4px gap on its way down to the panel, it's technically
+  // over neither element, so onMouseLeave fired immediately and closed
+  // the menu — then re-entering the panel (a DOM descendant, so it can
+  // still trigger the wrapper's onMouseEnter) reopened it a frame later.
+  // That close-then-reopen inside one pointer movement is what looked
+  // like "disappearing" or, on a fast/lucky mouse path, "sometimes
+  // stays". A short close delay bridges that gap: leaving either the
+  // button or the panel schedules a close, but re-entering either one
+  // (which cancels the pending timer below) means a mouse merely
+  // passing through the gap never actually closes it.
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cancelClose = () => { if (closeTimer.current) { clearTimeout(closeTimer.current); closeTimer.current = null; } };
+  const scheduleClose = () => { cancelClose(); closeTimer.current = setTimeout(() => setOpen(false), 200); };
+  useEffect(() => () => cancelClose(), []);
   return (
     <div style={{ position: "relative" }}
-      onMouseEnter={() => setOpen(true)}
-      onMouseLeave={() => setOpen(false)}>
+      onMouseEnter={() => { cancelClose(); setOpen(true); }}
+      onMouseLeave={scheduleClose}>
       <button style={{
         fontSize: 13, color: "#64748b", padding: "6px 10px", borderRadius: 6,
         fontWeight: 700, background: open ? "#f8fafc" : "transparent",
@@ -118,10 +136,20 @@ function CapabilityColumn({ cap }: { cap: (typeof CAPABILITIES)[0] }) {
 
 function RecruitmentMegaMenu({ core, supporting }: { core: typeof CAPABILITIES; supporting: typeof CAPABILITIES }) {
   const [open, setOpen] = useState(false);
+  // Same gap-between-trigger-and-panel issue as NavDropdown above (the
+  // panel is position:absolute and this wrapper's hover box doesn't
+  // extend to cover it), made worse here since the panel is also
+  // horizontally re-centered (`left: 50%, translateX(-50%)`) rather than
+  // left-aligned under the button — an even easier gap to "fall out of"
+  // on the way down. Same delayed-close fix.
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cancelClose = () => { if (closeTimer.current) { clearTimeout(closeTimer.current); closeTimer.current = null; } };
+  const scheduleClose = () => { cancelClose(); closeTimer.current = setTimeout(() => setOpen(false), 200); };
+  useEffect(() => () => cancelClose(), []);
   return (
     <div style={{ position: "relative" }}
-      onMouseEnter={() => setOpen(true)}
-      onMouseLeave={() => setOpen(false)}>
+      onMouseEnter={() => { cancelClose(); setOpen(true); }}
+      onMouseLeave={scheduleClose}>
       <button style={{
         fontSize: 13, color: "#64748b", padding: "6px 10px", borderRadius: 6,
         fontWeight: 700, background: open ? "#f8fafc" : "transparent",

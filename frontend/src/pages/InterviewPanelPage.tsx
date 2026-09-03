@@ -38,6 +38,11 @@ export default function InterviewPanelPage({ embedded = false }: { embedded?: bo
   const [form, setForm] = useState(emptyForm);
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState("");
+  // Clicking an interviewer's name in the checklist below shows their
+  // full record from the Panel Interviewers directory (expertise,
+  // company, type, phone, email, notes) — the checklist itself only
+  // shows name + type + expertise to stay compact.
+  const [interviewerDetail, setInterviewerDetail] = useState<any | null>(null);
 
   // Per-column dropdown filter + sort + a global search box — same
   // pattern as Interview Scheduling's pipeline table.
@@ -260,10 +265,6 @@ export default function InterviewPanelPage({ embedded = false }: { embedded?: bo
               </datalist>
             </div>
             <div className="tiq-form-group">
-              <label className="tiq-label">Company</label>
-              <input className="tiq-input" value={form.company} onChange={(e) => setForm({ ...form, company: e.target.value })} />
-            </div>
-            <div className="tiq-form-group">
               <label className="tiq-label">Panel Setup Date</label>
               <input type="date" className="tiq-input" value={form.setup_date} onChange={(e) => setForm({ ...form, setup_date: e.target.value })} />
             </div>
@@ -273,7 +274,12 @@ export default function InterviewPanelPage({ embedded = false }: { embedded?: bo
                 {people.map((pi) => (
                   <label key={pi.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 4px", cursor: "pointer", fontSize: 13 }}>
                     <input type="checkbox" checked={form.interviewer_ids.includes(pi.id)} onChange={() => toggleInterviewer(pi.id)} />
-                    <span>{pi.name}</span>
+                    <span
+                      onClick={(e) => { e.preventDefault(); e.stopPropagation(); setInterviewerDetail(pi); }}
+                      title="View interviewer details"
+                      style={{ textDecoration: "underline", textDecorationStyle: "dotted", textUnderlineOffset: 2, cursor: "pointer" }}>
+                      {pi.name}
+                    </span>
                     <span className="tiq-badge" style={{
                       fontSize: 9.5,
                       background: pi.interviewer_type === "External" ? "rgba(139,92,246,.12)" : "rgba(13,148,136,.12)",
@@ -290,6 +296,34 @@ export default function InterviewPanelPage({ embedded = false }: { embedded?: bo
             <div style={{ display: "flex", gap: 8 }}>
               <button className="tiq-btn tiq-btn-primary" onClick={handleSave} disabled={saving}>{saving ? "Saving…" : "Save"}</button>
               <button className="tiq-btn tiq-btn-ghost" onClick={() => setShowForm(false)} disabled={saving}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {interviewerDetail && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 1100, display: "flex", alignItems: "center", justifyContent: "center" }}
+             onMouseDown={(e) => { if (e.target === e.currentTarget) setInterviewerDetail(null); }}>
+          <div style={{ background: "#fff", color: "#111827", borderRadius: 14, padding: 24, maxWidth: 380, width: "92%", maxHeight: "80vh", overflowY: "auto", boxShadow: "0 25px 60px rgba(0,0,0,.4)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+              <div style={{ fontWeight: 800, fontSize: 16 }}>{interviewerDetail.name}</div>
+              <button onClick={() => setInterviewerDetail(null)} style={{ background: "none", border: "none", cursor: "pointer" }}><X size={18} /></button>
+            </div>
+            <span className="tiq-badge" style={{
+              fontSize: 10, marginBottom: 12, display: "inline-block",
+              background: interviewerDetail.interviewer_type === "External" ? "rgba(139,92,246,.12)" : "rgba(13,148,136,.12)",
+              color: interviewerDetail.interviewer_type === "External" ? "var(--violet-500, #8b5cf6)" : "var(--brand-teal, #0d9488)",
+            }}>
+              {interviewerDetail.interviewer_type || "Internal"}
+            </span>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, fontSize: 13 }}>
+              <div><span style={{ color: "var(--text-muted)" }}>Expertise: </span>{interviewerDetail.expertise_area || "—"}</div>
+              <div><span style={{ color: "var(--text-muted)" }}>Company: </span>{interviewerDetail.company || "—"}</div>
+              <div><span style={{ color: "var(--text-muted)" }}>Phone: </span>{interviewerDetail.phone || "—"}</div>
+              <div><span style={{ color: "var(--text-muted)" }}>Email: </span>{interviewerDetail.email || "—"}</div>
+              {interviewerDetail.notes && (
+                <div><span style={{ color: "var(--text-muted)" }}>Notes: </span>{interviewerDetail.notes}</div>
+              )}
             </div>
           </div>
         </div>
