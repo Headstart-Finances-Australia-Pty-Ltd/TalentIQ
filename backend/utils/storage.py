@@ -58,8 +58,21 @@ async def get_s3_config(db: AsyncSession) -> Optional[S3Config]:
     """The currently-saved global S3 config, or None if not (yet) fully
     configured — missing any required field is treated as unconfigured
     rather than a partial/broken config, since a half-entered form (e.g.
-    saved mid-typing) shouldn't be attempted against the real bucket."""
-    creds = await get_global_credentials(db, "s3")
+    saved mid-typing) shouldn't be attempted against the real bucket.
+
+    `db` is accepted for backward compatibility but deliberately NOT used
+    for the actual query below — see _account_folder's docstring for why.
+    Storage helpers are routinely called from CONCURRENT candidate/JD
+    processing (CandidateLens/JobLens scoring several resumes at once via
+    asyncio.gather), all sharing the caller's single AsyncSession. Reading
+    credentials through that shared session from multiple coroutines at
+    once is exactly the "session is provisioning a new connection;
+    concurrent operations are not permitted" IllegalStateChangeError this
+    used to throw. An independent, short-lived session sidesteps that
+    entirely, the same fix already applied to ExtractionCache lookups."""
+    from db.database import AsyncSessionLocal
+    async with AsyncSessionLocal() as cfg_db:
+        creds = await get_global_credentials(cfg_db, "s3")
     if not all(creds.get(f) for f in REQUIRED_S3_FIELDS):
         return None
     return {
@@ -169,10 +182,27 @@ async def _account_folder(db: AsyncSession, account_id: int) -> str:
     if the account can't be found at all (shouldn't normally happen,
     but a storage helper failing an upload because a name lookup came
     back empty would be a worse outcome than a slightly generic folder
-    name)."""
-    row = (await db.execute(
-        text("SELECT name, email FROM tiq_users WHERE id = :uid"), {"uid": account_id}
-    )).first()
+    name).
+
+    Deliberately opens its OWN short-lived session instead of reusing the
+    caller's `db` (kept as a param only for a stable call signature).
+    upload_file()/get_file_bytes()/etc. are called from inside
+    _score_and_build_candidate in routers/joblens.py, which runs
+    CONCURRENTLY across several candidates in one CandidateLens batch
+    (bounded by _score_semaphore) all sharing one AsyncSession —
+    SQLAlchemy's AsyncSession isn't safe for genuinely concurrent
+    `db.execute()` calls from multiple coroutines, which is what was
+    surfacing as "This session is provisioning a new connection;
+    concurrent operations are not permitted" and silently dropping
+    whichever candidates lost that race. An isolated session here makes
+    every storage helper safe to call from any concurrency pattern the
+    callers use, present or future — same fix as ExtractionCache's own
+    lookup/write helpers."""
+    from db.database import AsyncSessionLocal
+    async with AsyncSessionLocal() as folder_db:
+        row = (await folder_db.execute(
+            text("SELECT name, email FROM tiq_users WHERE id = :uid"), {"uid": account_id}
+        )).first()
     if not row:
         return f"user-{account_id}"
     name, email = row
