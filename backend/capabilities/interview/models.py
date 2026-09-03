@@ -398,6 +398,13 @@ class PanelInterviewer(Base):
     name              = Column(String(200), nullable=False)
     expertise_area    = Column(String(300))
     company           = Column(String(300))
+    # "Internal" (part of the hiring org) or "External" (a client/partner
+    # SME) — a panel can freely mix both (see InterviewPanel.interviewer_ids,
+    # which just lists PanelInterviewer rows regardless of this value).
+    # Free string rather than an enum: kept consistent purely by the
+    # frontend dropdown always sending one of the two, same convention
+    # Interview.status/decision etc. already use elsewhere in this file.
+    interviewer_type  = Column(String(20), default="Internal")
     phone             = Column(String(50))
     email             = Column(String(200), index=True)
     notes             = Column(Text)

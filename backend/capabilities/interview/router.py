@@ -5,7 +5,7 @@ Registered in main.py as: /api/interviews/*
 Public (candidate self-scheduling) endpoints live in public_router.py,
 registered as: /api/public/interviews/*
 """
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 import os
 
@@ -325,6 +325,7 @@ async def list_interviews(
     requisition_id: Optional[int] = None,
     status: Optional[str] = None,
     upcoming_only: bool = False,
+    passed_screening_only: bool = False,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -407,14 +408,36 @@ async def list_interviews(
     # counts as passed). Rows with no joblens_candidate_id at all (an
     # ATS Candidate hired outside JobLens screening entirely) are always
     # considered passed — there's no screening record to fail.
+    #
+    # screening_summary is the same underlying data condensed into the
+    # single hyphen-separated string the Interview Scheduling table
+    # shows per the recruiter's request — e.g. "Completed - Qualified -
+    # 82% - 2026-08-20" — so the table doesn't need four separate
+    # columns (and four separate lookups on the frontend) for one
+    # already-available fact set. Session status ("completed"/
+    # "processing") stands in for "has resume screening finished for
+    # this batch" since JobLensCandidate rows don't carry their own
+    # separate completion flag — see JobLensSession.status.
     screening_passed = {}
+    screening_summary = {}
     if joblens_candidate_ids:
-        from models.models import JobLensCandidate as _JLC
+        from models.models import JobLensCandidate as _JLC, JobLensSession as _JLS
         res = await db.execute(
-            select(_JLC.id, _JLC.status, _JLC.shortlisted).where(_JLC.id.in_(joblens_candidate_ids))
+            select(_JLC.id, _JLC.status, _JLC.shortlisted, _JLC.ats_score, _JLS.status, _JLS.created_at)
+            .join(_JLS, _JLC.session_id == _JLS.id)
+            .where(_JLC.id.in_(joblens_candidate_ids))
         )
-        for cid, status_, shortlisted_ in res.all():
+        for cid, status_, shortlisted_, ats_score_, session_status_, session_created_at_ in res.all():
             screening_passed[cid] = bool(shortlisted_) or status_ == "Qualified"
+            screening_complete = "Completed" if (session_status_ or "").lower() == "completed" else "Pending"
+            score_display = f"{round(ats_score_ or 0)}%"
+            date_display = session_created_at_.strftime("%Y-%m-%d") if session_created_at_ else "—"
+            screening_summary[cid] = " - ".join([screening_complete, status_ or "Not Qualified", score_display, date_display])
+
+    if passed_screening_only:
+        rows = [i for i in rows if not i.joblens_candidate_id or screening_passed.get(i.joblens_candidate_id, True)]
+        interview_ids = [i.id for i in rows]
+        panel_ids = {i.panel_id for i in rows if i.panel_id}
 
     scorecard_counts = {}
     if interview_ids:
@@ -474,6 +497,7 @@ async def list_interviews(
         d["scorecard_count"] = scorecard_counts.get(i.id, 0)
         d["feedback_links_summary"] = feedback_links_by_interview.get(i.id, [])
         d["screening_passed"] = screening_passed.get(i.joblens_candidate_id, True) if i.joblens_candidate_id else True
+        d["screening_summary"] = screening_summary.get(i.joblens_candidate_id, "—") if i.joblens_candidate_id else "—"
         d.pop("scorecards", None)
         out.append(d)
     return out
@@ -483,6 +507,7 @@ class PanelInterviewerCreate(BaseModel):
     name: str
     expertise_area: str = ""
     company: str = ""
+    interviewer_type: str = "Internal"  # "Internal" or "External"
     phone: str = ""
     email: str = ""
     notes: str = ""
@@ -494,6 +519,7 @@ def _fmt_panel_interviewer(p: PanelInterviewer, assignments: Optional[List[dict]
         "name": p.name,
         "expertise_area": p.expertise_area or "",
         "company": p.company or "",
+        "interviewer_type": p.interviewer_type or "Internal",
         "phone": p.phone or "",
         "email": p.email or "",
         "notes": p.notes or "",
@@ -510,13 +536,36 @@ class InterviewPanelCreate(BaseModel):
     setup_date: Optional[str] = None  # ISO date/datetime, optional
 
 
+def _parse_setup_date(iso_str: Optional[str]) -> Optional[datetime]:
+    """Parses an ISO date/datetime string into a naive UTC datetime,
+    matching this table's plain TIMESTAMP (no timezone) column and the
+    rest of the app's convention (datetime.utcnow() everywhere else is
+    naive too). Parsing with "+00:00" instead of stripping "Z" produces
+    a timezone-AWARE datetime — asyncpg then refuses to write it into a
+    timezone-naive column ("can't subtract offset-naive and offset-
+    aware datetimes"), which is exactly the DataError this caused
+    before stripping tzinfo here. Raises HTTPException(400) with a
+    readable message on anything that doesn't parse, rather than
+    letting a ValueError become an opaque 500."""
+    if not iso_str:
+        return None
+    try:
+        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(400, f"Panel Setup Date isn't a valid date: {iso_str!r}")
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
 async def _fmt_interview_panel(db: AsyncSession, p: InterviewPanel, people_by_id: Optional[dict] = None) -> dict:
     if people_by_id is None:
         rows = (await db.execute(select(PanelInterviewer).where(PanelInterviewer.id.in_(p.interviewer_ids or [])))).scalars().all()
         people_by_id = {x.id: x for x in rows}
     members = [
         {"id": pid, "name": people_by_id[pid].name, "expertise_area": people_by_id[pid].expertise_area or "",
-         "company": people_by_id[pid].company or "", "phone": people_by_id[pid].phone or "", "email": people_by_id[pid].email or ""}
+         "company": people_by_id[pid].company or "", "interviewer_type": people_by_id[pid].interviewer_type or "Internal",
+         "phone": people_by_id[pid].phone or "", "email": people_by_id[pid].email or ""}
         for pid in (p.interviewer_ids or []) if pid in people_by_id
     ]
     return {
@@ -559,15 +608,26 @@ async def get_interview_panel(panel_id: int, current_user: User = Depends(get_cu
 @router.post("/panels")
 async def create_interview_panel(payload: InterviewPanelCreate, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     org = await _org(db, current_user)
-    seq = (await db.execute(select(func.max(InterviewPanel.sequence_number)).where(InterviewPanel.organisation_id == org.id))).scalar() or 0
-    setup_date = datetime.fromisoformat(payload.setup_date) if payload.setup_date else None
-    p = InterviewPanel(
-        organisation_id=org.id, sequence_number=seq + 1, role_for=payload.role_for,
-        company=payload.company, interviewer_ids=payload.interviewer_ids, setup_date=setup_date,
-    )
-    db.add(p)
-    await db.flush()
-    await db.commit()
+    setup_date = _parse_setup_date(payload.setup_date)
+    try:
+        seq = (await db.execute(select(func.max(InterviewPanel.sequence_number)).where(InterviewPanel.organisation_id == org.id))).scalar() or 0
+        p = InterviewPanel(
+            organisation_id=org.id, sequence_number=seq + 1, role_for=payload.role_for,
+            company=payload.company, interviewer_ids=payload.interviewer_ids, setup_date=setup_date,
+        )
+        db.add(p)
+        await db.flush()
+        await db.commit()
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Surface the real cause instead of letting it bubble up as an
+        # opaque 500 that the frontend can only show as "Failed to save."
+        # — that generic fallback text is exactly what shows up when
+        # response.data has no "detail" key, which is what an unhandled
+        # exception (rather than a clean HTTPException) produces.
+        await db.rollback()
+        raise HTTPException(500, f"Couldn't save this panel: {str(e)[:200]}")
     return await _fmt_interview_panel(db, p)
 
 
@@ -577,12 +637,17 @@ async def update_interview_panel(panel_id: int, payload: InterviewPanelCreate, c
     p = (await db.execute(select(InterviewPanel).where(InterviewPanel.id == panel_id, InterviewPanel.organisation_id == org.id))).scalar_one_or_none()
     if not p:
         raise HTTPException(404, "Panel not found")
-    p.role_for = payload.role_for
-    p.company = payload.company
-    p.interviewer_ids = payload.interviewer_ids
-    p.setup_date = datetime.fromisoformat(payload.setup_date) if payload.setup_date else None
-    p.updated_at = datetime.utcnow()
-    await db.commit()
+    setup_date = _parse_setup_date(payload.setup_date)
+    try:
+        p.role_for = payload.role_for
+        p.company = payload.company
+        p.interviewer_ids = payload.interviewer_ids
+        p.setup_date = setup_date
+        p.updated_at = datetime.utcnow()
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(500, f"Couldn't save this panel: {str(e)[:200]}")
     return await _fmt_interview_panel(db, p)
 
 
@@ -773,7 +838,11 @@ async def update_interview(
     new_interviewers = data.get("interviewers")
     # Same auto-populate as create_interview: picking a panel without
     # separately retyping the same people into the interviewers list.
-    if "panel_id" in data and data["panel_id"] and new_interviewers is None:
+    # Checks "empty" rather than "omitted" (unlike create_interview's
+    # payload, which can genuinely omit the field, the frontend always
+    # sends `interviewers: []` here when the user didn't type any in
+    # manually — an omitted-only check would never fire on update).
+    if data.get("panel_id") and not new_interviewers:
         panel = (await db.execute(select(InterviewPanel).where(InterviewPanel.id == data["panel_id"], InterviewPanel.organisation_id == org.id))).scalar_one_or_none()
         if panel and panel.interviewer_ids:
             people = (await db.execute(select(PanelInterviewer).where(PanelInterviewer.id.in_(panel.interviewer_ids)))).scalars().all()

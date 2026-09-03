@@ -741,6 +741,7 @@ MIGRATIONS = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_panel_interviewers_org ON tiq_panel_interviewers (organisation_id)",
     "CREATE INDEX IF NOT EXISTS idx_panel_interviewers_email ON tiq_panel_interviewers (email)",
+    "ALTER TABLE tiq_panel_interviewers ADD COLUMN IF NOT EXISTS interviewer_type VARCHAR(20) DEFAULT 'Internal'",
 
     # Interview Panel Setups — created here (before the tiq_interviews.
     # panel_id column below) since that column's FK references this table.
