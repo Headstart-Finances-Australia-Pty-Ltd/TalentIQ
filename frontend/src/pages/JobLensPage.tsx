@@ -2643,6 +2643,14 @@ export default function JobLensWorkspace({ mode = "resume", embedded = false }: 
       qc.invalidateQueries({ queryKey: ["joblens-sessions"] });
       if (activeSessionId === id) setActiveSessionId(null);
     },
+    // Previously missing entirely — a failed delete (e.g. a 404 for a
+    // session that's already gone, or a backend error) just left the
+    // session sitting there in the list with zero feedback, which is
+    // indistinguishable from "the click didn't register" from the
+    // user's side. Now it actually says why.
+    onError: (e: any) => {
+      alert(e?.response?.data?.detail || "Failed to delete this session. Please try again.");
+    },
   });
 
   const { data: sessions = [] } = useQuery({
