@@ -540,7 +540,7 @@ export default function LandingPage() {
               { icon: Shield, color: "#0ea5e9", title: "Every click saved", body: "Every search, match, and profile is persisted to PostgreSQL — your data compounds over time." },
               { icon: Download, color: "#6366f1", title: "Export anywhere", body: "Download job matches, market reports, and candidate lists as Excel spreadsheets at any point." },
               { icon: TrendingUp, color: "#f59e0b", title: "Grows with you", body: "Start with job hunting. Add market intelligence. Build a recruiting pipeline. Each module is composable." },
-              { icon: Zap, color: "#34d399", title: "LangChain + Groq", body: "Each module is a composable LangChain agent — easy to extend, chain, and deploy for your workflow." },
+              { icon: Zap, color: "#34d399", title: "LangChain + AI", body: "Each module is a composable LangChain agent — easy to extend, chain, and deploy for your workflow." },
               { icon: Globe, color: "#f472b6", title: "No vendor lock-in", body: "Self-hosted, open architecture. Swap any LLM, API, or database. Your keys, your data." },
               { icon: Database, color: "#fb923c", title: "One platform, one database", body: "Stop juggling separate SaaS products. TalentIQ Solution unifies candidate acquisition, screening, and market research." },
             ].map(({ icon: Icon, color, title, body }) => (
