@@ -37,6 +37,7 @@ from db.database import Base
 
 INVOICE_STATUSES = ["Draft", "Sent", "Paid", "Overdue", "Cancelled"]
 TIMESHEET_STATUSES = ["Submitted", "Approved", "Invoiced", "Rejected"]
+INTERVIEWER_PAYMENT_STATUSES = ["Pending", "Approved", "Paid"]
 
 
 class Invoice(Base):
@@ -98,3 +99,52 @@ class TimesheetEntry(Base):
     @property
     def amount(self):
         return float(self.hours) * float(self.rate)
+
+
+class InterviewerPayment(Base):
+    """The money side of a Panel Interview round — auto-generated the
+    moment a round involving an EXTERNAL PanelInterviewer (see
+    capabilities/interview/models.py's PanelInterviewer.interviewer_type)
+    is marked Completed (see capabilities/interview/router.py's
+    change_interview_status). One row per (interview round, external
+    interviewer) pair.
+
+    hourly_rate and hours are both SNAPSHOTTED at creation time — rate
+    from PanelInterviewer.hourly_rate as it stood at that moment, hours
+    from Interview.duration_minutes / 60 — so a later edit to either the
+    interviewer's rate or the round's duration never retroactively
+    changes what's already owed for a past interview. candidate_name /
+    round_name / requisition_title are denormalized display snapshots
+    for the same reason Invoice denormalizes client_id/requisition_id
+    alongside placement_id (see module docstring) — this table needs to
+    keep meaning something even if the source Interview/PanelInterviewer
+    row is later edited or deleted.
+    """
+    __tablename__ = "tiq_interviewer_payments"
+
+    id                   = Column(Integer, primary_key=True, index=True)
+    organisation_id      = Column(Integer, ForeignKey("tiq_organisations.id"), index=True, nullable=False)
+
+    interview_id         = Column(Integer, ForeignKey("tiq_interviews.id"), index=True, nullable=False)
+    panel_interviewer_id = Column(Integer, ForeignKey("tiq_panel_interviewers.id"), index=True, nullable=False)
+
+    interviewer_name     = Column(String(200))
+    interviewer_email    = Column(String(200))
+    candidate_name        = Column(String(200))
+    round_name            = Column(String(200))
+    requisition_title     = Column(String(300))
+
+    hours                = Column(Numeric(6, 2), nullable=False)
+    hourly_rate          = Column(Numeric(10, 2), nullable=False)
+    currency             = Column(String(10), default="AUD")
+
+    status               = Column(String(20), default="Pending")   # see INTERVIEWER_PAYMENT_STATUSES
+    paid_date            = Column(Date, nullable=True)
+    notes                = Column(Text)
+
+    created_at           = Column(DateTime, default=datetime.utcnow)
+    updated_at           = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    @property
+    def amount(self):
+        return float(self.hours) * float(self.hourly_rate)

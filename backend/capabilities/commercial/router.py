@@ -18,10 +18,11 @@ from capabilities.acquisition.models import Candidate
 from capabilities.requisition.models import Requisition
 from capabilities.pipeline.models import Placement
 
-from .models import Invoice, TimesheetEntry, INVOICE_STATUSES, TIMESHEET_STATUSES
+from .models import Invoice, TimesheetEntry, InterviewerPayment, INVOICE_STATUSES, TIMESHEET_STATUSES, INTERVIEWER_PAYMENT_STATUSES
 from .schemas import (
     InvoiceCreate, InvoiceUpdate, InvoiceStatusChange,
     TimesheetCreate, TimesheetUpdate, TimesheetsToInvoice,
+    InterviewerPaymentStatusChange,
 )
 from . import service
 
@@ -58,6 +59,20 @@ def _fmt_timesheet(t: TimesheetEntry, candidate_name: str = "") -> dict:
         "status": t.status, "invoice_id": t.invoice_id, "notes": t.notes or "",
         "submitted_at": t.submitted_at.isoformat() if t.submitted_at else None,
         "approved_at": t.approved_at.isoformat() if t.approved_at else None,
+    }
+
+
+def _fmt_interviewer_payment(p: InterviewerPayment) -> dict:
+    return {
+        "id": p.id, "interview_id": p.interview_id, "panel_interviewer_id": p.panel_interviewer_id,
+        "interviewer_name": p.interviewer_name or "", "interviewer_email": p.interviewer_email or "",
+        "candidate_name": p.candidate_name or "", "round_name": p.round_name or "", "requisition_title": p.requisition_title or "",
+        "hours": float(p.hours) if p.hours is not None else None,
+        "hourly_rate": float(p.hourly_rate) if p.hourly_rate is not None else None,
+        "amount": p.amount, "currency": p.currency or "AUD",
+        "status": p.status, "paid_date": p.paid_date.isoformat() if p.paid_date else None,
+        "notes": p.notes or "",
+        "created_at": p.created_at.isoformat() if p.created_at else None,
     }
 
 
@@ -369,3 +384,50 @@ async def timesheets_to_invoice(payload: TimesheetsToInvoice, current_user: User
     await db.commit()
     await db.refresh(invoice)
     return _fmt_invoice(invoice, candidate_name, req_title)
+
+
+# ── External Interviewer Payments ─────────────────────────────────────
+# Auto-generated (see capabilities/interview/service.py's
+# generate_interviewer_payments) the moment a Panel Interview round
+# involving an external PanelInterviewer with an hourly_rate set is
+# marked Completed — Commercials just surfaces and lets someone mark
+# them paid; nothing here creates a row directly.
+
+@router.get("/interviewer-payments")
+async def list_interviewer_payments(
+    status: Optional[str] = None,
+    current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    org = await _org(db, current_user)
+    q = select(InterviewerPayment).where(InterviewerPayment.organisation_id == org.id)
+    if status:
+        q = q.where(InterviewerPayment.status == status)
+    q = q.order_by(InterviewerPayment.created_at.desc())
+    rows = (await db.execute(q)).scalars().all()
+    payments = [_fmt_interviewer_payment(p) for p in rows]
+    return {
+        "payments": payments,
+        "total_amount": sum(p["amount"] for p in payments),
+        "pending_amount": sum(p["amount"] for p in payments if p["status"] == "Pending"),
+    }
+
+
+@router.post("/interviewer-payments/{payment_id}/status")
+async def change_interviewer_payment_status(
+    payment_id: int, payload: InterviewerPaymentStatusChange,
+    current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    if payload.status not in INTERVIEWER_PAYMENT_STATUSES:
+        raise HTTPException(400, f"Status must be one of: {', '.join(INTERVIEWER_PAYMENT_STATUSES)}")
+    org = await _org(db, current_user)
+    p = (await db.execute(select(InterviewerPayment).where(InterviewerPayment.id == payment_id, InterviewerPayment.organisation_id == org.id))).scalar_one_or_none()
+    if not p:
+        raise HTTPException(404, "Interviewer payment not found")
+    p.status = payload.status
+    if payload.status == "Paid":
+        p.paid_date = payload.paid_date or date.today()
+    if payload.notes is not None:
+        p.notes = payload.notes.strip()
+    p.updated_at = datetime.utcnow()
+    await db.commit()
+    return _fmt_interviewer_payment(p)

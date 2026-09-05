@@ -40,7 +40,7 @@ interviewer instead of a scattered "let me email you my thoughts."
 """
 from datetime import datetime
 from sqlalchemy import (
-    Column, Integer, String, Text, Boolean, DateTime, ForeignKey, JSON, LargeBinary,
+    Column, Integer, String, Text, Boolean, DateTime, ForeignKey, JSON, LargeBinary, Numeric,
 )
 from sqlalchemy.orm import relationship
 
@@ -247,6 +247,11 @@ class Interview(Base):
     # Interview, since panel coordination needs a recruiter-fixed time,
     # not a candidate-picked one.
     invite_sent_at        = Column(DateTime, nullable=True)
+    # Interview Panel's "Notify Interviewers" action — emails every
+    # assigned interviewer (panel or otherwise) the schedule + candidate
+    # profile, separate from invite_sent_at above which emails the
+    # CANDIDATE. See router.notify_interviewers.
+    interviewers_notified_at = Column(DateTime, nullable=True)
     # Interview Decision's bulk "Send Rejection Email" action (mirrors
     # JobLensCandidate.rejection_email_sent_at in models/models.py) —
     # tracked per ROUND here rather than per candidate, since a
@@ -407,6 +412,14 @@ class PanelInterviewer(Base):
     interviewer_type  = Column(String(20), default="Internal")
     phone             = Column(String(50))
     email             = Column(String(200), index=True)
+    # Only meaningful when interviewer_type == "External" — an internal
+    # employee's time isn't separately billed. Snapshotted onto
+    # InterviewerPayment at the moment a round they sit on is marked
+    # Completed (see capabilities/interview/router.py's
+    # change_interview_status and capabilities/commercial/models.py's
+    # InterviewerPayment), so a later rate change here never retroactively
+    # alters what's already owed for a past interview.
+    hourly_rate       = Column(Numeric(10, 2), nullable=True)
     notes             = Column(Text)
     created_at        = Column(DateTime, default=datetime.utcnow)
     updated_at        = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

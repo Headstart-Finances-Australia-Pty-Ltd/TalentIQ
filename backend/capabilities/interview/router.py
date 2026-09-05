@@ -133,6 +133,7 @@ def _fmt_interview(
         "calendly_link_sent_at": i.calendly_link_sent_at.isoformat() if i.calendly_link_sent_at else None,
         "video_invite_sent_at": i.video_invite_sent_at.isoformat() if i.video_invite_sent_at else None,
         "invite_sent_at": i.invite_sent_at.isoformat() if i.invite_sent_at else None,
+        "interviewers_notified_at": i.interviewers_notified_at.isoformat() if i.interviewers_notified_at else None,
         "rejection_email_sent_at": i.rejection_email_sent_at.isoformat() if i.rejection_email_sent_at else None,
         # Hiring-decision approval — see models.py's decision_approval_*
         # docstring for how this differs from approval_status above.
@@ -510,6 +511,10 @@ class PanelInterviewerCreate(BaseModel):
     interviewer_type: str = "Internal"  # "Internal" or "External"
     phone: str = ""
     email: str = ""
+    # Only meaningful for interviewer_type == "External" — see
+    # PanelInterviewer.hourly_rate's docstring. Left None for Internal
+    # staff, whose time isn't separately billed.
+    hourly_rate: Optional[float] = None
     notes: str = ""
 
 
@@ -522,6 +527,7 @@ def _fmt_panel_interviewer(p: PanelInterviewer, assignments: Optional[List[dict]
         "interviewer_type": p.interviewer_type or "Internal",
         "phone": p.phone or "",
         "email": p.email or "",
+        "hourly_rate": float(p.hourly_rate) if p.hourly_rate is not None else None,
         "notes": p.notes or "",
         "assignments": assignments if assignments is not None else [],
         "created_at": p.created_at.isoformat() if p.created_at else None,
@@ -897,12 +903,16 @@ async def change_interview_status(
     if payload.status == "Completed":
         candidate = (await db.execute(select(Candidate).where(Candidate.id == i.candidate_id))).scalar_one_or_none()
         req_title = await _requisition_title(db, i.requisition_id)
+        candidate_name = candidate.full_name if candidate else await _candidate_name(db, i.candidate_id, i.joblens_candidate_id)
         await service_communication.fire_automation(
             db, org.id, "interview_completed",
-            context={"candidate_name": candidate.full_name if candidate else "", "requisition_title": req_title, "round_name": i.round_name},
+            context={"candidate_name": candidate_name, "requisition_title": req_title, "round_name": i.round_name},
             triggering_user_id=current_user.id, to_email=(candidate.email if candidate else None) or None,
             candidate_id=i.candidate_id, requisition_id=i.requisition_id,
         )
+        # External interviewer billing — see service.generate_interviewer_payments's
+        # docstring. Best-effort, only ever fires for Panel Interview rounds.
+        await service.generate_interviewer_payments(db, org.id, i, candidate_name, req_title)
         await db.commit()
 
     return _fmt_interview(i, await _candidate_name(db, i.candidate_id, i.joblens_candidate_id), await _requisition_title(db, i.requisition_id))
@@ -1170,13 +1180,21 @@ async def email_calendly_link(
         f"<p><a href=\"{booking_url}\">{booking_url}</a></p>"
         f"<p>Looking forward to speaking with you.</p>"
     )
+    subject = payload.subject.strip() or "Schedule your phone screening interview"
     smtp_cfg = await get_smtp_config(current_user.id, db)
-    send_email(smtp_cfg, to_email, payload.subject.strip() or "Schedule your phone screening interview", body_html)
+    send_email(smtp_cfg, to_email, subject, body_html)
 
     i.calendly_scheduling_url = booking_url
     if i.status not in ("Scheduled", "Completed"):
         i.status = "Requested"
     i.updated_at = datetime.utcnow()
+
+    await service_communication.log_manual_send(
+        db, org.id, "interview_calendly_link", subject, body_html,
+        sent_by_user_id=current_user.id,
+        candidate_id=i.candidate_id, joblens_candidate_id=i.joblens_candidate_id,
+        requisition_id=i.requisition_id,
+    )
     await db.commit()
     return {"sent": True, "calendly_scheduling_url": booking_url}
 
@@ -1232,8 +1250,135 @@ async def send_fixed_invite(
     if i.status not in ("Scheduled", "Completed"):
         i.status = "Scheduled"
     i.updated_at = datetime.utcnow()
+
+    await service_communication.log_manual_send(
+        db, org.id, "interview_fixed_invite", subject, body_html,
+        sent_by_user_id=current_user.id,
+        candidate_id=i.candidate_id, joblens_candidate_id=i.joblens_candidate_id,
+        requisition_id=i.requisition_id,
+    )
     await db.commit()
     return {"sent": True, "invite_sent_at": i.invite_sent_at.isoformat()}
+
+
+async def _candidate_profile_html(db: AsyncSession, i: Interview) -> str:
+    """Builds the candidate-profile block embedded in the interviewer
+    notification email (see notify_interviewers below) — pulled from
+    whichever candidate source this round actually points at (Talent
+    Pool Candidate, or a CandidateLens/JobLens candidate — see
+    Interview.joblens_candidate_id's docstring for why both exist).
+    Kept intentionally to a short, skimmable summary (not the full
+    resume) — enough for an interviewer to walk in prepared, not a
+    document dump."""
+    rows = []
+    if i.candidate_id:
+        c = (await db.execute(select(Candidate).where(Candidate.id == i.candidate_id))).scalar_one_or_none()
+        if not c:
+            return ""
+        rows.append(("Current role", f"{c.current_title or '—'} at {c.current_employer or '—'}" if (c.current_title or c.current_employer) else ""))
+        rows.append(("Experience", c.total_experience_years or ""))
+        rows.append(("Skills", ", ".join(c.skills) if c.skills else ""))
+        rows.append(("Location", c.location or ""))
+        rows.append(("Work rights", c.work_rights or ""))
+    elif i.joblens_candidate_id:
+        from models.models import JobLensCandidate
+        jc = (await db.execute(select(JobLensCandidate).where(JobLensCandidate.id == i.joblens_candidate_id))).scalar_one_or_none()
+        if not jc:
+            return ""
+        rows.append(("Experience", jc.experience_years or ""))
+        rows.append(("Matched skills", ", ".join(jc.matched_skills) if jc.matched_skills else ""))
+        rows.append(("Screening score", f"{jc.ats_score:.0f}%" if jc.ats_score else ""))
+        rows.append(("Summary", jc.summary or ""))
+    else:
+        return ""
+
+    rows = [(label, value) for label, value in rows if value]
+    if not rows:
+        return ""
+    items = "".join(f"<li><strong>{label}:</strong> {value}</li>" for label, value in rows)
+    return f"<p><strong>Candidate profile:</strong></p><ul>{items}</ul>"
+
+
+class NotifyInterviewersRequest(BaseModel):
+    subject: str = ""
+    body_html: str = ""   # appended after the auto-generated schedule + profile block, not a full override — see notify_interviewers
+
+
+@router.post("/interviews/{interview_id}/notify-interviewers")
+async def notify_interviewers(
+    interview_id: int, payload: NotifyInterviewersRequest,
+    current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    """Interview Panel's counterpart to send_fixed_invite above — that
+    one emails the CANDIDATE their schedule; this emails every assigned
+    INTERVIEWER (Interview.interviewers — whether populated from a saved
+    Panel Setup or typed ad-hoc, see create_interview) the same
+    schedule plus a short candidate-profile summary (see
+    _candidate_profile_html), so a panelist can actually prepare instead
+    of walking in cold. Sends one individually-addressed email per
+    interviewer — never a shared To/CC list — same reasoning as the
+    bulk rejection-email endpoints elsewhere in this file. Best-effort
+    per recipient: one interviewer's send failing doesn't block the
+    others.
+    """
+    org = await _org(db, current_user)
+    i = (await db.execute(select(Interview).where(Interview.id == interview_id, Interview.organisation_id == org.id))).scalar_one_or_none()
+    if not i:
+        raise HTTPException(404, "Interview not found")
+    if not i.scheduled_at:
+        raise HTTPException(400, "Set a date/time for this round before notifying interviewers.")
+    recipients = [p for p in (i.interviewers or []) if (p or {}).get("email")]
+    if not recipients:
+        raise HTTPException(400, "This round has no interviewers with an email on file to notify.")
+
+    candidate_name = await _candidate_name(db, i.candidate_id, i.joblens_candidate_id)
+    req_title = await _requisition_title(db, i.requisition_id)
+    when = i.scheduled_at.strftime("%A, %d %B %Y at %I:%M %p")
+    location_html = f"<p><strong>Meeting link/location:</strong> {i.location_or_link}</p>" if i.location_or_link else ""
+    profile_html = await _candidate_profile_html(db, i)
+    subject = payload.subject.strip() or f"Interview panel: {candidate_name}{f' — {req_title}' if req_title else ''}"
+
+    smtp_cfg = await get_smtp_config(current_user.id, db)
+    sent, failed = [], []
+    for person in recipients:
+        to_email = person["email"].strip()
+        name = person.get("name") or "there"
+        body_html = (
+            f"<p>Hi {name.split(' ')[0]},</p>"
+            f"<p>You're on the interview panel for <strong>{candidate_name}</strong>"
+            f"{f' — {req_title}' if req_title else ''} ({i.round_name}).</p>"
+            f"<p><strong>When:</strong> {when}</p>"
+            f"{location_html}"
+            f"{profile_html}"
+            f"{f'<p>{payload.body_html.strip()}</p>' if payload.body_html.strip() else ''}"
+            f"<p>Please reach out if this time doesn't work for you.</p>"
+        )
+        try:
+            send_email(smtp_cfg, to_email, subject, body_html)
+            sent.append({"name": name, "email": to_email})
+            await service_communication.log_manual_send(
+                db, org.id, "panel_interviewer_notification", subject, body_html,
+                sent_by_user_id=current_user.id,
+                candidate_id=i.candidate_id, joblens_candidate_id=i.joblens_candidate_id,
+                requisition_id=i.requisition_id,
+            )
+        except HTTPException as e:
+            failed.append({"name": name, "email": to_email, "error": e.detail})
+            await service_communication.log_manual_send(
+                db, org.id, "panel_interviewer_notification", subject, body_html,
+                sent_by_user_id=current_user.id,
+                candidate_id=i.candidate_id, joblens_candidate_id=i.joblens_candidate_id,
+                requisition_id=i.requisition_id, status="Failed", failure_reason=str(e.detail)[:500],
+            )
+            if "not configured" in str(e.detail).lower() or "rejected these smtp credentials" in str(e.detail).lower():
+                break
+        except Exception as e:
+            failed.append({"name": name, "email": to_email, "error": str(e)[:200]})
+
+    i.interviewers_notified_at = datetime.utcnow()
+    i.updated_at = datetime.utcnow()
+    await db.commit()
+    return {"sent": sent, "failed": failed, "interviewers_notified_at": i.interviewers_notified_at.isoformat()}
 
 
 class InterviewRejectionEmailRequest(BaseModel):
@@ -1288,12 +1433,30 @@ async def send_interview_rejection_emails(
             send_email(smtp_cfg, email, payload.subject, body_html)
             i.rejection_email_sent_at = datetime.utcnow()
             sent.append({"interview_id": iid, "name": name, "email": email})
+            await service_communication.log_manual_send(
+                db, org.id, "interview_rejection", payload.subject, body_html,
+                sent_by_user_id=current_user.id,
+                candidate_id=i.candidate_id, joblens_candidate_id=i.joblens_candidate_id,
+                requisition_id=i.requisition_id,
+            )
         except HTTPException as e:
             failed.append({"interview_id": iid, "name": name, "error": e.detail})
+            await service_communication.log_manual_send(
+                db, org.id, "interview_rejection", payload.subject, body_html,
+                sent_by_user_id=current_user.id,
+                candidate_id=i.candidate_id, joblens_candidate_id=i.joblens_candidate_id,
+                requisition_id=i.requisition_id, status="Failed", failure_reason=str(e.detail)[:500],
+            )
             if "not configured" in str(e.detail).lower() or "rejected these smtp credentials" in str(e.detail).lower():
                 break
         except Exception as e:
             failed.append({"interview_id": iid, "name": name, "error": str(e)[:200]})
+            await service_communication.log_manual_send(
+                db, org.id, "interview_rejection", payload.subject, body_html,
+                sent_by_user_id=current_user.id,
+                candidate_id=i.candidate_id, joblens_candidate_id=i.joblens_candidate_id,
+                requisition_id=i.requisition_id, status="Failed", failure_reason=str(e)[:500],
+            )
 
     await db.commit()
     return {"sent": sent, "failed": failed}
@@ -1419,8 +1582,17 @@ async def add_decision_approver(
         f"<p><a href=\"{link}\">Click here to review and record your decision</a></p>"
         f"<p>No account or login is required.</p>"
     )
+    subject = f"Approval requested: {candidate_name}"
     smtp_cfg = await get_smtp_config(current_user.id, db)
-    send_email(smtp_cfg, approver.approver_email, f"Approval requested: {candidate_name}", body_html)
+    send_email(smtp_cfg, approver.approver_email, subject, body_html)
+
+    await service_communication.log_manual_send(
+        db, org.id, "decision_approval_request", subject, body_html,
+        sent_by_user_id=current_user.id,
+        candidate_id=i.candidate_id, joblens_candidate_id=i.joblens_candidate_id,
+        requisition_id=i.requisition_id,
+    )
+    await db.commit()
 
     return _fmt_decision_approver(approver)
 

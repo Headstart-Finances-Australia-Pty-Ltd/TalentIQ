@@ -46,3 +46,9 @@ class TimesheetUpdate(BaseModel):
 class TimesheetsToInvoice(BaseModel):
     timesheet_ids: List[int]
     description: str = ""
+
+
+class InterviewerPaymentStatusChange(BaseModel):
+    status: str
+    paid_date: Optional[date] = None
+    notes: Optional[str] = None

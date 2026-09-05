@@ -122,17 +122,20 @@ async def delete_template(template_id: int, current_user: User = Depends(get_cur
 
 @router.get("/timeline")
 async def get_timeline(
-    candidate_id: Optional[int] = None, client_id: Optional[int] = None,
+    candidate_id: Optional[int] = None, joblens_candidate_id: Optional[int] = None,
+    client_id: Optional[int] = None,
     vendor_id: Optional[int] = None, requisition_id: Optional[int] = None,
     current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
 ):
-    if not any([candidate_id, client_id, vendor_id, requisition_id]):
-        raise HTTPException(400, "Provide at least one of candidate_id, client_id, vendor_id, requisition_id.")
+    if not any([candidate_id, joblens_candidate_id, client_id, vendor_id, requisition_id]):
+        raise HTTPException(400, "Provide at least one of candidate_id, joblens_candidate_id, client_id, vendor_id, requisition_id.")
     org = await _org(db, current_user)
     q = select(CommunicationLog).where(CommunicationLog.organisation_id == org.id)
     filters = []
     if candidate_id:
         filters.append(CommunicationLog.candidate_id == candidate_id)
+    if joblens_candidate_id:
+        filters.append(CommunicationLog.joblens_candidate_id == joblens_candidate_id)
     if client_id:
         filters.append(CommunicationLog.client_id == client_id)
     if vendor_id:
@@ -145,6 +148,66 @@ async def get_timeline(
     user_ids = {l.sent_by_user_id for l in rows if l.sent_by_user_id}
     sender_names = dict((await db.execute(select(User.id, User.name).where(User.id.in_(user_ids)))).all()) if user_ids else {}
     return [_fmt_log(l, sender_names.get(l.sent_by_user_id, "")) for l in rows]
+
+
+@router.get("/by-module")
+async def get_email_activity_by_module(
+    current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    """The 'presentation table' view: every email TalentIQ has actually
+    sent, grouped by the module/action that sent it — live, computed
+    directly from tiq_communication_log, never a cached/precomputed
+    snapshot. Covers automation-fired sends (service.fire_automation)
+    AND every manual send site wired through service.log_manual_send
+    (Video Interview invites, Phone/Interview Scheduling Calendly links,
+    Screening/Interview Decision rejection emails, decision-approval
+    requests) — anywhere that previously sent real email without ever
+    writing a row here is now included.
+
+    Rows with source_module=NULL are Comms' own native actions (the
+    /send-email compose box and fire_automation's rule-triggered sends,
+    which already tag automated=True) — labeled 'Communication Hub —
+    Direct Send' / 'Automation Rule' respectively rather than left blank.
+    """
+    org = await _org(db, current_user)
+
+    rows = (await db.execute(
+        select(
+            CommunicationLog.source_module,
+            CommunicationLog.automated,
+            CommunicationLog.status,
+            func.count().label("count"),
+            func.max(CommunicationLog.sent_at).label("last_sent_at"),
+        )
+        .where(CommunicationLog.organisation_id == org.id)
+        .group_by(CommunicationLog.source_module, CommunicationLog.automated, CommunicationLog.status)
+    )).all()
+
+    # Collapse the (module, automated, status) rows above into one row
+    # per module with Sent/Failed broken out, since that's what's
+    # actually useful to scan at a glance rather than a separate line
+    # per status.
+    by_module: dict = {}
+    for source_module, automated, status, count, last_sent_at in rows:
+        label = source_module or ("Automation Rule" if automated else "Communication Hub — Direct Send")
+        entry = by_module.setdefault(label, {"module": label, "sent": 0, "failed": 0, "other": 0, "last_sent_at": None})
+        if status == "Sent":
+            entry["sent"] += count
+        elif status == "Failed":
+            entry["failed"] += count
+        else:
+            entry["other"] += count
+        if last_sent_at and (entry["last_sent_at"] is None or last_sent_at > entry["last_sent_at"]):
+            entry["last_sent_at"] = last_sent_at
+
+    result = sorted(by_module.values(), key=lambda r: (r["sent"] + r["failed"] + r["other"]), reverse=True)
+    for r in result:
+        r["total"] = r["sent"] + r["failed"] + r["other"]
+        r["last_sent_at"] = r["last_sent_at"].isoformat() if r["last_sent_at"] else None
+    return {
+        "modules": result,
+        "grand_total": sum(r["total"] for r in result),
+    }
 
 
 @router.post("/log")

@@ -10,7 +10,7 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from utils.credentials import get_all_credentials
-from .models import Interview, InterviewScorecard, InterviewFeedbackLink
+from .models import Interview, InterviewScorecard, InterviewFeedbackLink, PanelInterviewer
 
 CALENDLY_API_BASE = "https://api.calendly.com"
 
@@ -123,6 +123,77 @@ async def finalize_interview_decision(db: AsyncSession, interview: Interview) ->
 async def get_next_sequence(db: AsyncSession, organisation_id: int) -> int:
     r = await db.execute(select(func.max(Interview.sequence_number)).where(Interview.organisation_id == organisation_id))
     return (r.scalar() or 0) + 1
+
+
+async def generate_interviewer_payments(
+    db: AsyncSession, organisation_id: int, interview: Interview,
+    candidate_name: str, requisition_title: str,
+) -> None:
+    """Best-effort — mirrors advance_application_stage/fire_automation's
+    'never block the status change it's a side effect of' reasoning.
+    Called right after a Panel Interview round is marked Completed (see
+    router.change_interview_status): for every assigned interviewer
+    (Interview.interviewers — a JSON snapshot of {"name","email"}, see
+    that column's docstring) whose email matches an EXTERNAL
+    PanelInterviewer roster entry with an hourly_rate set, creates one
+    InterviewerPayment row so Commercials can actually pay them for
+    their time — hours from interview.duration_minutes / 60, rate
+    snapshotted from PanelInterviewer.hourly_rate as it stands right now
+    (see that model's docstring for why both are snapshotted rather than
+    computed live at read time).
+
+    Idempotent: the DB has a UNIQUE index on (interview_id,
+    panel_interviewer_id) — see db/migrate_fix.py — so re-marking the
+    same round Completed twice (e.g. Completed -> Scheduled -> Completed
+    again) never double-charges. Checked in Python first (not just
+    relying on the DB constraint) so this degrades to a normal no-op
+    instead of a raised IntegrityError the caller would need to catch.
+    """
+    if interview.interview_type != "Panel Interview" or not interview.interviewers:
+        return
+    try:
+        from capabilities.commercial.models import InterviewerPayment
+
+        emails = [str((p or {}).get("email") or "").strip().lower() for p in interview.interviewers]
+        emails = [e for e in emails if e]
+        if not emails:
+            return
+
+        externals = (await db.execute(
+            select(PanelInterviewer).where(
+                PanelInterviewer.organisation_id == organisation_id,
+                PanelInterviewer.interviewer_type == "External",
+                func.lower(PanelInterviewer.email).in_(emails),
+                PanelInterviewer.hourly_rate.isnot(None),
+            )
+        )).scalars().all()
+        if not externals:
+            return
+
+        existing = (await db.execute(
+            select(InterviewerPayment.panel_interviewer_id).where(
+                InterviewerPayment.interview_id == interview.id,
+                InterviewerPayment.panel_interviewer_id.in_([p.id for p in externals]),
+            )
+        )).scalars().all()
+        already_paid_ids = set(existing)
+
+        hours = round((interview.duration_minutes or 0) / 60, 2)
+        for p in externals:
+            if p.id in already_paid_ids or not p.hourly_rate or hours <= 0:
+                continue
+            db.add(InterviewerPayment(
+                organisation_id=organisation_id,
+                interview_id=interview.id, panel_interviewer_id=p.id,
+                interviewer_name=p.name, interviewer_email=p.email or "",
+                candidate_name=candidate_name, round_name=interview.round_name, requisition_title=requisition_title,
+                hours=hours, hourly_rate=p.hourly_rate,
+            ))
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        import logging
+        logging.getLogger(__name__).warning(f"generate_interviewer_payments failed for interview_id={interview.id}: {e}")
 
 
 async def advance_application_stage(db: AsyncSession, application_id: Optional[int], new_stage: str) -> None:

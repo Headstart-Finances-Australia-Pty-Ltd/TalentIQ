@@ -13,6 +13,71 @@ from .models import AutomationRule, CommunicationLog, AutomationRunLog, EmailTem
 _PLACEHOLDER_RE = re.compile(r"\{\{(\w+)\}\}")
 
 
+# Human-readable tags for log_manual_send's source_module — one per
+# real email-sending endpoint that lives OUTSIDE this capability. Kept
+# here (not scattered as string literals at each call site) so the set
+# of values Comms can group/report by is defined in exactly one place.
+SOURCE_MODULES = {
+    "video_invite":            "Video Interview — Invite",
+    "screening_rejection":     "Screening Decision — Rejection Email",
+    "phone_calendly_link":     "Phone Interview — Calendly Link",
+    "interview_calendly_link": "Interview Scheduling — Calendly Link",
+    "interview_fixed_invite":  "Interview Scheduling — Invite",
+    "interview_rejection":     "Interview Decision — Rejection Email",
+    "decision_approval_request": "Interview Decision — Approval Request",
+    "panel_interviewer_notification": "Interview Panel — Interviewer Notification",
+}
+
+
+async def log_manual_send(
+    db: AsyncSession,
+    organisation_id: int,
+    source_module: str,
+    subject: str,
+    body: str,
+    sent_by_user_id: Optional[int],
+    status: str = "Sent",
+    failure_reason: Optional[str] = None,
+    candidate_id: Optional[int] = None,
+    joblens_candidate_id: Optional[int] = None,
+    client_id: Optional[int] = None,
+    vendor_id: Optional[int] = None,
+    requisition_id: Optional[int] = None,
+    pipeline_entry_id: Optional[int] = None,
+) -> None:
+    """Records a manually-triggered (non-automation) email send into the
+    same CommunicationLog table fire_automation writes to, so every real
+    email TalentIQ sends — not just the ones already wired through an
+    AutomationRule — shows up in Comms' unified timeline and the
+    by-module report. Call this AFTER the actual send() call succeeds
+    (or failed) at each of the real send sites: Video Interview's Send
+    Interview Invite, Phone/Interview Scheduling's Calendly links,
+    Interview Scheduling's fixed-time invite, Screening/Interview
+    Decision's bulk rejection emails, and decision-approval requests.
+
+    Best-effort by design, same reasoning as fire_automation: a bug in
+    this bookkeeping call must never be allowed to look like the actual
+    send failed, since callers await this AFTER already emailing the
+    candidate/approver.
+    """
+    try:
+        db.add(CommunicationLog(
+            organisation_id=organisation_id,
+            candidate_id=candidate_id, joblens_candidate_id=joblens_candidate_id,
+            client_id=client_id, vendor_id=vendor_id,
+            requisition_id=requisition_id, pipeline_entry_id=pipeline_entry_id,
+            channel="Email", direction="Outbound", subject=subject, body=body,
+            status=status, failure_reason=failure_reason,
+            automated=False, sent_by_user_id=sent_by_user_id,
+            source_module=SOURCE_MODULES.get(source_module, source_module),
+        ))
+        await db.flush()
+    except Exception:
+        # Never let a logging bug surface as if the actual send failed —
+        # the caller has already emailed the recipient by this point.
+        pass
+
+
 def render_template(text: str, context: dict) -> str:
     """Simple {{placeholder}} substitution — not Jinja2, deliberately: the
     set of placeholders is small and known (candidate_name,

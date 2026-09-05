@@ -1008,6 +1008,56 @@ MIGRATIONS = [
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_decision_approvers_interview ON tiq_interview_decision_approvers (interview_id)",
+
+    # Comms: CommunicationLog needs the same candidate_id / joblens_candidate_id
+    # bridge Interview already has (see capabilities/interview/models.py) —
+    # every email-sending endpoint outside the Communication capability
+    # itself (Video Interview invites, Phone Interview Calendly links,
+    # Screening/Interview Decision rejection emails, Interview Scheduling's
+    # fixed-time invites and Calendly links, decision-approval requests)
+    # operates on a JobLensCandidate, not a Talent Pool Candidate, so
+    # candidate_id alone can't represent them — see service.log_manual_send.
+    "ALTER TABLE tiq_communication_log ADD COLUMN IF NOT EXISTS joblens_candidate_id INTEGER REFERENCES tiq_joblens_candidates(id)",
+    "CREATE INDEX IF NOT EXISTS idx_comm_log_joblens_candidate ON tiq_communication_log (joblens_candidate_id)",
+    # Tags which module/action produced the row (e.g. "Video Interview —
+    # Invite", "Phone Interview — Calendly Link") so Comms can group the
+    # unified timeline by source without guessing from subject text.
+    "ALTER TABLE tiq_communication_log ADD COLUMN IF NOT EXISTS source_module VARCHAR(60)",
+    "CREATE INDEX IF NOT EXISTS idx_comm_log_source_module ON tiq_communication_log (source_module)",
+
+    # Interviewer Communication + Billing: External panel interviewers
+    # get an hourly rate; Interview Scheduling gets a timestamp for its
+    # new "Notify Interviewers" action; Commercials gets a table to hold
+    # the auto-generated pay records for external interviewers — see
+    # capabilities/interview/models.py's PanelInterviewer.hourly_rate /
+    # Interview.interviewers_notified_at and
+    # capabilities/commercial/models.py's InterviewerPayment.
+    "ALTER TABLE tiq_panel_interviewers ADD COLUMN IF NOT EXISTS hourly_rate NUMERIC(10,2)",
+    "ALTER TABLE tiq_interviews ADD COLUMN IF NOT EXISTS interviewers_notified_at TIMESTAMP",
+    """
+    CREATE TABLE IF NOT EXISTS tiq_interviewer_payments (
+        id SERIAL PRIMARY KEY,
+        organisation_id INTEGER NOT NULL REFERENCES tiq_organisations(id),
+        interview_id INTEGER NOT NULL REFERENCES tiq_interviews(id),
+        panel_interviewer_id INTEGER NOT NULL REFERENCES tiq_panel_interviewers(id),
+        interviewer_name VARCHAR(200),
+        interviewer_email VARCHAR(200),
+        candidate_name VARCHAR(200),
+        round_name VARCHAR(200),
+        requisition_title VARCHAR(300),
+        hours NUMERIC(6,2) NOT NULL,
+        hourly_rate NUMERIC(10,2) NOT NULL,
+        currency VARCHAR(10) DEFAULT 'AUD',
+        status VARCHAR(20) DEFAULT 'Pending',
+        paid_date DATE,
+        notes TEXT,
+        created_at TIMESTAMP,
+        updated_at TIMESTAMP
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_interviewer_payments_org ON tiq_interviewer_payments (organisation_id)",
+    "CREATE INDEX IF NOT EXISTS idx_interviewer_payments_interview ON tiq_interviewer_payments (interview_id)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_interviewer_payment_round ON tiq_interviewer_payments (interview_id, panel_interviewer_id)",
 ]
 
 async def run():

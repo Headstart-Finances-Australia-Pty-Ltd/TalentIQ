@@ -78,6 +78,14 @@ class CommunicationLog(Base):
     organisation_id   = Column(Integer, ForeignKey("tiq_organisations.id"), index=True, nullable=False)
 
     candidate_id      = Column(Integer, ForeignKey("tiq_candidates.id"), index=True, nullable=True)
+    # CandidateLens/JobLens candidates (tiq_joblens_candidates) are a
+    # SEPARATE table from the Talent Pool's tiq_candidates that
+    # candidate_id above points at — same bridge Interview already needed
+    # (see capabilities/interview/models.py's joblens_candidate_id
+    # docstring). candidate_id / joblens_candidate_id: set one, never
+    # both, enforced in code (log_manual_send/fire_automation), not a DB
+    # constraint, to avoid a migration-breaking CHECK on existing rows.
+    joblens_candidate_id = Column(Integer, ForeignKey("tiq_joblens_candidates.id"), index=True, nullable=True)
     client_id         = Column(Integer, ForeignKey("tiq_clients.id"), index=True, nullable=True)
     vendor_id         = Column(Integer, ForeignKey("tiq_vendors.id"), index=True, nullable=True)
     requisition_id    = Column(Integer, ForeignKey("tiq_requisitions.id"), index=True, nullable=True)
@@ -88,6 +96,12 @@ class CommunicationLog(Base):
     subject           = Column(String(300))
     body              = Column(Text)
     template_id       = Column(Integer, ForeignKey("tiq_email_templates.id"), index=True, nullable=True)
+
+    # Which module/action produced this row (e.g. "Video Interview —
+    # Invite", "Phone Interview — Calendly Link", "Screening Decision —
+    # Rejection Email") — see service.SOURCE_MODULES. Null for rows
+    # created directly inside Comms itself (manual /log, /send-email).
+    source_module     = Column(String(60), nullable=True)
 
     status            = Column(String(20), default="Logged")   # see COMMUNICATION_STATUSES
     failure_reason    = Column(Text)

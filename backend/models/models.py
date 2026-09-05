@@ -82,6 +82,7 @@ class User(Base):
     vendors            = relationship("Vendor",           back_populates="user", cascade="all, delete-orphan")
     tracked_candidates = relationship("TrackedCandidate",  back_populates="user", cascade="all, delete-orphan")
     clients            = relationship("Client",            back_populates="user", cascade="all, delete-orphan")
+    application_documents = relationship("ApplicationDocument", back_populates="user", cascade="all, delete-orphan")
 
 
 class UserAPIKey(Base):
@@ -621,6 +622,68 @@ class CVAnalysisRecord(Base):
     created_at        = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", back_populates="cvanalysis_records")
+
+
+class ApplicationDocument(Base):
+    """A tailored resume + cover letter pair generated (or hand-built) for
+    ONE specific job application — the ResumeCraft module's persisted
+    output. Deliberately stores both documents together in one row rather
+    than two separate tables: a resume and its matching cover letter are
+    always created, edited, and downloaded as a pair for a given
+    application, never independently, so splitting them would only add
+    join overhead with no normalization benefit (same reasoning as
+    JDRecord's owned JSON requirement arrays above).
+
+    Linked two ways back to CVAnalysis, both optional so this also works for
+    the resume.io-style "build from scratch" flow that has no prior
+    analysis:
+      - source_resume_id     → the uploaded tiq_resumes row this was built
+                                from, if any.
+      - cvanalysis_record_id → the CVAnalysisRecord (CVAnalysis's saved
+                                match analysis) whose matched/missing
+                                skills and extracted JD requirements were
+                                fed to the Groq prompt — see
+                                agents/resumecraft_agent.py. jd_text below
+                                is a snapshot taken at generation time, so
+                                this row stays fully reproducible even if
+                                the source JD or analysis is later edited
+                                or deleted (hence SET NULL, not CASCADE,
+                                on that FK).
+    """
+    __tablename__ = "tiq_application_documents"
+
+    id               = Column(Integer, primary_key=True, index=True)
+    sequence_number  = Column(Integer)   # per-user sequential display number (1, 2, 3...)
+    user_id          = Column(Integer, ForeignKey("tiq_users.id"), index=True, nullable=False)
+
+    source_resume_id     = Column(Integer, ForeignKey("tiq_resumes.id", ondelete="SET NULL"), nullable=True)
+    cvanalysis_record_id = Column(Integer, ForeignKey("tiq_cvanalysis_records.id", ondelete="SET NULL"), nullable=True)
+
+    job_title     = Column(String(300), default="")
+    company_name  = Column(String(300), default="")
+    jd_text       = Column(Text)   # snapshot of the JD used at generation time
+
+    # Structured resume content — see RESUME_SCHEMA_HINT in
+    # agents/resumecraft_agent.py for the exact shape (full_name, summary,
+    # core_skills, experience[], education[], certifications[], projects[]).
+    # One JSON blob (not a normalized child table per experience entry)
+    # because the whole document is always read/written/edited as a
+    # single unit in the builder UI, never queried entry-by-entry.
+    resume_data      = Column(JSON, default=dict)
+    resume_template  = Column(String(50), default="modern")
+
+    cover_letter_text     = Column(Text, default="")
+    cover_letter_template = Column(String(50), default="standard")
+
+    ai_powered  = Column(Boolean, default=False)
+    groq_model  = Column(String(100))
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user          = relationship("User", back_populates="application_documents")
+    source_resume = relationship("Resume")
+    cvanalysis    = relationship("CVAnalysisRecord")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
