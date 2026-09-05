@@ -2211,6 +2211,15 @@ async def send_invite(
     smtp_cfg = await _get_smtp_config(current_user.id, db)
     _send_email(smtp_cfg, payload.to_email, payload.subject, payload.body_html)
 
+    from capabilities.acquisition.service import get_or_create_default_organisation
+    from capabilities.communication import service as comm_service
+    org = await get_or_create_default_organisation(db, current_user)
+    await comm_service.log_manual_send(
+        db, org.id, "video_invite", payload.subject, payload.body_html,
+        sent_by_user_id=current_user.id, joblens_candidate_id=c.id,
+    )
+    await db.commit()
+
     return {"sent": True}
 
 
@@ -2244,6 +2253,10 @@ async def send_rejection_emails(
 
     smtp_cfg = await _get_smtp_config(current_user.id, db)
 
+    from capabilities.acquisition.service import get_or_create_default_organisation
+    from capabilities.communication import service as comm_service
+    org = await get_or_create_default_organisation(db, current_user)
+
     rows = (await db.execute(
         select(JobLensCandidate).where(JobLensCandidate.id.in_(payload.candidate_ids))
     )).scalars().all()
@@ -2264,15 +2277,29 @@ async def send_rejection_emails(
             _send_email(smtp_cfg, c.email, payload.subject, body_html)
             c.rejection_email_sent_at = datetime.utcnow()
             sent.append({"candidate_id": cid, "name": c.name, "email": c.email})
+            await comm_service.log_manual_send(
+                db, org.id, "screening_rejection", payload.subject, body_html,
+                sent_by_user_id=current_user.id, joblens_candidate_id=c.id,
+            )
         except HTTPException as e:
             # SMTP misconfiguration (bad credentials, host unreachable)
             # affects every remaining send too — stop the loop early
             # instead of repeating the same failure for every candidate.
             failed.append({"candidate_id": cid, "name": c.name, "error": e.detail})
+            await comm_service.log_manual_send(
+                db, org.id, "screening_rejection", payload.subject, body_html,
+                sent_by_user_id=current_user.id, joblens_candidate_id=c.id,
+                status="Failed", failure_reason=str(e.detail)[:500],
+            )
             if "not configured" in str(e.detail).lower() or "rejected these smtp credentials" in str(e.detail).lower():
                 break
         except Exception as e:
             failed.append({"candidate_id": cid, "name": c.name, "error": str(e)[:200]})
+            await comm_service.log_manual_send(
+                db, org.id, "screening_rejection", payload.subject, body_html,
+                sent_by_user_id=current_user.id, joblens_candidate_id=c.id,
+                status="Failed", failure_reason=str(e)[:500],
+            )
 
     await db.commit()
     return {"sent": sent, "failed": failed}
@@ -2504,8 +2531,9 @@ async def send_phone_calendly_link(
         f"<p><a href=\"{booking_url}\">{booking_url}</a></p>"
         f"<p>Looking forward to speaking with you.</p>"
     )
+    subject = payload.subject.strip() or "Schedule your phone screening interview"
     smtp_cfg = await _get_smtp_config(current_user.id, db)
-    _send_email(smtp_cfg, to_email, payload.subject.strip() or "Schedule your phone screening interview", body_html)
+    _send_email(smtp_cfg, to_email, subject, body_html)
 
     interview = await _get_or_create_joblens_interview(db, current_user, c, round_name="Phone Screening", interview_type="Phone Interview")
     interview.calendly_scheduling_url = booking_url
@@ -2513,6 +2541,14 @@ async def send_phone_calendly_link(
     if interview.status not in ("Scheduled", "Completed"):
         interview.status = "Requested"
     interview.updated_at = datetime.utcnow()
+
+    from capabilities.acquisition.service import get_or_create_default_organisation
+    from capabilities.communication import service as comm_service
+    org = await get_or_create_default_organisation(db, current_user)
+    await comm_service.log_manual_send(
+        db, org.id, "phone_calendly_link", subject, body_html,
+        sent_by_user_id=current_user.id, joblens_candidate_id=c.id,
+    )
     await db.commit()
 
     return {"sent": True, "calendly_scheduling_url": booking_url, "interview_id": interview.id}

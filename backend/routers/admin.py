@@ -17,7 +17,7 @@ from db.database import get_db, engine, get_connection_display_info, test_connec
 from models.models import User
 from models.billing_models import Subscription, PricingPlan
 from utils.auth_utils import get_current_user, require_admin
-from utils.storage import test_s3_config, REQUIRED_S3_FIELDS
+from utils.storage import test_s3_config, REQUIRED_S3_FIELDS, get_s3_client, get_s3_config, get_presigned_url, delete_file
 
 router = APIRouter()
 
@@ -104,6 +104,98 @@ async def storage_usage(_: User = Depends(require_admin), db: AsyncSession = Dep
         "used_pct": round(100 * total_bytes / allocated_bytes, 1) if allocated_bytes else None,
         "tables": tables,
     }
+
+
+# ── CLOUD STORAGE (S3-compatible — Cloudflare R2 in production) ────────
+# Separate from the Postgres table/row browser above: this lists actual
+# OBJECTS in the bucket configured under the "s3" global credential (see
+# utils/storage.py — Admin Console > API Keys), not database rows.
+# Every object key is "{account-folder}/{kind}/{sub_id}/{uuid}.{ext}"
+# (see utils/storage._object_key), so Delimiter="/" folder-by-folder
+# browsing mirrors that structure naturally: one folder per TalentIQ
+# account, then resumes/jds/videos/cover-letters underneath.
+
+@router.get("/storage/r2/browse")
+async def browse_r2(
+    prefix: str = "",
+    continuation_token: Optional[str] = None,
+    max_keys: int = 200,
+    _: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    cfg = await get_s3_config(db)
+    if not cfg:
+        return {
+            "configured": False, "bucket": None, "prefix": prefix,
+            "folders": [], "files": [], "isTruncated": False, "nextContinuationToken": None,
+        }
+
+    client, bucket = await get_s3_client(db)
+    kwargs: Dict[str, Any] = {"Bucket": bucket, "Delimiter": "/", "MaxKeys": max_keys}
+    if prefix:
+        kwargs["Prefix"] = prefix
+    if continuation_token:
+        kwargs["ContinuationToken"] = continuation_token
+
+    try:
+        resp = await asyncio.to_thread(client.list_objects_v2, **kwargs)
+    except Exception as e:
+        raise HTTPException(502, f"Could not list bucket contents: {type(e).__name__}: {e}")
+
+    folders = [cp["Prefix"] for cp in resp.get("CommonPrefixes", [])]
+    files = [
+        {
+            "key": o["Key"],
+            "sizeBytes": o["Size"],
+            "lastModified": o["LastModified"].isoformat() if o.get("LastModified") else None,
+        }
+        for o in resp.get("Contents", [])
+        # A "folder" itself sometimes shows up as a zero-byte object with
+        # the same key as its own prefix (created by some S3 clients) —
+        # skip it here since it's already represented in `folders` above.
+        if o["Key"] != prefix
+    ]
+    return {
+        "configured": True,
+        "bucket": bucket,
+        "prefix": prefix,
+        "folders": folders,
+        "files": files,
+        "isTruncated": resp.get("IsTruncated", False),
+        "nextContinuationToken": resp.get("NextContinuationToken"),
+    }
+
+
+@router.get("/storage/r2/download")
+async def download_r2_object(
+    key: str,
+    _: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Returns a short-lived presigned GET URL rather than proxying the
+    file through this server — same approach as the video-interview
+    streaming endpoints (see utils/storage.get_video_presigned_url)."""
+    url = await get_presigned_url(db, key, expires_in=300)
+    if not url:
+        raise HTTPException(404, "Object not found, or cloud storage isn't configured (Admin Console > API Keys).")
+    return {"url": url}
+
+
+@router.delete("/storage/r2/object")
+async def delete_r2_object(
+    key: str,
+    _: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Permanently deletes ONE object from the bucket. This does not
+    touch any *_key column pointing at it in Postgres — an admin using
+    this to clean up storage should confirm the owning row (resume, JD,
+    video, etc.) is already gone or being replaced, since the app has no
+    way to detect a dangling reference after this call."""
+    ok = await delete_file(db, key)
+    if not ok:
+        raise HTTPException(400, "Delete failed, or cloud storage isn't configured.")
+    return {"message": "Deleted", "key": key}
 
 
 # ── TABLE SCHEMA ─────────────────────────────────────────────────────
@@ -977,6 +1069,21 @@ async def _cascade_delete_requisition_rows(db: AsyncSession, req_id: int) -> Non
     await db.execute(text(
         "DELETE FROM tiq_interview_scorecards WHERE interview_id IN "
         "(SELECT id FROM tiq_interviews WHERE requisition_id = :rid)"), p)
+    # These two were missing until now — both tables have a NOT NULL FK
+    # to tiq_interviews with no ON DELETE CASCADE, so leaving either one
+    # unhandled makes the DELETE FROM tiq_interviews below raise a
+    # foreign-key violation that aborts this entire transaction — NOT
+    # just that one delete. Since everything in this function runs in
+    # one transaction with a single commit() by the caller, that
+    # failure silently rolled back every other delete already queued
+    # here too, which is why force-delete could appear to do nothing at
+    # all rather than fail loudly on the actual offending table.
+    await db.execute(text(
+        "DELETE FROM tiq_interview_decision_approvers WHERE interview_id IN "
+        "(SELECT id FROM tiq_interviews WHERE requisition_id = :rid)"), p)
+    await db.execute(text(
+        "DELETE FROM tiq_interviewer_payments WHERE interview_id IN "
+        "(SELECT id FROM tiq_interviews WHERE requisition_id = :rid)"), p)
     await db.execute(text("DELETE FROM tiq_interviews WHERE requisition_id = :rid"), p)
     await db.execute(text(
         "DELETE FROM tiq_timesheet_entries WHERE placement_id IN "
@@ -1021,6 +1128,15 @@ async def _cascade_delete_candidate_rows(db: AsyncSession, candidate_id: int) ->
         "(SELECT id FROM tiq_interviews WHERE candidate_id = :cid)"), p)
     await db.execute(text(
         "DELETE FROM tiq_interview_scorecards WHERE interview_id IN "
+        "(SELECT id FROM tiq_interviews WHERE candidate_id = :cid)"), p)
+    # Same missing pair as _cascade_delete_requisition_rows above — see
+    # that function's comment for why skipping either one silently
+    # rolls back this whole cascade instead of just failing on it.
+    await db.execute(text(
+        "DELETE FROM tiq_interview_decision_approvers WHERE interview_id IN "
+        "(SELECT id FROM tiq_interviews WHERE candidate_id = :cid)"), p)
+    await db.execute(text(
+        "DELETE FROM tiq_interviewer_payments WHERE interview_id IN "
         "(SELECT id FROM tiq_interviews WHERE candidate_id = :cid)"), p)
     await db.execute(text("DELETE FROM tiq_interviews WHERE candidate_id = :cid"), p)
     await db.execute(text(
@@ -1109,6 +1225,71 @@ async def force_delete_candidate(
 # the single-record endpoints above need — that phrasing only makes
 # sense for a human typing one id at a time via /api/docs.
 
+async def _generic_cascade_delete(db: AsyncSession, table: str, ids: List[int], _path: Optional[set] = None) -> None:
+    """FK-aware cascade delete for the File Manager's raw table browser
+    (delete_row/bulk_delete_rows below) — those two do a plain, uncascaded
+    DELETE and simply fail with a FOREIGN KEY VIOLATION the moment any
+    other table still references the row (e.g. deleting a tiq_applications
+    row while a tiq_pipeline_entries row still points at it via
+    application_id). This is the generic version of the hand-written
+    cascades above (_cascade_delete_requisition_rows/_cascade_delete_candidate_rows) —
+    those two hardcode a known set of child tables because they're on a
+    tight, well-understood blast radius; this one instead DISCOVERS real
+    foreign-key children at runtime via Postgres's information_schema, so
+    it works for any tiq_* table the browser can reach, not just the two
+    that got a dedicated hand-written cascade.
+
+    Self-referencing / cyclical FKs (e.g. tiq_placements.replaces_placement_id,
+    tiq_candidates.merged_into_id, or a genuine A->B->A cycle) are detected
+    via _path (the set of tables already being processed in THIS recursion
+    branch) and NULLed out rather than recursed into — recursing would
+    either loop forever or try to delete rows this same call is already
+    deleting. _path is passed by value (a new set unioned each call, never
+    mutated in place) so sibling branches that legitimately reach the same
+    child table from different parents each still process their own ids
+    correctly, rather than one branch's visit silently skipping the other's.
+
+    Only ever called from an explicit, confirm-phrase-gated force-delete
+    endpoint (see force_delete_table_rows below) — never from the plain
+    delete_row/bulk_delete_rows path, so ordinary single-row deletes keep
+    failing loudly on a real FK conflict instead of silently cascading.
+    """
+    ids = list(ids)
+    if not ids:
+        return
+    path = (_path or set()) | {table}
+
+    children = (await db.execute(text(
+        """
+        SELECT tc.table_name AS child_table, kcu.column_name AS child_column
+        FROM information_schema.table_constraints tc
+        JOIN information_schema.key_column_usage kcu
+          ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
+        JOIN information_schema.constraint_column_usage ccu
+          ON tc.constraint_name = ccu.constraint_name AND tc.table_schema = ccu.table_schema
+        WHERE tc.constraint_type = 'FOREIGN KEY' AND ccu.table_name = :table AND tc.table_schema = 'public'
+        """
+    ), {"table": table})).all()
+
+    for child_table, child_column in children:
+        if child_table in path:
+            await db.execute(
+                text(f'UPDATE "{child_table}" SET "{child_column}" = NULL WHERE "{child_column}" = ANY(:ids)'),
+                {"ids": ids},
+            )
+            continue
+        child_ids = (await db.execute(
+            text(f'SELECT id FROM "{child_table}" WHERE "{child_column}" = ANY(:ids)'), {"ids": ids}
+        )).scalars().all()
+        if child_ids:
+            await _generic_cascade_delete(db, child_table, list(child_ids), path)
+            await db.execute(
+                text(f'DELETE FROM "{child_table}" WHERE "{child_column}" = ANY(:ids)'), {"ids": ids}
+            )
+
+    await db.execute(text(f'DELETE FROM "{table}" WHERE id = ANY(:ids)'), {"ids": ids})
+
+
 class ForceDeleteBatchIn(BaseModel):
     ids: List[int]
     confirm: str
@@ -1157,4 +1338,51 @@ async def force_delete_candidates_batch(
         await _cascade_delete_candidate_rows(db, candidate_id)
         deleted.append(candidate_id)
     await db.commit()
+    return {"deleted_ids": deleted, "missing_ids": missing}
+
+
+@router.post("/tables/{table}/force-delete-batch")
+async def force_delete_table_rows(
+    table: str,
+    payload: ForceDeleteBatchIn,
+    _: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """The File Manager's generic 'Force delete (cascade)' action for any
+    tiq_* table OTHER than requisitions/candidates (those two keep their
+    dedicated, hand-written cascades above — narrower and easier to
+    reason about for the two highest-traffic cleanup targets). Everything
+    else — tiq_applications, tiq_interviews, tiq_pipeline_entries, etc. —
+    goes through _generic_cascade_delete's runtime FK discovery instead.
+
+    Same confirm-phrase gate as the dedicated endpoints, just keyed to
+    the table name so it can't be fired by a generic/scripted request
+    without a human having typed the exact table they mean to wipe.
+    """
+    if not table.startswith("tiq_"):
+        raise HTTPException(403, "Only tiq_* tables are accessible")
+    if table in ("tiq_requisitions", "tiq_candidates"):
+        raise HTTPException(400, f"Use the dedicated /{table.replace('tiq_', '')}/force-delete-batch endpoint for this table.")
+    if payload.confirm != f"force delete {table}":
+        raise HTTPException(400, f"Confirmation text must be exactly: force delete {table}")
+    if not payload.ids:
+        raise HTTPException(400, "No row ids provided")
+
+    ids = payload.ids
+    if table == "tiq_users":
+        protected_ids = set((await db.execute(
+            text("SELECT id FROM tiq_users WHERE id = ANY(:ids) AND is_protected = TRUE"), {"ids": ids}
+        )).scalars().all())
+        ids = [i for i in ids if i not in protected_ids]
+        if not ids:
+            raise HTTPException(403, "All selected accounts are protected and cannot be deleted.")
+
+    existing = set((await db.execute(
+        text(f'SELECT id FROM "{table}" WHERE id = ANY(:ids)'), {"ids": ids}
+    )).scalars().all())
+    missing = [i for i in ids if i not in existing]
+    deleted = [i for i in ids if i in existing]
+    if deleted:
+        await _generic_cascade_delete(db, table, deleted)
+        await db.commit()
     return {"deleted_ids": deleted, "missing_ids": missing}

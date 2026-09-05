@@ -566,6 +566,16 @@ async def analyze_resume(
         weight_overrides=weight_overrides, disqualifier_overrides=disqualifier_overrides,
     )
 
+    # Echo back the exact text that was actually scored (pasted text, or
+    # extracted from an uploaded PDF/DOCX) — not just the analysis derived
+    # from it. The frontend persists this alongside the saved history
+    # record so anything downstream that reuses "the resume behind this
+    # CVAnalysis" (e.g. ResumeCraft) has the real source text to work
+    # from, rather than only the lightweight name/email/phone summary it
+    # used to be limited to.
+    result["resumeText"] = final_resume
+    result["jdText"] = final_jd
+
     return result
 
 

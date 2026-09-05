@@ -25,6 +25,7 @@ from routers import candidatetrack as candidatetrack_router
 from routers import android_caller as android_caller_router
 from routers import billing as billing_router
 from routers import job_ads as job_ads_router
+from routers import resumecraft as resumecraft_router
 from capabilities.acquisition import router as acquisition_router
 from capabilities.acquisition import public_router as acquisition_public_router
 from capabilities.requisition import router as requisition_router
@@ -146,6 +147,7 @@ app.include_router(candidatetrack_router.router, prefix="/api/candidatetrack", t
 app.include_router(android_caller_router.router, prefix="/api/android-caller", tags=["Windows/Android Caller"])
 app.include_router(billing_router.router, prefix="/api/billing", tags=["Billing"])
 app.include_router(job_ads_router.router, prefix="/api/job-ads", tags=["Job Ads"])
+app.include_router(resumecraft_router.router, prefix="/api/resumecraft", tags=["ResumeCraft"])
 
 # ── Capability: Candidate Acquisition & Talent Pool (Phase 0 + Phase 1) ──
 # Self-contained module — see backend/capabilities/acquisition/models.py
