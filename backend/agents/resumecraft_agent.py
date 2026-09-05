@@ -148,6 +148,90 @@ def _call_failed_message(detail: Optional[str] = None) -> str:
     )
 
 
+# ── Missed-qualification safety net ─────────────────────────────────────
+# The LLM restructures/reprioritizes content, and occasionally drops a
+# real line it should have kept (most often a certification or degree
+# buried near the end of a long resume). Since we can't guarantee the
+# model never does this, this heuristic double-checks its own output
+# afterwards: scan the SOURCE resume for lines that look like a
+# qualification/credential, then confirm each one is reflected somewhere
+# in the generated content. Anything that isn't gets surfaced as a
+# warning so the person can verify and re-add it manually, rather than
+# it silently vanishing.
+_CREDENTIAL_LINE_RE = re.compile(
+    r"\b(bachelor|master|associate degree|diploma|ph\.?d|doctorate|"
+    r"b\.?sc\b|m\.?sc\b|b\.?a\b|m\.?a\b|b\.?e\b|b\.?tech|m\.?tech|mba|"
+    r"certificat|certified|licen[sc]e|accreditation|"
+    r"pmp\b|cpa\b|cfa\b|scrum master|six sigma|itil\b|cissp\b|cisa\b|ccna\b|ccnp\b|"
+    r"aws certified|azure.{0,15}certified|google.{0,15}certified|comptia)",
+    re.IGNORECASE,
+)
+_CREDENTIAL_STOPWORDS = {
+    "the", "and", "with", "from", "for", "this", "that", "have", "were", "was",
+    "your", "you", "are", "will", "our",
+}
+
+
+def _dedupe_preserve_order(items):
+    seen = set()
+    out = []
+    for item in items:
+        key = item.lower()
+        if key not in seen:
+            seen.add(key)
+            out.append(item)
+    return out
+
+
+
+
+
+def _find_credential_lines(resume_text: str):
+    lines = []
+    for raw_line in (resume_text or "").split("\n"):
+        line = raw_line.strip(" \t\u2022-*").strip()
+        if not line or not (4 < len(line) < 160):
+            continue
+        # Skip bare section headers ("CERTIFICATIONS", "EDUCATION") — all
+        # caps, no digits, short — which would otherwise match the regex
+        # on the section-name word alone and produce a useless
+        # "did you drop this line" false positive for the header itself.
+        if line.isupper() and len(line.split()) <= 3:
+            continue
+        if _CREDENTIAL_LINE_RE.search(line):
+            lines.append(line)
+    return _dedupe_preserve_order(lines)
+
+
+def _check_missed_qualifications(resume_text: str, resume_data: dict):
+    """Returns up to 6 lines from the source resume that look like a
+    qualification/credential but don't clearly appear anywhere in the
+    generated resume_data — a heuristic nudge, not a guarantee (it can
+    both miss real omissions and flag false positives), but a useful
+    safety net given an LLM restructuring the whole document at once."""
+    credential_lines = _find_credential_lines(resume_text)
+    if not credential_lines:
+        return []
+
+    haystack_parts = [resume_data.get("summary") or ""]
+    haystack_parts += resume_data.get("certifications") or []
+    for edu in resume_data.get("education") or []:
+        haystack_parts.append(" ".join(str(v) for v in edu.values() if v))
+    for job in resume_data.get("experience") or []:
+        haystack_parts.extend(job.get("bullets") or [])
+    haystack = " ".join(haystack_parts).lower()
+
+    missed = []
+    for line in credential_lines:
+        tokens = [
+            t for t in re.findall(r"[A-Za-z][A-Za-z.+#]{2,}", line)
+            if t.lower() not in _CREDENTIAL_STOPWORDS
+        ]
+        if tokens and not any(t.lower() in haystack for t in tokens):
+            missed.append(line[:120])
+    return missed[:6]
+
+
 async def generate_tailored_resume(
     resume_text: str,
     jd_text: str,
@@ -174,7 +258,7 @@ async def generate_tailored_resume(
 TARGET ROLE: {job_title or "the target role"} at {company_name or "the target company"}
 
 JOB DESCRIPTION (may be truncated):
-{(jd_text or "")[:6000]}
+{(jd_text or "")[:8000]}
 
 CVANALYSIS MATCH ANALYSIS (already computed \u2014 use it, do not re-derive it):
 - Matched/strength skills to emphasize: {json.dumps(matched)[:2000]}
@@ -182,11 +266,11 @@ CVANALYSIS MATCH ANALYSIS (already computed \u2014 use it, do not re-derive it):
 - Extracted JD requirements: {json.dumps(jd_req)[:2000]}
 - Candidate profile as extracted: {json.dumps(candidate_profile)[:1000]}
 
-CANDIDATE'S EXISTING RESUME TEXT \u2014 this is the ONLY source of truth for facts (contact details, employers, dates, degrees, certifications). Extract from it thoroughly and completely, do not skip or summarize away real entries:
-{(resume_text or "")[:8000]}
+CANDIDATE'S EXISTING RESUME TEXT \u2014 this is the ONLY source of truth for facts (contact details, employers, dates, degrees, certifications). This is the FULL resume, start to finish \u2014 read ALL of it before writing anything. Education, Certifications, Qualifications, and Licenses sections are very often placed near the END of a resume; do not stop reading after the work-experience section, and do not let anything in those later sections go missing:
+{(resume_text or "")[:20000]}
 
 Rules:
-1. EXTRACT EVERY REAL DETAIL from the resume text above: full name, email, phone, location/address, LinkedIn/portfolio if present, EVERY job in their work history (not just the most recent one or two), EVERY education entry, and EVERY certification mentioned \u2014 do not leave a field blank or an entry out if the source resume contains it.
+1. EXTRACT EVERY REAL DETAIL from the ENTIRE resume text above, beginning to end: full name, email, phone, location/address, LinkedIn/portfolio if present, EVERY job in their work history (not just the most recent one or two), EVERY education entry, and EVERY certification/license/qualification mentioned anywhere \u2014 including any near the bottom of the document. Do not leave a field blank or an entry out if the source resume contains it. Before finalizing, re-scan the source text specifically for degree names, certification names, and license names, and confirm each one appears somewhere in your output.
 2. NEVER invent employers, dates, degrees, certifications, or skills the candidate doesn't actually have anywhere in their resume text. Only reorganize, rephrase, re-prioritize, and elaborate on REAL content \u2014 never fabricate a new fact.
 3. Write DESCRIPTIVE bullets: lead with a strong action verb, explain what was done, how, and the outcome/impact \u2014 not terse fragments. Quantify wherever the source resume allows it (numbers, %, scale); do not invent numbers that aren't implied by the source text.
 4. GAP-CLOSING (this is important): for each missing/gap skill CVAnalysis identified, re-read the candidate's actual resume text looking for real, adjacent, or transferable experience that relates to it. Where genuine evidence exists, REPHRASE that existing bullet using the JD's own terminology so the ATS/recruiter can see the match (e.g. if the gap is "containerization" and the resume already mentions "used Docker to package the app," rewrite it as "Containerized the application using Docker" so the keyword is explicit). Where NO genuine evidence exists anywhere in the resume, do not touch that gap \u2014 leave it alone rather than fabricate.
@@ -203,6 +287,13 @@ Rules:
                 merged.update({k: v for k, v in data.items() if k in EMPTY_RESUME_DATA})
                 merged["ai_powered"] = True
                 merged["groq_model"] = groq_model
+                missed = _check_missed_qualifications(resume_text, merged)
+                if missed:
+                    merged["completeness_warning"] = (
+                        "These lines from your uploaded resume don't clearly appear in the generated "
+                        "resume below \u2014 double-check nothing was dropped, and add back anything missing: "
+                        + " | ".join(missed)
+                    )
                 return merged
             fallback = _fallback_resume_data(resume_text, candidate_profile)
             fallback["ai_powered"] = False
@@ -245,7 +336,7 @@ Matched strengths: {json.dumps(matched)[:1500]}
 Key JD requirements: {json.dumps(jd_req)[:1500]}
 
 Resume for reference (may be truncated):
-{(resume_text or "")[:6000]}
+{(resume_text or "")[:12000]}
 
 Structure, 4 short paragraphs, under 350 words total:
 1. Opening \u2014 role, company, one-line hook.
