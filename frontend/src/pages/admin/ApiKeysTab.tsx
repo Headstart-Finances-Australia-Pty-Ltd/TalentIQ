@@ -384,6 +384,64 @@ const S3_FIELDS: { name: string; label: string; placeholder: string; required: b
   { name: "endpoint_url", label: "Endpoint URL", placeholder: "https://<account-id>.r2.cloudflarestorage.com (leave blank for real AWS S3)", required: false },
 ];
 
+// Same allocated-quota pattern as StorageQuotaSection above, for the
+// Cloud Storage (R2) bucket instead of Postgres — lives inside the S3
+// panel since that's where an admin is already thinking about this
+// bucket, and drives the used % shown on File Manager's Cloud Storage tab
+// the same way StorageQuotaSection drives the Database tab's bar.
+function R2StorageQuotaSection() {
+  const qc = useQueryClient();
+  const [gb, setGb] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const { data: quota } = useQuery({ queryKey: ["r2-storage-quota"], queryFn: systemApi.getR2StorageQuota });
+
+  const saveMut = useMutation({
+    mutationFn: (allocated_gb: number) => systemApi.setR2StorageQuota(allocated_gb),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["r2-storage-quota"] });
+      qc.invalidateQueries({ queryKey: ["r2-usage"] }); // File Manager's Cloud Storage bar reads this
+      setGb("");
+      setError(null);
+    },
+    onError: (e: any) => setError(e?.response?.data?.detail || "Could not save."),
+  });
+
+  const parsed = parseFloat(gb);
+  const valid = gb.trim() !== "" && !isNaN(parsed) && parsed > 0;
+
+  return (
+    <div style={{ marginTop: 18, paddingTop: 18, borderTop: "1px solid var(--border)" }}>
+      <label className="tiq-label">Allocated storage capacity (GB)</label>
+      <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "0 0 10px", lineHeight: 1.5 }}>
+        Drives the used % shown on File Manager's Cloud Storage tab.{" "}
+        {quota
+          ? quota.source === "override"
+            ? <>Currently set to <strong>{quota.allocated_gb} GB</strong> here (overrides the environment default).</>
+            : <>Currently falling back to the <code>R2_ALLOCATED_GB</code> environment default (<strong>{quota.allocated_gb} GB</strong>).</>
+          : null}
+      </p>
+      <div style={{ display: "flex", gap: 8 }}>
+        <input
+          className="tiq-input" type="number" min={0.1} step="any"
+          placeholder={quota ? String(quota.allocated_gb) : "10"}
+          value={gb}
+          onChange={(e) => { setGb(e.target.value); setError(null); }}
+          style={{ maxWidth: 140 }}
+        />
+        <button
+          className="tiq-btn tiq-btn-primary tiq-btn-sm"
+          disabled={!valid || saveMut.isPending}
+          onClick={() => saveMut.mutate(parsed)}
+        >
+          {saveMut.isPending ? "Saving…" : "Save"}
+        </button>
+      </div>
+      {error && <div style={{ fontSize: 12, color: "#ef4444", marginTop: 6 }}>{error}</div>}
+    </div>
+  );
+}
+
 function S3Panel() {
   const qc = useQueryClient();
   const [form, setForm] = useState<Record<string, string>>({});
@@ -489,6 +547,8 @@ function S3Panel() {
           {savedKeys.map((k: any) => <SavedKeyRow key={k.id} k={k} onDelete={(id) => deleteMut.mutate(id)} />)}
         </div>
       )}
+
+      <R2StorageQuotaSection />
     </div>
   );
 }

@@ -519,6 +519,10 @@ export const systemApi = {
   getStorageQuota: () => api.get("/api/admin/system/database/storage-quota").then((r) => r.data),
   setStorageQuota: (allocated_gb: number) =>
     api.put("/api/admin/system/database/storage-quota", { allocated_gb }).then((r) => r.data),
+  // Same allocated-quota pattern, for the Cloud Storage (R2) bucket.
+  getR2StorageQuota: () => api.get("/api/admin/system/storage/r2-quota").then((r) => r.data),
+  setR2StorageQuota: (allocated_gb: number) =>
+    api.put("/api/admin/system/storage/r2-quota", { allocated_gb }).then((r) => r.data),
   // Provider-to-provider schema+data migration (e.g. Neon -> Xata).
   // start returns a job_id immediately (the copy runs in the background
   // server-side); poll getMigrationStatus for progress.

@@ -32,6 +32,7 @@ const adminApi = {
     api.get("/api/admin/storage/r2/browse", { params: { prefix, continuation_token: continuationToken || undefined } }).then(r => r.data),
   r2DownloadUrl: (key: string) => api.get("/api/admin/storage/r2/download", { params: { key } }).then(r => r.data.url as string),
   r2Delete: (key: string) => api.delete("/api/admin/storage/r2/object", { params: { key } }).then(r => r.data),
+  r2Usage: () => api.get("/api/admin/storage/r2/usage").then(r => r.data),
 };
 
 // Must match the route key AdminConsolePage.tsx's Modules Management >
@@ -447,6 +448,15 @@ function CloudStoragePanel() {
     queryFn: () => adminApi.r2Browse(prefix, currentToken || undefined),
   });
 
+  // Separate from the folder-browse query above: computing total bucket
+  // usage means walking every object (R2/S3 has no single "bucket size"
+  // stat), so it's fetched once per tab visit rather than refetched on
+  // every folder navigation the way `data` above is.
+  const { data: usage, refetch: refetchUsage } = useQuery({
+    queryKey: ["r2-usage"],
+    queryFn: adminApi.r2Usage,
+  });
+
   const deleteMut = useMutation({
     mutationFn: (key: string) => adminApi.r2Delete(key),
     onSuccess: (_d, key) => { refetch(); flash(`Deleted ${key.split("/").pop()}.`); },
@@ -482,12 +492,47 @@ function CloudStoragePanel() {
     <div>
       {msg && <div className="tiq-alert tiq-alert-success" style={{ marginBottom: 16 }}>{msg}</div>}
 
+      {/* CLOUD STORAGE USAGE — same style as the Database tab's usage
+          bar, against the allocated_gb quota set in Admin Console >
+          API Keys (Object Storage panel). */}
+      {usage?.configured && usage.allocated_bytes != null && usage.used_pct != null && (
+        <div className="tiq-card" style={{ marginBottom: 16, padding: "14px 16px" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: ".5px" }}>
+              Cloud Storage
+            </div>
+            <div style={{ fontSize: 13 }}>
+              <span style={{ fontWeight: 700 }}>{formatBytes(usage.total_bytes)}</span>
+              <span style={{ color: "var(--text-muted)" }}> / {formatBytes(usage.allocated_bytes)} ({usage.used_pct}%)</span>
+            </div>
+          </div>
+          <div style={{ height: 8, borderRadius: 4, background: "var(--bg-tertiary)", overflow: "hidden" }}>
+            <div style={{
+              height: "100%",
+              width: `${Math.min(100, usage.used_pct)}%`,
+              background: usage.used_pct >= 90 ? "#ef4444" : usage.used_pct >= 70 ? "#f59e0b" : "var(--teal-500)",
+              transition: "width .3s ease",
+            }} />
+          </div>
+          {usage.used_pct >= 70 && (
+            <div style={{ fontSize: 11.5, color: usage.used_pct >= 90 ? "#ef4444" : "#f59e0b", marginTop: 6 }}>
+              {usage.used_pct >= 90 ? "⚠ Nearing the allocated limit" : "Approaching the allocated limit"} — {usage.object_count} object(s) in the bucket.
+            </div>
+          )}
+          {usage.truncated && (
+            <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 6 }}>
+              Bucket has more objects than could be scanned in one pass — the figure above is a lower bound.
+            </div>
+          )}
+        </div>
+      )}
+
       {data?.configured && (
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: 8 }}>
           <div style={{ fontSize: 13, color: "var(--text-muted)" }}>
             Bucket: <strong style={{ color: "var(--text-primary)" }}>{data.bucket}</strong>
           </div>
-          <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" onClick={() => refetch()}>
+          <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" onClick={() => { refetch(); refetchUsage(); }}>
             <RefreshCw size={12} /> Refresh
           </button>
         </div>

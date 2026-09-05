@@ -356,7 +356,7 @@ export default function ResumeCraftPage() {
   const [companyName, setCompanyName] = useState("");
   const [resumeData, setResumeData] = useState<ResumeData>(EMPTY_RESUME);
   const [coverLetterText, setCoverLetterText] = useState("");
-  const [warnings, setWarnings] = useState<{ resume?: string; coverLetter?: string }>({});
+  const [warnings, setWarnings] = useState<{ resume?: string; coverLetter?: string; completeness?: string }>({});
   const [showEditor, setShowEditor] = useState(false);
 
   // Generate-tab-only state
@@ -391,7 +391,7 @@ export default function ResumeCraftPage() {
     setCompanyName(doc.companyName || "");
     setResumeData(normalizeResumeData(doc.resumeData));
     setCoverLetterText(doc.coverLetterText || "");
-    setWarnings({ resume: doc.resumeWarning, coverLetter: doc.coverLetterWarning });
+    setWarnings({ resume: doc.resumeWarning, coverLetter: doc.coverLetterWarning, completeness: doc.resumeCompletenessWarning });
     setShowEditor(true);
   };
 
@@ -626,6 +626,12 @@ export default function ResumeCraftPage() {
             <div className="tiq-alert tiq-alert-info" style={{ marginBottom: 16 }}>
               <AlertTriangle size={14} style={{ display: "inline", marginRight: 6 }} />
               {warnings.resume || warnings.coverLetter}
+            </div>
+          )}
+          {warnings.completeness && (
+            <div className="tiq-alert" style={{ marginBottom: 16, background: "#fffbeb", border: "1px solid #fcd34d", color: "#92400e" }}>
+              <AlertTriangle size={14} style={{ display: "inline", marginRight: 6 }} />
+              {warnings.completeness}
             </div>
           )}
           {resumeData.gap_fixes && resumeData.gap_fixes.length > 0 && (
