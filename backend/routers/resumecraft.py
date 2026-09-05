@@ -228,6 +228,7 @@ async def generate_documents(
     # editable either way.
     result["resumeWarning"] = resume_data.get("ai_error")
     result["coverLetterWarning"] = cover_letter.get("ai_error")
+    result["resumeCompletenessWarning"] = resume_data.get("completeness_warning")
     return result
 
 

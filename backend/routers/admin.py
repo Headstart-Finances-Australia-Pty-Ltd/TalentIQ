@@ -166,6 +166,67 @@ async def browse_r2(
     }
 
 
+@router.get("/storage/r2/usage")
+async def r2_storage_usage(
+    _: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Total bytes actually stored in the bucket vs. the allocated quota
+    above, in the same {total_bytes, allocated_bytes, used_pct} shape as
+    /storage (the Postgres equivalent) so the Cloud Storage tab can show
+    an identical usage bar. Unlike Postgres, R2/S3 has no single "give me
+    the bucket size" API call — this has to walk every object and sum
+    Size itself, so it's a genuinely heavier call than /storage; the
+    frontend fetches it once per Cloud Storage tab visit, not on every
+    folder navigation. Capped at MAX_OBJECTS_TO_SCAN so a very large
+    bucket can't hang this request indefinitely; `truncated: true` tells
+    the frontend the number is a lower bound, not exact, in that case.
+    """
+    cfg = await get_s3_config(db)
+    allocated_bytes = await _get_r2_allocated_bytes(db)
+    if not cfg:
+        return {
+            "configured": False, "bucket": None, "total_bytes": 0, "object_count": 0,
+            "allocated_bytes": allocated_bytes, "used_pct": None, "truncated": False,
+        }
+
+    client, bucket = await get_s3_client(db)
+    MAX_OBJECTS_TO_SCAN = 200_000
+    total_bytes = 0
+    object_count = 0
+    continuation_token = None
+    truncated_scan = False
+
+    try:
+        while True:
+            kwargs: Dict[str, Any] = {"Bucket": bucket, "MaxKeys": 1000}
+            if continuation_token:
+                kwargs["ContinuationToken"] = continuation_token
+            resp = await asyncio.to_thread(client.list_objects_v2, **kwargs)
+            for obj in resp.get("Contents", []):
+                total_bytes += obj["Size"]
+                object_count += 1
+            if object_count >= MAX_OBJECTS_TO_SCAN:
+                truncated_scan = True
+                break
+            if resp.get("IsTruncated"):
+                continuation_token = resp.get("NextContinuationToken")
+            else:
+                break
+    except Exception as e:
+        raise HTTPException(502, f"Could not compute bucket usage: {type(e).__name__}: {e}")
+
+    return {
+        "configured": True,
+        "bucket": bucket,
+        "total_bytes": total_bytes,
+        "object_count": object_count,
+        "allocated_bytes": allocated_bytes,
+        "used_pct": round(100 * total_bytes / allocated_bytes, 1) if allocated_bytes else None,
+        "truncated": truncated_scan,
+    }
+
+
 @router.get("/storage/r2/download")
 async def download_r2_object(
     key: str,
@@ -939,6 +1000,64 @@ async def set_storage_quota(
         row.value = str(payload.allocated_gb)
     else:
         db.add(SystemSetting(setting_key=SETTING_KEY_ALLOCATED_GB, value=str(payload.allocated_gb)))
+    await db.commit()
+    return {"allocated_gb": payload.allocated_gb, "source": "override"}
+
+
+# ── CLOUD STORAGE (R2) ALLOCATED QUOTA ──────────────────────────────────
+# Same override pattern as the Postgres quota above (SystemSetting row,
+# env default fallback, MIN/MAX bounds), just for the bucket instead of
+# the database — Cloud Storage has no built-in "how big is my plan"
+# concept the way a managed Postgres plan does, so this is the only
+# source of truth for what % of "your plan" the bucket is using.
+R2_ALLOCATED_BYTES = float(os.getenv("R2_ALLOCATED_GB", "10")) * 1024 ** 3
+SETTING_KEY_R2_ALLOCATED_GB = "r2_allocated_gb"
+
+
+async def _get_r2_allocated_gb_override(db: AsyncSession):
+    from models.models import SystemSetting
+    return (await db.execute(
+        select(SystemSetting).where(SystemSetting.setting_key == SETTING_KEY_R2_ALLOCATED_GB)
+    )).scalar_one_or_none()
+
+
+async def _get_r2_allocated_bytes(db: AsyncSession) -> float:
+    row = await _get_r2_allocated_gb_override(db)
+    return float(row.value) * 1024 ** 3 if row else R2_ALLOCATED_BYTES
+
+
+class R2StorageQuotaIn(BaseModel):
+    allocated_gb: float
+
+
+@router.get("/system/storage/r2-quota")
+async def get_r2_storage_quota(_: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    """Same shape as /system/database/storage-quota — allocated_gb plus
+    whether it's an explicit override or the R2_ALLOCATED_GB env default,
+    so the Admin Console panel can say which one is actually in effect."""
+    row = await _get_r2_allocated_gb_override(db)
+    if row:
+        return {"allocated_gb": float(row.value), "source": "override"}
+    return {"allocated_gb": R2_ALLOCATED_BYTES / 1024 ** 3, "source": "env_default"}
+
+
+@router.put("/system/storage/r2-quota")
+async def set_r2_storage_quota(
+    payload: R2StorageQuotaIn,
+    _: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    from models.models import SystemSetting
+    if payload.allocated_gb < MIN_ALLOCATED_GB or payload.allocated_gb > MAX_ALLOCATED_GB:
+        raise HTTPException(
+            400,
+            f"Allocated storage must be between {MIN_ALLOCATED_GB} and {MAX_ALLOCATED_GB} GB.",
+        )
+    row = await _get_r2_allocated_gb_override(db)
+    if row:
+        row.value = str(payload.allocated_gb)
+    else:
+        db.add(SystemSetting(setting_key=SETTING_KEY_R2_ALLOCATED_GB, value=str(payload.allocated_gb)))
     await db.commit()
     return {"allocated_gb": payload.allocated_gb, "source": "override"}
 
