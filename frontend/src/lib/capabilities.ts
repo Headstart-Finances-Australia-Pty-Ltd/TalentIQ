@@ -240,8 +240,8 @@ export const JOBSEEKER_MODULES: CapabilityModule[] = [
   {
     name: "ResumeCraft", route: "/app/resumecraft", icon: FileEdit, color: "#8b5cf6", emoji: "🧰", built: true,
     tagline: "Build a tailored resume & cover letter for one job",
-    desc: "Generate a resume and cover letter tailored to a specific job — pulling the matched skills, gaps, and requirements straight from a CVAnalysis analysis via Groq — or build both from scratch with a resume.io-style form.",
-    features: ["Uses CVAnalysis's strengths/gaps/requirements", "Groq-drafted resume + cover letter", "Manual editing after generation", "Build-from-scratch form + .docx download"],
+    desc: "Generate a resume and cover letter tailored to a specific job — pulling the matched skills, gaps, and requirements straight from a CVAnalysis analysis via AI — or build both from scratch with a resume.io-style form.",
+    features: ["Uses CVAnalysis's strengths/gaps/requirements", "AI-drafted resume + cover letter", "Manual editing after generation", "Build-from-scratch form + .docx download"],
   },
 ];
 
