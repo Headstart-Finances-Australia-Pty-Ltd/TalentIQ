@@ -250,6 +250,7 @@ export default function InterviewsPage({ embedded = false }: { embedded?: boolea
     interviewApi.meetingLink().then((r: any) => setDefaultMeetingLink(r.link || "")).catch(() => {});
   }, []);
   const [sendingPanelInviteId, setSendingPanelInviteId] = useState<number | null>(null);
+  const [notifyingInterviewersId, setNotifyingInterviewersId] = useState<number | null>(null);
 
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -868,7 +869,13 @@ export default function InterviewsPage({ embedded = false }: { embedded?: boolea
                       ) : r ? null : <Muted />}
                       {r && (
                         <>
-                          <MiniBadge status={r.status} onChange={(s) => handleStatusChange(r.id, s)} />
+                          <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                            <MiniBadge status={r.status} onChange={(s) => handleStatusChange(r.id, s)} />
+                            <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" style={{ padding: "1px 4px" }}
+                                    title="Delete this Resume Screening round" onClick={() => handleDelete(r.id)}>
+                              <Trash2 size={11} />
+                            </button>
+                          </div>
                           <div style={{ fontSize: 10.5, color: "var(--text-muted)", marginTop: 3 }}>
                             {r.completed_at ? new Date(r.completed_at).toLocaleDateString() : "—"}
                           </div>
@@ -886,8 +893,12 @@ export default function InterviewsPage({ embedded = false }: { embedded?: boolea
                     <td>
                       <div style={{ fontSize: 11, fontWeight: 600 }}>{phoneInterviewSummary(p)}</div>
                       {p && (
-                        <div style={{ marginTop: 3 }}>
+                        <div style={{ marginTop: 3, display: "flex", alignItems: "center", gap: 4 }}>
                           <MiniBadge status={p.status} onChange={(s) => handleStatusChange(p.id, s)} />
+                          <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" style={{ padding: "1px 4px" }}
+                                  title="Delete this Phone Interview round" onClick={() => handleDelete(p.id)}>
+                            <Trash2 size={11} />
+                          </button>
                         </div>
                       )}
                     </td>
@@ -898,8 +909,12 @@ export default function InterviewsPage({ embedded = false }: { embedded?: boolea
                     <td>
                       <div style={{ fontSize: 11, fontWeight: 600 }}>{videoInterviewSummary(v)}</div>
                       {v && (
-                        <div style={{ marginTop: 3 }}>
+                        <div style={{ marginTop: 3, display: "flex", alignItems: "center", gap: 4 }}>
                           <MiniBadge status={v.status} onChange={(s) => handleStatusChange(v.id, s)} />
+                          <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" style={{ padding: "1px 4px" }}
+                                  title="Delete this Video Interview round" onClick={() => handleDelete(v.id)}>
+                            <Trash2 size={11} />
+                          </button>
                         </div>
                       )}
                     </td>
@@ -938,6 +953,31 @@ export default function InterviewsPage({ embedded = false }: { embedded?: boolea
                               {sendingPanelInviteId === pan.id ? "Sending…" : pan.invite_sent_at ? "Resend Invite" : "Send Invite"}
                             </button>
                           )}
+                          {pan.scheduled_at && (pan.interviewers || []).some((iv: any) => iv.email) && (
+                            <button
+                              className="tiq-btn tiq-btn-ghost tiq-btn-sm"
+                              style={{ padding: "1px 6px", fontSize: 10.5, alignSelf: "flex-start" }}
+                              disabled={notifyingInterviewersId === pan.id}
+                              onClick={async () => {
+                                setNotifyingInterviewersId(pan.id);
+                                try {
+                                  const res = await interviewApi.notifyInterviewers(pan.id);
+                                  if (res.failed?.length) {
+                                    alert(`Sent to ${res.sent.length}, failed for: ${res.failed.map((f: any) => f.name).join(", ")}`);
+                                  }
+                                  await load();
+                                } catch (e: any) {
+                                  alert(e?.response?.data?.detail || "Failed to notify interviewers.");
+                                } finally {
+                                  setNotifyingInterviewersId(null);
+                                }
+                              }}
+                              title={pan.interviewers_notified_at ? `Notified ${new Date(pan.interviewers_notified_at).toLocaleString()} — click to resend` : "Email every assigned interviewer the schedule + candidate profile"}
+                            >
+                              <Mail size={10} style={{ marginRight: 3 }} />
+                              {notifyingInterviewersId === pan.id ? "Sending…" : pan.interviewers_notified_at ? "Re-notify Interviewers" : "Notify Interviewers"}
+                            </button>
+                          )}
                           {pan.panel_number != null && (
                             <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" style={{ padding: "1px 6px", fontSize: 10.5, alignSelf: "flex-start" }}
                                     onClick={() => openPanelPopup(pan.panel_id)} title="View panel members">
@@ -953,7 +993,13 @@ export default function InterviewsPage({ embedded = false }: { embedded?: boolea
                               ))}
                             </div>
                           )}
-                          <MiniBadge status={pan.status} onChange={(s) => handleStatusChange(pan.id, s)} />
+                          <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                            <MiniBadge status={pan.status} onChange={(s) => handleStatusChange(pan.id, s)} />
+                            <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" style={{ padding: "1px 4px" }}
+                                    title="Delete this Panel Interview round" onClick={() => handleDelete(pan.id)}>
+                              <Trash2 size={11} />
+                            </button>
+                          </div>
                         </div>
                       )}
                     </td>

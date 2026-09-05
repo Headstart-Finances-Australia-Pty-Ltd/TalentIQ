@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { api } from "../lib/api";
-import { Database, Table, ChevronRight, Save, Trash2, Plus, Search, Play, RefreshCw, ChevronLeft, ChevronDown, ChevronUp, X } from "lucide-react";
+import { Database, Table, ChevronRight, Save, Trash2, Plus, Search, Play, RefreshCw, ChevronLeft, ChevronDown, ChevronUp, X, Cloud as CloudIcon, Folder as FolderIcon, File as FileIcon, Download } from "lucide-react";
 import DataTable from "../components/DataTable";
 
 const adminApi = {
@@ -19,7 +19,19 @@ const adminApi = {
     api.post("/api/admin/requisitions/force-delete-batch", { ids, confirm: "force delete requisitions" }).then(r => r.data),
   forceDeleteCandidates: (ids: number[]) =>
     api.post("/api/admin/candidates/force-delete-batch", { ids, confirm: "force delete candidates" }).then(r => r.data),
+  // Generic version of the two above, for any OTHER tiq_* table (e.g.
+  // tiq_applications) whose rows can't be plain-deleted once something
+  // still references them — see routers/admin.py's
+  // force_delete_table_rows / _generic_cascade_delete.
+  forceDeleteTableRows: (t: string, ids: number[]) =>
+    api.post(`/api/admin/tables/${t}/force-delete-batch`, { ids, confirm: `force delete ${t}` }).then(r => r.data),
   moduleToggles: () => api.get("/api/admin/module-toggles").then(r => r.data as Record<string, boolean>),
+  // Cloud storage (Cloudflare R2 / any S3-compatible bucket) — separate
+  // from everything above, which is all Postgres table/row access.
+  r2Browse: (prefix: string, continuationToken?: string | null) =>
+    api.get("/api/admin/storage/r2/browse", { params: { prefix, continuation_token: continuationToken || undefined } }).then(r => r.data),
+  r2DownloadUrl: (key: string) => api.get("/api/admin/storage/r2/download", { params: { key } }).then(r => r.data.url as string),
+  r2Delete: (key: string) => api.delete("/api/admin/storage/r2/object", { params: { key } }).then(r => r.data),
 };
 
 // Must match the route key AdminConsolePage.tsx's Modules Management >
@@ -48,6 +60,7 @@ export default function FileManagerPage({ embedded = false }: { embedded?: boole
   const [sqlResult, setSqlResult] = useState<any>(null);
   const [sqlError, setSqlError] = useState("");
   const [tab, setTab] = useState<"browser"|"sql">("browser");
+  const [mainTab, setMainTab] = useState<"database"|"storage">("database");
   const [msg, setMsg] = useState("");
 
   const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 2500); };
@@ -92,14 +105,18 @@ export default function FileManagerPage({ embedded = false }: { embedded?: boole
     onError: (e: any) => { flash(`❌ Bulk delete failed: ${e.response?.data?.detail || e.message}`); },
   });
 
-  // Force-delete (cascade) — only meaningful for tiq_requisitions and
-  // tiq_candidates, where a plain DELETE fails/is blocked once real
+  // Force-delete (cascade) — a plain DELETE fails/is blocked once real
   // hiring activity (interviews, pipeline entries, offers, etc.) is
-  // attached. See routers/admin.py's force-delete-batch endpoints —
-  // this permanently removes that downstream data too, no undo.
+  // still attached. Requisitions/Candidates use their own dedicated,
+  // hand-written cascades (routers/admin.py); every other table falls
+  // through to the generic FK-discovery cascade (force_delete_table_rows)
+  // so this works for tiq_applications, tiq_interviews, etc. too, not
+  // just the two originally covered tables.
   const forceDeleteMut = useMutation({
     mutationFn: (ids: number[]) =>
-      activeTable === "tiq_requisitions" ? adminApi.forceDeleteRequisitions(ids) : adminApi.forceDeleteCandidates(ids),
+      activeTable === "tiq_requisitions" ? adminApi.forceDeleteRequisitions(ids)
+      : activeTable === "tiq_candidates" ? adminApi.forceDeleteCandidates(ids)
+      : adminApi.forceDeleteTableRows(activeTable!, ids),
     onSuccess: (data, ids) => {
       refetchRows();
       setSelectedRowIds([]);
@@ -134,12 +151,25 @@ export default function FileManagerPage({ embedded = false }: { embedded?: boole
           <h1 className="tiq-page-title" style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <Database size={22} color="var(--teal-500)" /> File & Database Manager
           </h1>
-          <p className="tiq-page-sub">Browse, edit and manage all TalentIQ Solution database tables</p>
+          <p className="tiq-page-sub">Browse, edit and manage TalentIQ's database tables and cloud-stored files</p>
         </div>
       )}
 
       {msg && <div className="tiq-alert tiq-alert-success" style={{ marginBottom: 16 }}>{msg}</div>}
 
+      <div className="tiq-tabs" style={{ marginBottom: 20 }}>
+        <button className={`tiq-tab${mainTab === "database" ? " active" : ""}`} onClick={() => setMainTab("database")}>
+          <Database size={13} style={{ display: "inline", marginRight: 6 }} />Database
+        </button>
+        <button className={`tiq-tab${mainTab === "storage" ? " active" : ""}`} onClick={() => setMainTab("storage")}>
+          <CloudIcon size={13} style={{ display: "inline", marginRight: 6 }} />Cloud Storage (R2)
+        </button>
+      </div>
+
+      {mainTab === "storage" && <CloudStoragePanel />}
+
+      {mainTab === "database" && (
+      <>
       {/* DATABASE STORAGE USAGE — total used vs. the allocated plan
           quota, refreshed every 30s alongside the table list. */}
       {storage && (
@@ -274,17 +304,18 @@ export default function FileManagerPage({ embedded = false }: { embedded?: boole
                           <Trash2 size={12} /> Delete {selectedRowIds.length} selected
                         </button>
                       )}
-                      {forceDeleteEnabled && selectedRowIds.length > 0 &&
-                        (activeTable === "tiq_requisitions" || activeTable === "tiq_candidates") && (
+                      {forceDeleteEnabled && selectedRowIds.length > 0 && !!activeTable && (
                         <button className="tiq-btn tiq-btn-sm" style={{ background: "#b91c1c", color: "#fff", border: "none" }}
                           disabled={forceDeleteMut.isPending}
                           onClick={() => {
-                            const label = activeTable === "tiq_requisitions" ? "requisition" : "candidate";
+                            const label = activeTable === "tiq_requisitions" ? "requisition"
+                              : activeTable === "tiq_candidates" ? "candidate"
+                              : `${activeTable} row`;
                             const ok = confirm(
                               `Force delete ${selectedRowIds.length} ${label}(s)?\n\n` +
-                              `This ALSO permanently deletes every linked interview, pipeline entry, offer, ` +
-                              `placement, invoice, timesheet, and communication record — no undo. ` +
-                              `Only use this on test data.`
+                              `This ALSO permanently deletes every row in other tables that still references ` +
+                              `these — interviews, pipeline entries, offers, placements, invoices, timesheets, ` +
+                              `communication records, and so on — no undo. Only use this on test data.`
                             );
                             if (ok) forceDeleteMut.mutate(selectedRowIds as number[]);
                           }}>
@@ -386,6 +417,167 @@ export default function FileManagerPage({ embedded = false }: { embedded?: boole
           )}
         </div>
       )}
+      </>
+      )}
+    </div>
+  );
+}
+
+// ── CLOUD STORAGE (Cloudflare R2 / S3-compatible bucket) ───────────────
+// Fully separate data source from everything above: lists actual OBJECTS
+// in the configured bucket (see utils/storage.py + Admin Console > API
+// Keys), not Postgres rows. Folder-by-folder browsing mirrors the
+// account-folder/kind/sub_id key layout every upload uses.
+
+function formatDate(iso: string | null) {
+  if (!iso) return "—";
+  return new Date(iso).toLocaleString();
+}
+
+function CloudStoragePanel() {
+  const [prefix, setPrefix] = useState("");
+  const [tokenStack, setTokenStack] = useState<Array<string | null>>([null]);
+  const [msg, setMsg] = useState("");
+  const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(""), 2500); };
+
+  const currentToken = tokenStack[tokenStack.length - 1];
+
+  const { data, isLoading, refetch } = useQuery({
+    queryKey: ["r2-browse", prefix, currentToken],
+    queryFn: () => adminApi.r2Browse(prefix, currentToken || undefined),
+  });
+
+  const deleteMut = useMutation({
+    mutationFn: (key: string) => adminApi.r2Delete(key),
+    onSuccess: (_d, key) => { refetch(); flash(`Deleted ${key.split("/").pop()}.`); },
+    onError: (e: any) => flash(`❌ Delete failed: ${e.response?.data?.detail || e.message}`),
+  });
+
+  const openFile = async (key: string) => {
+    try {
+      const url = await adminApi.r2DownloadUrl(key);
+      window.open(url, "_blank");
+    } catch (e: any) {
+      flash(`❌ Could not open file: ${e.response?.data?.detail || e.message}`);
+    }
+  };
+
+  const navigateTo = (newPrefix: string) => { setPrefix(newPrefix); setTokenStack([null]); };
+  const goNextPage = () => { if (data?.nextContinuationToken) setTokenStack(s => [...s, data.nextContinuationToken]); };
+  const goPrevPage = () => { setTokenStack(s => s.length > 1 ? s.slice(0, -1) : s); };
+
+  const crumbs = prefix ? prefix.replace(/\/$/, "").split("/") : [];
+
+  if (!isLoading && data && !data.configured) {
+    return (
+      <div className="tiq-alert tiq-alert-info">
+        Cloud storage isn't configured yet. Add your Cloudflare R2 (or any S3-compatible) bucket credentials
+        under <strong>Admin Console → API Keys</strong> (access key, secret key, bucket name, and endpoint URL) —
+        this tab will list its contents once that's saved.
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      {msg && <div className="tiq-alert tiq-alert-success" style={{ marginBottom: 16 }}>{msg}</div>}
+
+      {data?.configured && (
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: 8 }}>
+          <div style={{ fontSize: 13, color: "var(--text-muted)" }}>
+            Bucket: <strong style={{ color: "var(--text-primary)" }}>{data.bucket}</strong>
+          </div>
+          <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" onClick={() => refetch()}>
+            <RefreshCw size={12} /> Refresh
+          </button>
+        </div>
+      )}
+
+      {/* BREADCRUMB */}
+      <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 4, marginBottom: 12, fontSize: 13 }}>
+        <span style={{ cursor: "pointer", color: "var(--teal-500)", fontWeight: prefix === "" ? 700 : 400 }} onClick={() => navigateTo("")}>
+          Bucket Root
+        </span>
+        {crumbs.map((c, i) => {
+          const crumbPrefix = crumbs.slice(0, i + 1).join("/") + "/";
+          return (
+            <span key={i} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+              <ChevronRight size={12} color="var(--text-muted)" />
+              <span
+                style={{ cursor: "pointer", color: i === crumbs.length - 1 ? "var(--text-primary)" : "var(--teal-500)", fontWeight: i === crumbs.length - 1 ? 700 : 400 }}
+                onClick={() => navigateTo(crumbPrefix)}
+              >
+                {c}
+              </span>
+            </span>
+          );
+        })}
+      </div>
+
+      <div className="tiq-card" style={{ padding: 0 }}>
+        {isLoading ? (
+          <div className="tiq-spinner-wrap"><div className="tiq-spinner" /></div>
+        ) : (
+          <>
+            {(data?.folders?.length ?? 0) === 0 && (data?.files?.length ?? 0) === 0 ? (
+              <div className="tiq-empty">
+                <CloudIcon size={40} />
+                <div className="tiq-empty-title">Empty</div>
+                <div>No folders or files at this level of the bucket.</div>
+              </div>
+            ) : (
+              <table className="tiq-table">
+                <thead>
+                  <tr><th>Name</th><th>Size</th><th>Last Modified</th><th></th></tr>
+                </thead>
+                <tbody>
+                  {(data?.folders || []).map((f: string) => {
+                    const label = f.replace(prefix, "").replace(/\/$/, "");
+                    return (
+                      <tr key={f} style={{ cursor: "pointer" }} onClick={() => navigateTo(f)}>
+                        <td style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 600 }}>
+                          <FolderIcon size={15} color="var(--teal-500)" /> {label || f}
+                        </td>
+                        <td>—</td>
+                        <td>—</td>
+                        <td><ChevronRight size={14} color="var(--text-muted)" /></td>
+                      </tr>
+                    );
+                  })}
+                  {(data?.files || []).map((file: any) => {
+                    const label = file.key.replace(prefix, "");
+                    return (
+                      <tr key={file.key}>
+                        <td style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <FileIcon size={15} color="var(--text-muted)" /> {label}
+                        </td>
+                        <td>{formatBytes(file.sizeBytes)}</td>
+                        <td>{formatDate(file.lastModified)}</td>
+                        <td style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                          <Download size={15} style={{ cursor: "pointer" }} onClick={() => openFile(file.key)} />
+                          <Trash2 size={15} style={{ cursor: "pointer" }} color="var(--rose-500, #e11d48)"
+                            onClick={() => { if (confirm(`Permanently delete "${label}" from the bucket?`)) deleteMut.mutate(file.key); }} />
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </>
+        )}
+
+        {(tokenStack.length > 1 || data?.isTruncated) && (
+          <div style={{ padding: "12px 16px", borderTop: "1px solid var(--border)", display: "flex", justifyContent: "flex-end", gap: 8 }}>
+            <button className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={goPrevPage} disabled={tokenStack.length <= 1}>
+              <ChevronLeft size={13} /> Prev
+            </button>
+            <button className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={goNextPage} disabled={!data?.isTruncated}>
+              Next <ChevronRight size={13} />
+            </button>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

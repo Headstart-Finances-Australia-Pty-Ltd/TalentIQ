@@ -1,10 +1,10 @@
 import { useState, useRef, useEffect } from "react";
-import { } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   BrainCircuit, FileText, Target, CheckCircle, AlertTriangle,
   TrendingUp, Upload, X, Sparkles, ChevronDown, ChevronUp,
-  User, MapPin, Briefcase, List, Link2,
+  User, MapPin, Briefcase, List, Link2, FileEdit,
 } from "lucide-react";
 import { api, cvintelApi } from "../lib/api";
 import { useAuth } from "../hooks/useAuth";
@@ -538,6 +538,7 @@ export default function CVAnalysisPage() {
 
   const [formError, setFormError] = useState("");
   const qc = useQueryClient();
+  const navigate = useNavigate();
 
   // ── Dynamic weighting engine state ──────────────────────────────────
   const [weights, setWeights] = useState<ScoringWeights>(DEFAULT_SCORING_WEIGHTS);
@@ -596,11 +597,18 @@ export default function CVAnalysisPage() {
       // result so it's all captured atomically in the mutation cache — this
       // is what lets it survive the user navigating to another agent page
       // and back, since it no longer depends on local component state.
-      const rText = resumeText || extractedResumeText;
+      // rawText comes back from the backend itself (res.data.resumeText/
+      // jdText) rather than only from local `resumeText`/`jdText` state,
+      // since those are empty whenever the person uploaded a FILE instead
+      // of pasting text — the backend is the only side that actually saw
+      // the extracted PDF/DOCX text, so it's the only reliable source for
+      // "what was really analysed," which ResumeCraft later depends on.
+      const rText = res.data.resumeText || resumeText || extractedResumeText;
+      const jText = res.data.jdText || jdText;
       return {
         ...res.data,
-        candidateInfo: parseCandidateInfo(rText, resumeFile?.name || "Resume"),
-        jdInfo: parseJDInfo(jdText, jdFile?.name || "Job Description"),
+        candidateInfo: { ...parseCandidateInfo(rText, resumeFile?.name || "Resume"), rawText: rText },
+        jdInfo: { ...parseJDInfo(jText, jdFile?.name || "Job Description"), rawText: jText },
         sourceName: resumeFile?.name || "Resume",
       };
     },
@@ -666,9 +674,12 @@ export default function CVAnalysisPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [weights, disqualifiers]);
 
-  // Save each newly-completed analysis to the backend. Driven off the
-  // shared cache (not the mutation's own onSuccess) so it reliably fires
-  // even if this page was unmounted when the request actually finished.
+  // Set to the ApplicationDocument-linkable id (from POST /history's
+  // response) the moment a fresh analysis is auto-saved, so the
+  // "Create Resume & Cover Letter" button below can jump straight into
+  // ResumeCraft without waiting on the history list to refetch or
+  // needing to match the live result against it by content.
+  const [lastSavedId, setLastSavedId] = useState<number | null>(null);
   const lastSavedSubmittedAt = useRef<number | null>(null);
   useEffect(() => {
     if (genState.status === "success" && genState.data && genState.submittedAt
@@ -682,20 +693,32 @@ export default function CVAnalysisPage() {
         result: bareResult,
         candidate_info: candidateInfo || {},
         jd_info: jdInfo || {},
-      }).then(() => {
+      }).then((saved: any) => {
+        setLastSavedId(saved?.id ?? null);
         qc.invalidateQueries({ queryKey: ["cvintel-history"] });
       }).catch(() => { /* non-fatal — the on-screen result is still shown */ });
       setViewingHistId(null);
     }
   }, [genState.status, genState.submittedAt, genState.data, qc]);
 
+  // Guards against the analysis firing twice from a fast double-click (or
+  // any double-fired click event): genState's "pending" status comes from
+  // the shared mutation cache via useMutationState, which only reflects
+  // in this component's disabled-button state on the NEXT render — a
+  // synchronous ref check here closes that one-frame gap without waiting
+  // on React's render cycle at all.
+  const submittingRef = useRef(false);
+
   const runAnalyse = () => {
+    if (submittingRef.current || genState.status === "pending") return;
     setFormError("");
     if (!jdText.trim() && !jdFile) { setFormError("Please provide a job description."); return; }
     if (!resumeText.trim() && !resumeFile) { setFormError("Please provide your resume."); return; }
+    submittingRef.current = true;
     setViewingHistId(null);
     setLiveResultDismissed(false);
-    analyseMut.mutate();
+    setLastSavedId(null);
+    analyseMut.mutate(undefined, { onSettled: () => { submittingRef.current = false; } });
   };
 
   const resumeReady = !!(resumeFile || resumeText.trim());
@@ -841,6 +864,37 @@ export default function CVAnalysisPage() {
       {/* ── Results ── */}
       {result && (
         <div>
+          {(() => {
+            const linkedCvId = viewingHistId ?? lastSavedId;
+            if (!linkedCvId) return null;
+            const roleTitle = result.jdRequirements?.roleTitle || jdInfo?.role || "";
+            const company = result.jdRequirements?.company || "";
+            const params = new URLSearchParams({ cvId: String(linkedCvId) });
+            if (roleTitle) params.set("jobTitle", roleTitle);
+            if (company) params.set("company", company);
+            return (
+              <div className="tiq-card tiq-mb-4" style={{
+                display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12,
+                background: "rgba(139,92,246,.06)", border: "1px solid rgba(139,92,246,.25)",
+              }}>
+                <div>
+                  <div style={{ fontWeight: 700, fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}>
+                    <FileEdit size={15} color="var(--violet-500)" /> Ready to apply?
+                  </div>
+                  <div style={{ fontSize: 12.5, color: "var(--text-secondary)", marginTop: 2 }}>
+                    Generate a resume &amp; cover letter tailored to this role, using the matched skills and gaps above.
+                  </div>
+                </div>
+                <button
+                  className="tiq-btn tiq-btn-primary tiq-btn-sm"
+                  onClick={() => navigate(`/app/resumecraft?${params.toString()}`)}
+                >
+                  <Sparkles size={14} /> Create Tailored Resume & Cover Letter
+                </button>
+              </div>
+            );
+          })()}
+
           {isAdmin && !result.aiPowered && (
             <div className="tiq-alert tiq-mb-4" style={{ display: "flex", alignItems: "center", gap: 8, background: "rgba(239,68,68,.08)", border: "1px solid rgba(239,68,68,.3)", color: "#ef4444" }}>
               <AlertTriangle size={14} />

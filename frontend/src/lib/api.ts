@@ -190,6 +190,11 @@ export const interviewApi = {
   // the Calendly self-schedule flow above.
   sendFixedInvite: (id: number, data?: { to_email?: string; subject?: string; body_html?: string }) =>
     api.post(`/api/interviews/interviews/${id}/send-invite`, data || {}).then((r) => r.data),
+  // Interview Panel's "Notify Interviewers" — emails every assigned
+  // interviewer the schedule + a short candidate-profile summary,
+  // separate from sendFixedInvite above which emails the CANDIDATE.
+  notifyInterviewers: (id: number, data?: { subject?: string; body_html?: string }) =>
+    api.post(`/api/interviews/interviews/${id}/notify-interviewers`, data || {}).then((r) => r.data),
   // Interview Decision's bulk "Send Rejection Email" — one individually
   // addressed email per round's candidate, mirroring jobLensApi's
   // sendRejectionEmails in JobLensPage.tsx.
@@ -411,10 +416,14 @@ export const communicationApi = {
   updateTemplate: (id: number, data: any) => api.put(`/api/communication/templates/${id}`, data).then((r) => r.data),
   deleteTemplate: (id: number) => api.delete(`/api/communication/templates/${id}`).then((r) => r.data),
 
-  getTimeline: (params: { candidate_id?: number; client_id?: number; vendor_id?: number; requisition_id?: number }) =>
+  getTimeline: (params: { candidate_id?: number; joblens_candidate_id?: number; client_id?: number; vendor_id?: number; requisition_id?: number }) =>
     api.get("/api/communication/timeline", { params }).then((r) => r.data),
   logEntry: (data: any) => api.post("/api/communication/log", data).then((r) => r.data),
   sendEmail: (data: any) => api.post("/api/communication/send-email", data).then((r) => r.data),
+
+  // Live "presentation table": every email actually sent, grouped by
+  // which module/action sent it — see router.py's get_email_activity_by_module.
+  getEmailActivityByModule: () => api.get("/api/communication/by-module").then((r) => r.data),
 
   listAutomationRules: () => api.get("/api/communication/automation-rules").then((r) => r.data),
   createAutomationRule: (data: any) => api.post("/api/communication/automation-rules", data).then((r) => r.data),
@@ -443,6 +452,15 @@ export const commercialApi = {
   deleteTimesheet: (id: number) => api.delete(`/api/commercials/timesheets/${id}`).then((r) => r.data),
   timesheetsToInvoice: (timesheet_ids: number[], description = "") =>
     api.post("/api/commercials/timesheets/to-invoice", { timesheet_ids, description }).then((r) => r.data),
+
+  // External Interviewer Payments — auto-generated whenever a Panel
+  // Interview round with an external, rated interviewer is marked
+  // Completed (see capabilities/interview/service.py's
+  // generate_interviewer_payments). Nothing here creates a row directly.
+  listInterviewerPayments: (status?: string) =>
+    api.get("/api/commercials/interviewer-payments", { params: status ? { status } : {} }).then((r) => r.data),
+  updateInterviewerPaymentStatus: (id: number, data: { status: string; paid_date?: string; notes?: string }) =>
+    api.post(`/api/commercials/interviewer-payments/${id}/status`, data).then((r) => r.data),
 };
 
 // ── Capability: Governance (Phase 9) ──
@@ -648,6 +666,22 @@ export const billingApi = {
   adminCreatePlan: (data: any) => api.post("/api/billing/admin/plans", data).then((r) => r.data),
   adminUpdatePlan: (id: number, data: any) => api.put(`/api/billing/admin/plans/${id}`, data).then((r) => r.data),
   adminDeletePlan: (id: number) => api.delete(`/api/billing/admin/plans/${id}`).then((r) => r.data),
+};
+
+// ResumeCraft — tailored resume + cover letter per job application,
+// generated from CVIntel's match analysis (or built from scratch via a
+// resume.io-style form), editable and downloadable as .docx.
+export const resumecraftApi = {
+  generate: (data: any) => api.post("/api/resumecraft/generate", data, { timeout: 120_000 }).then(r => r.data),
+  createManual: (data: any) => api.post("/api/resumecraft/manual", data).then(r => r.data),
+  list: () => api.get("/api/resumecraft/documents").then(r => r.data),
+  get: (id: number) => api.get(`/api/resumecraft/documents/${id}`).then(r => r.data),
+  update: (id: number, data: any) => api.put(`/api/resumecraft/documents/${id}`, data).then(r => r.data),
+  delete: (id: number) => api.delete(`/api/resumecraft/documents/${id}`).then(r => r.data),
+  downloadResume: (id: number) =>
+    api.get(`/api/resumecraft/documents/${id}/download/resume`, { responseType: "blob" }).then(r => r.data),
+  downloadCoverLetter: (id: number) =>
+    api.get(`/api/resumecraft/documents/${id}/download/cover-letter`, { responseType: "blob" }).then(r => r.data),
 };
 
 // Job Ads — create a job posting once, push to LinkedIn/Seek.

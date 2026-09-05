@@ -8,6 +8,17 @@ set "BACKEND=%ROOT%\backend"
 set "FRONTEND=%ROOT%\frontend"
 set "VENV=%BACKEND%\venv"
 
+:: ── Offline DATABASE_URL (optional) ────────────────────────────────────
+:: Paste your Neon/Postgres connection string between the quotes below
+:: to skip the interactive prompt entirely — useful if you re-extract
+:: this project into a fresh folder often and don't want to type it in
+:: (or set a Windows environment variable) every single time. Leave it
+:: empty ("") to keep the normal prompt-once-then-remember-it behavior.
+:: This only matters on a first run — once backend\.env exists, this
+:: line is never read again, so it's safe to leave your URL sitting
+:: here for next time you wipe/re-extract the folder.
+set "OFFLINE_DATABASE_URL="
+
 if not exist "C:\Temp" mkdir "C:\Temp"
 
 cls
@@ -103,8 +114,18 @@ if exist "%BACKEND%\.env" (
     echo  extraction of this project into a new folder won't ask for those
     echo  again as long as DATABASE_URL below points at the same database.
     echo.
-    set "DBURL="
-    set /p "DBURL=  Paste your Neon (or other Postgres) DATABASE_URL: "
+    set "DBURL=%OFFLINE_DATABASE_URL%"
+    if not "!DBURL!"=="" (
+        echo  Using the DATABASE_URL pasted directly into app.cmd — no prompt needed.
+    ) else (
+        set "DBURL=%DATABASE_URL%"
+        if not "!DBURL!"=="" (
+            echo  Found DATABASE_URL already set as a Windows environment variable —
+            echo  using that automatically, no prompt needed.
+        ) else (
+            set /p "DBURL=  Paste your Neon (or other Postgres) DATABASE_URL: "
+        )
+    )
     if "!DBURL!"=="" (
         echo  ERROR: DATABASE_URL is required — the app will not start without it.
         echo  Re-run app.cmd once you have a connection string.

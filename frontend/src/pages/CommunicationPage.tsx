@@ -19,7 +19,7 @@ const TRIGGER_EVENTS = [
 const CHANNELS = ["Note", "Call", "Email", "SMS"];
 
 export default function CommunicationPage() {
-  const [tab, setTab] = useState<"workbench" | "templates" | "timeline" | "automation">("workbench");
+  const [tab, setTab] = useState<"workbench" | "activity" | "templates" | "timeline" | "automation">("workbench");
 
   return (
     <div className="tiq-content">
@@ -31,6 +31,9 @@ export default function CommunicationPage() {
       <div style={{ display: "flex", gap: 8, marginTop: 16, marginBottom: 16 }}>
         <button className={`tiq-btn tiq-btn-sm ${tab === "workbench" ? "tiq-btn-primary" : "tiq-btn-outline"}`} onClick={() => setTab("workbench")}>
           <LayoutDashboard size={13} /> Workbench
+        </button>
+        <button className={`tiq-btn tiq-btn-sm ${tab === "activity" ? "tiq-btn-primary" : "tiq-btn-outline"}`} onClick={() => setTab("activity")}>
+          <Send size={13} /> Email Activity
         </button>
         <button className={`tiq-btn tiq-btn-sm ${tab === "templates" ? "tiq-btn-primary" : "tiq-btn-outline"}`} onClick={() => setTab("templates")}>
           <Mail size={13} /> Templates
@@ -44,6 +47,7 @@ export default function CommunicationPage() {
       </div>
 
       {tab === "workbench" && <WorkbenchTab />}
+      {tab === "activity" && <EmailActivityTab />}
       {tab === "templates" && <TemplatesTab />}
       {tab === "timeline" && <TimelineTab />}
       {tab === "automation" && <AutomationTab />}
@@ -122,6 +126,88 @@ function Row({ title, sub }: { title: string; sub: string }) {
 }
 function Empty({ text }: { text: string }) {
   return <div style={{ fontSize: 12, color: "var(--text-muted)" }}>{text}</div>;
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// EMAIL ACTIVITY TAB — the "presentation table": every email TalentIQ has
+// actually sent, grouped by which module/action sent it. Pulled live from
+// GET /api/communication/by-module (tiq_communication_log), so this always
+// reflects real current data — never a hardcoded or cached snapshot.
+// ══════════════════════════════════════════════════════════════════════════
+
+function EmailActivityTab() {
+  const [data, setData] = useState<{ modules: any[]; grand_total: number } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  const load = async () => {
+    setLoading(true);
+    setError("");
+    try {
+      setData(await communicationApi.getEmailActivityByModule());
+    } catch (e: any) {
+      setError(e?.response?.data?.detail || "Failed to load email activity.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { load(); }, []);
+
+  if (loading) return <div className="tiq-spinner-wrap"><div className="tiq-spinner" /></div>;
+  if (error) return <div style={{ padding: 20, color: "var(--rose-500)", fontSize: 12 }}>{error}</div>;
+  if (!data) return null;
+
+  return (
+    <div className="tiq-card" style={{ padding: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+        <div style={{ fontWeight: 700, fontSize: 13, display: "flex", alignItems: "center", gap: 8 }}>
+          <Send size={15} /> Email Activity by Module
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <span className="tiq-badge tiq-badge-slate">{data.grand_total} total</span>
+          <button className="tiq-btn tiq-btn-outline tiq-btn-sm" onClick={load}>Refresh</button>
+        </div>
+      </div>
+      <p style={{ fontSize: 11.5, color: "var(--text-muted)", marginBottom: 14 }}>
+        Every real email send across the platform — Video Interview invites, Phone/Interview Scheduling
+        Calendly links, Screening/Interview Decision rejection emails, decision-approval requests, and
+        Comms' own automation rules and direct sends — computed live from the unified communication log.
+      </p>
+      {data.modules.length === 0 ? (
+        <Empty text="No emails logged yet." />
+      ) : (
+        <div className="tiq-table-wrap">
+          <table className="tiq-table">
+            <thead>
+              <tr>
+                <th>Module / Action</th>
+                <th style={{ width: 90 }}>Sent</th>
+                <th style={{ width: 90 }}>Failed</th>
+                <th style={{ width: 90 }}>Other</th>
+                <th style={{ width: 90 }}>Total</th>
+                <th style={{ width: 170 }}>Last Sent</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.modules.map((m: any) => (
+                <tr key={m.module}>
+                  <td style={{ fontWeight: 600, fontSize: 12.5 }}>{m.module}</td>
+                  <td style={{ color: "#10b981", fontWeight: 700 }}>{m.sent}</td>
+                  <td style={{ color: m.failed > 0 ? "#ef4444" : "var(--text-muted)", fontWeight: m.failed > 0 ? 700 : 400 }}>{m.failed}</td>
+                  <td style={{ color: "var(--text-muted)" }}>{m.other}</td>
+                  <td style={{ fontWeight: 700 }}>{m.total}</td>
+                  <td style={{ fontSize: 11.5, color: "var(--text-muted)" }}>
+                    {m.last_sent_at ? new Date(m.last_sent_at).toLocaleString() : "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
 }
 
 // ══════════════════════════════════════════════════════════════════════════

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Gavel, Search, X, Mail, Calendar, Plus, Paperclip, Download } from "lucide-react";
+import { Gavel, Search, X, Mail, Calendar, Plus, Paperclip, Download, Trash2 } from "lucide-react";
 import { interviewApi } from "../lib/api";
 import { ResizableFilterHeader } from "../components/ResizableFilterHeader";
 
@@ -589,6 +589,22 @@ function RoundsPopup({ group, onClose, onChanged }: { group: any; onClose: () =>
       setSavingId(null);
     }
   };
+  const deleteRound = async (round: any) => {
+    if (!confirm(`Delete this ${round.interview_type || "interview"} round? This cannot be undone.`)) return;
+    setSavingId(round.id);
+    try {
+      await interviewApi.remove(round.id);
+      await onChanged();
+      // If that was the last remaining round for this candidate, the
+      // group no longer exists after refresh — close the popup instead
+      // of leaving it open on an empty list with nothing left to manage.
+      if (group.rounds.length <= 1) onClose();
+    } catch (e: any) {
+      setError(e?.response?.data?.detail || "Failed to delete this round.");
+    } finally {
+      setSavingId(null);
+    }
+  };
   const addRound = async () => {
     setAdding(true);
     setError("");
@@ -635,6 +651,10 @@ function RoundsPopup({ group, onClose, onChanged }: { group: any; onClose: () =>
                   {ROUND_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
                 </select>
                 {r.round_number > 1 && <span style={{ fontSize: 11, color: "var(--text-muted)" }}>#{r.round_number}</span>}
+                <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" style={{ padding: "2px 6px", color: "#ef4444" }}
+                        disabled={savingId === r.id} title="Delete this round" onClick={() => deleteRound(r)}>
+                  <Trash2 size={13} />
+                </button>
               </div>
               <div style={{ display: "flex", gap: 8 }}>
                 <select value={r.status} disabled={savingId === r.id} onChange={(e) => updateRoundStatus(r, e.target.value)}

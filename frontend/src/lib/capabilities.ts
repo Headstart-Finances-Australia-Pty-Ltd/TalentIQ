@@ -237,6 +237,12 @@ export const JOBSEEKER_MODULES: CapabilityModule[] = [
     desc: "Score your own resume against a job description instantly. Get matched skills, missing skills, and AI-powered improvement suggestions.",
     features: ["Instant ATS keyword scoring", "Matched vs missing skills", "AI improvement suggestions", "ATS formatting checker"],
   },
+  {
+    name: "ResumeCraft", route: "/app/resumecraft", icon: FileEdit, color: "#8b5cf6", emoji: "🧰", built: true,
+    tagline: "Build a tailored resume & cover letter for one job",
+    desc: "Generate a resume and cover letter tailored to a specific job — pulling the matched skills, gaps, and requirements straight from a CVAnalysis analysis via Groq — or build both from scratch with a resume.io-style form.",
+    features: ["Uses CVAnalysis's strengths/gaps/requirements", "Groq-drafted resume + cover letter", "Manual editing after generation", "Build-from-scratch form + .docx download"],
+  },
 ];
 
 export function findModuleByRoute(pathname: string): { capability: Capability; module: CapabilityModule } | null {

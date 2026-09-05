@@ -14,6 +14,7 @@ import JobHuntPage    from "./pages/JobHuntPage";
 import JobIntelPage   from "./pages/JobIntelPage";
 import LinkLensPage   from "./pages/LinkLensPage";
 import CVIntelPage    from "./pages/CVIntelPage";
+import ResumeCraftPage from "./pages/ResumeCraftPage";
 import ScreeningPage       from "./pages/ScreeningPage";
 import JobAdsPage     from "./pages/JobAdsPage";
 import PublicInterviewPage from "./pages/PublicInterviewPage";
@@ -89,6 +90,7 @@ export default function App() {
               <Route path="jobintel"   element={<JobIntelPage />} />
               <Route path="linklens"   element={<LinkLensPage />} />
               <Route path="cvintel"    element={<CVIntelPage />} />
+              <Route path="resumecraft" element={<ResumeCraftPage />} />
               <Route path="jdcreator"  element={<JobAdsPage />} />
               <Route path="jobads"    element={<JobAdsPage />} />
               {/* Resume Screening/Phone Interview/Video Interview/Screening

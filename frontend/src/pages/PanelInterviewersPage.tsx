@@ -3,10 +3,10 @@ import { Plus, X, Trash2, Pencil, Users, Search } from "lucide-react";
 import { interviewApi } from "../lib/api";
 import { ResizableFilterHeader } from "../components/ResizableFilterHeader";
 
-const emptyForm = { name: "", expertise_area: "", company: "", interviewer_type: "Internal", phone: "", email: "", notes: "" };
+const emptyForm = { name: "", expertise_area: "", company: "", interviewer_type: "Internal", phone: "", email: "", hourly_rate: "", notes: "" };
 
 const PANEL_INTERVIEWER_COL_WIDTHS: Record<string, number> = {
-  name: 170, expertise_area: 170, company: 150, type: 100, phone: 130, email: 180, assignment: 200,
+  name: 170, expertise_area: 170, company: 150, type: 100, rate: 90, phone: 130, email: 180, assignment: 200,
 };
 
 // Raw value behind each column — used for the header filter dropdowns,
@@ -18,6 +18,7 @@ function getInterviewerColValue(p: any, key: string): string {
     case "expertise_area": return p.expertise_area || "";
     case "company": return p.company || "";
     case "type": return p.interviewer_type || "Internal";
+    case "rate": return p.hourly_rate != null ? String(p.hourly_rate) : "";
     case "phone": return p.phone || "";
     case "email": return p.email || "";
     case "assignment": return (p.assignments || []).length === 0
@@ -26,7 +27,7 @@ function getInterviewerColValue(p: any, key: string): string {
     default: return "";
   }
 }
-const INTERVIEWER_COLS = ["name", "expertise_area", "company", "type", "phone", "email", "assignment"];
+const INTERVIEWER_COLS = ["name", "expertise_area", "company", "type", "rate", "phone", "email", "assignment"];
 
 // Panel Interviewers — a real directory of subject-matter experts who sit
 // on Panel Interview rounds, entered once and reused (see
@@ -100,7 +101,7 @@ export default function PanelInterviewersPage({ embedded = false }: { embedded?:
   const openAdd = () => { setEditingId(null); setForm(emptyForm); setFormError(""); setShowForm(true); };
   const openEdit = (p: any) => {
     setEditingId(p.id);
-    setForm({ name: p.name, expertise_area: p.expertise_area, company: p.company, interviewer_type: p.interviewer_type || "Internal", phone: p.phone, email: p.email, notes: p.notes });
+    setForm({ name: p.name, expertise_area: p.expertise_area, company: p.company, interviewer_type: p.interviewer_type || "Internal", phone: p.phone, email: p.email, hourly_rate: p.hourly_rate != null ? String(p.hourly_rate) : "", notes: p.notes });
     setFormError("");
     setShowForm(true);
   };
@@ -109,8 +110,9 @@ export default function PanelInterviewersPage({ embedded = false }: { embedded?:
     if (!form.name.trim()) { setFormError("Name is required."); return; }
     setSaving(true); setFormError("");
     try {
-      if (editingId) await interviewApi.updatePanelInterviewer(editingId, form);
-      else await interviewApi.createPanelInterviewer(form);
+      const payload = { ...form, hourly_rate: form.hourly_rate.trim() ? Number(form.hourly_rate) : null };
+      if (editingId) await interviewApi.updatePanelInterviewer(editingId, payload);
+      else await interviewApi.createPanelInterviewer(payload);
       setShowForm(false);
       load();
     } catch (e: any) {
@@ -194,6 +196,9 @@ export default function PanelInterviewersPage({ embedded = false }: { embedded?:
                   <ResizableFilterHeader label="Type" width={colWidths.type} onWidthChange={(w) => setColWidth("type", w)}
                     value={colFilters.type} options={colOptions("type")} onChange={(v) => setColFilter("type", v)}
                     sortDir={sort?.col === "type" ? sort.dir : null} onSortClick={() => toggleSort("type")} />
+                  <ResizableFilterHeader label="Rate/hr" width={colWidths.rate} onWidthChange={(w) => setColWidth("rate", w)}
+                    value={colFilters.rate} options={colOptions("rate")} onChange={(v) => setColFilter("rate", v)}
+                    sortDir={sort?.col === "rate" ? sort.dir : null} onSortClick={() => toggleSort("rate")} />
                   <ResizableFilterHeader label="Phone" width={colWidths.phone} onWidthChange={(w) => setColWidth("phone", w)}
                     value={colFilters.phone} options={colOptions("phone")} onChange={(v) => setColFilter("phone", v)}
                     sortDir={sort?.col === "phone" ? sort.dir : null} onSortClick={() => toggleSort("phone")} />
@@ -209,7 +214,7 @@ export default function PanelInterviewersPage({ embedded = false }: { embedded?:
               <tbody>
                 {displayPeople.length === 0 && (
                   <tr>
-                    <td colSpan={9} style={{ textAlign: "center", padding: 28, color: "var(--text-muted)" }}>
+                    <td colSpan={10} style={{ textAlign: "center", padding: 28, color: "var(--text-muted)" }}>
                       No interviewers match the current search/filters.
                     </td>
                   </tr>
@@ -232,6 +237,11 @@ export default function PanelInterviewersPage({ embedded = false }: { embedded?:
                       }}>
                         {p.interviewer_type || "Internal"}
                       </span>
+                    </td>
+                    <td style={{ fontSize: 12 }}>
+                      {p.interviewer_type === "External"
+                        ? (p.hourly_rate != null ? `$${Number(p.hourly_rate).toFixed(2)}` : <span style={{ color: "var(--text-muted)" }}>Not set</span>)
+                        : <span style={{ color: "var(--text-muted)" }}>—</span>}
                     </td>
                     <td style={{ fontSize: 12 }}>{p.phone || "—"}</td>
                     <td style={{ fontSize: 12 }}>{p.email || "—"}</td>
@@ -306,6 +316,17 @@ export default function PanelInterviewersPage({ embedded = false }: { embedded?:
                 Internal — part of your own hiring org. External — a client/partner SME. A panel can freely mix both.
               </div>
             </div>
+            {form.interviewer_type === "External" && (
+              <div className="tiq-form-group">
+                <label className="tiq-label">Hourly Rate ($)</label>
+                <input className="tiq-input" type="number" min="0" step="0.01" placeholder="e.g. 150.00"
+                       value={form.hourly_rate} onChange={(e) => setForm({ ...form, hourly_rate: e.target.value })} />
+                <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 4 }}>
+                  Used to auto-calculate what's owed in Commercials once a panel round they sit on is marked Completed
+                  (rate × hours from the round's duration).
+                </div>
+              </div>
+            )}
             <div style={{ display: "flex", gap: 10 }}>
               <div className="tiq-form-group" style={{ flex: 1 }}>
                 <label className="tiq-label">Phone</label>
@@ -390,6 +411,9 @@ export default function PanelInterviewersPage({ embedded = false }: { embedded?:
               <div><span style={{ color: "var(--text-muted)" }}>Company: </span>{nameDetail.company || "—"}</div>
               <div><span style={{ color: "var(--text-muted)" }}>Phone: </span>{nameDetail.phone || "—"}</div>
               <div><span style={{ color: "var(--text-muted)" }}>Email: </span>{nameDetail.email || "—"}</div>
+              {nameDetail.interviewer_type === "External" && (
+                <div><span style={{ color: "var(--text-muted)" }}>Hourly Rate: </span>{nameDetail.hourly_rate != null ? `$${Number(nameDetail.hourly_rate).toFixed(2)}` : "Not set"}</div>
+              )}
               {nameDetail.notes && (
                 <div><span style={{ color: "var(--text-muted)" }}>Notes: </span>{nameDetail.notes}</div>
               )}

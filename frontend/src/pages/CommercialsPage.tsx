@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import {
-  Receipt, AlertTriangle, Clock3, TrendingUp, Plus, X, Trash2, ChevronDown,
+  Receipt, AlertTriangle, Clock3, TrendingUp, Plus, X, Trash2, ChevronDown, UserCog,
 } from "lucide-react";
 import { commercialApi, pipelineApi } from "../lib/api";
 import DataTable from "../components/DataTable";
@@ -13,9 +13,15 @@ const INVOICE_STATUS_COLORS: Record<string, { fg: string; bg: string }> = {
   Overdue: { fg: "#ef4444", bg: "rgba(239,68,68,.12)" },
   Cancelled: { fg: "#94a3b8", bg: "rgba(148,163,184,.12)" },
 };
+const INTERVIEWER_PAYMENT_STATUSES = ["Pending", "Approved", "Paid"];
+const INTERVIEWER_PAYMENT_STATUS_COLORS: Record<string, { fg: string; bg: string }> = {
+  Pending: { fg: "#64748b", bg: "rgba(100,116,139,.12)" },
+  Approved: { fg: "#3b82f6", bg: "rgba(59,130,246,.12)" },
+  Paid: { fg: "#10b981", bg: "rgba(16,185,129,.12)" },
+};
 
 export default function CommercialsPage() {
-  const [tab, setTab] = useState<"invoices" | "alerts" | "timesheets" | "revenue">("invoices");
+  const [tab, setTab] = useState<"invoices" | "alerts" | "timesheets" | "interviewer-payments" | "revenue">("invoices");
 
   return (
     <div className="tiq-content">
@@ -24,7 +30,7 @@ export default function CommercialsPage() {
         <div className="tiq-page-sub">The money side of a placement, tracked inside the platform.</div>
       </div>
 
-      <div style={{ display: "flex", gap: 8, marginTop: 16, marginBottom: 16 }}>
+      <div style={{ display: "flex", gap: 8, marginTop: 16, marginBottom: 16, flexWrap: "wrap" }}>
         <button className={`tiq-btn tiq-btn-sm ${tab === "invoices" ? "tiq-btn-primary" : "tiq-btn-outline"}`} onClick={() => setTab("invoices")}>
           <Receipt size={13} /> Invoices
         </button>
@@ -34,6 +40,9 @@ export default function CommercialsPage() {
         <button className={`tiq-btn tiq-btn-sm ${tab === "timesheets" ? "tiq-btn-primary" : "tiq-btn-outline"}`} onClick={() => setTab("timesheets")}>
           <Clock3 size={13} /> Timesheets
         </button>
+        <button className={`tiq-btn tiq-btn-sm ${tab === "interviewer-payments" ? "tiq-btn-primary" : "tiq-btn-outline"}`} onClick={() => setTab("interviewer-payments")}>
+          <UserCog size={13} /> Interviewer Payments
+        </button>
         <button className={`tiq-btn tiq-btn-sm ${tab === "revenue" ? "tiq-btn-primary" : "tiq-btn-outline"}`} onClick={() => setTab("revenue")}>
           <TrendingUp size={13} /> Revenue
         </button>
@@ -42,7 +51,111 @@ export default function CommercialsPage() {
       {tab === "invoices" && <InvoicesTab />}
       {tab === "alerts" && <AlertsTab />}
       {tab === "timesheets" && <TimesheetsTab />}
+      {tab === "interviewer-payments" && <InterviewerPaymentsTab />}
       {tab === "revenue" && <RevenueTab />}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// EXTERNAL INTERVIEWER PAYMENTS TAB — auto-generated whenever a Panel
+// Interview round with an external, rated interviewer (see Panel
+// Interviewers' hourly rate) is marked Completed. Nothing here creates a
+// row directly — this is purely surfacing + a "mark paid" action.
+// ══════════════════════════════════════════════════════════════════════════
+
+function InterviewerPaymentsTab() {
+  const [data, setData] = useState<{ payments: any[]; total_amount: number; pending_amount: number } | null>(null);
+  const [statusFilter, setStatusFilter] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [updatingId, setUpdatingId] = useState<number | null>(null);
+
+  const load = async () => {
+    setLoading(true);
+    try { setData(await commercialApi.listInterviewerPayments(statusFilter || undefined)); }
+    finally { setLoading(false); }
+  };
+  useEffect(() => { load(); }, [statusFilter]);
+
+  const handleStatusChange = async (id: number, status: string) => {
+    setUpdatingId(id);
+    try { await commercialApi.updateInterviewerPaymentStatus(id, { status }); await load(); }
+    catch (e: any) { alert(e?.response?.data?.detail || "Could not update status."); }
+    finally { setUpdatingId(null); }
+  };
+
+  if (loading) return <div className="tiq-spinner-wrap"><div className="tiq-spinner" /></div>;
+
+  return (
+    <div>
+      <p style={{ fontSize: 12, color: "var(--text-muted)", maxWidth: 720, marginBottom: 12 }}>
+        What's owed to external panel interviewers — one row per completed round, at that interviewer's hourly
+        rate × the round's duration. Generated automatically; nothing to create by hand here.
+      </p>
+      <div style={{ display: "flex", gap: 16, marginBottom: 14, flexWrap: "wrap" }}>
+        <div className="tiq-card" style={{ padding: "10px 16px" }}>
+          <div style={{ fontSize: 10.5, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: ".04em" }}>Total</div>
+          <div style={{ fontSize: 18, fontWeight: 800 }}>${(data?.total_amount || 0).toFixed(2)}</div>
+        </div>
+        <div className="tiq-card" style={{ padding: "10px 16px" }}>
+          <div style={{ fontSize: 10.5, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: ".04em" }}>Pending Payout</div>
+          <div style={{ fontSize: 18, fontWeight: 800, color: "#ef4444" }}>${(data?.pending_amount || 0).toFixed(2)}</div>
+        </div>
+      </div>
+      <select className="tiq-select" style={{ fontSize: 12, marginBottom: 10 }} value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+        <option value="">All statuses</option>
+        {INTERVIEWER_PAYMENT_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+      </select>
+      <div className="tiq-table-wrap">
+        <table className="tiq-table">
+          <thead>
+            <tr>
+              <th>Interviewer</th>
+              <th>Candidate</th>
+              <th>Round</th>
+              <th>Requisition</th>
+              <th style={{ width: 80 }}>Hours</th>
+              <th style={{ width: 90 }}>Rate/hr</th>
+              <th style={{ width: 100 }}>Amount</th>
+              <th style={{ width: 110 }}>Status</th>
+              <th style={{ width: 120 }}>Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            {(!data || data.payments.length === 0) && (
+              <tr><td colSpan={9} style={{ textAlign: "center", padding: 28, color: "var(--text-muted)" }}>
+                No interviewer payments yet — these appear once a Panel Interview round with a rated external interviewer is marked Completed.
+              </td></tr>
+            )}
+            {data?.payments.map((p) => {
+              const c = INTERVIEWER_PAYMENT_STATUS_COLORS[p.status] || INTERVIEWER_PAYMENT_STATUS_COLORS.Pending;
+              return (
+                <tr key={p.id}>
+                  <td style={{ fontWeight: 600, fontSize: 12.5 }}>{p.interviewer_name}<div style={{ fontSize: 10.5, color: "var(--text-muted)", fontWeight: 400 }}>{p.interviewer_email}</div></td>
+                  <td style={{ fontSize: 12 }}>{p.candidate_name || "—"}</td>
+                  <td style={{ fontSize: 12 }}>{p.round_name || "—"}</td>
+                  <td style={{ fontSize: 12 }}>{p.requisition_title || "—"}</td>
+                  <td style={{ fontSize: 12 }}>{p.hours}</td>
+                  <td style={{ fontSize: 12 }}>${Number(p.hourly_rate).toFixed(2)}</td>
+                  <td style={{ fontWeight: 700, fontSize: 12.5 }}>${Number(p.amount).toFixed(2)}</td>
+                  <td>
+                    <span style={{ fontSize: 10.5, fontWeight: 700, color: c.fg, background: c.bg, padding: "3px 9px", borderRadius: 999 }}>{p.status}</span>
+                  </td>
+                  <td>
+                    {p.status !== "Paid" && (
+                      <select className="tiq-select" style={{ fontSize: 11, padding: "3px 6px" }} disabled={updatingId === p.id}
+                        value="" onChange={(e) => e.target.value && handleStatusChange(p.id, e.target.value)}>
+                        <option value="">Change to…</option>
+                        {INTERVIEWER_PAYMENT_STATUSES.filter((s) => s !== p.status).map((s) => <option key={s} value={s}>{s}</option>)}
+                      </select>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
