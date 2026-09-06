@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Wrench, Sparkles, Download, Trash2, Plus, X, Save, FileEdit,
   Briefcase, GraduationCap, Award, FolderKanban, User as UserIcon,
-  Mail, Phone, MapPin, Link2, AlertTriangle, CheckCircle, PenLine,
+  Mail, Phone, MapPin, Link2, AlertTriangle, CheckCircle, PenLine, ExternalLink,
 } from "lucide-react";
 import { resumecraftApi, cvintelApi, downloadBlob } from "../lib/api";
 import { useAuth } from "../hooks/useAuth";
@@ -365,14 +365,23 @@ export default function ResumeCraftPage() {
   const [freshResumeText, setFreshResumeText] = useState("");
   const [freshJdText, setFreshJdText] = useState("");
 
+  // Set when this session arrived via JobHunter's "Generate Tailored
+  // Resume" bridge — carried through to the saved ApplicationDocument so
+  // the "Apply Now" button below can send the person straight back to
+  // the job's real application page with the tailored documents already
+  // downloaded, instead of losing that link once they leave JobHunter.
+  const [linkedJobId, setLinkedJobId] = useState<number | null>(null);
+  const [linkedApplyLink, setLinkedApplyLink] = useState("");
+
   const { data: cvHistory = [] } = useQuery({ queryKey: ["cvintel-history"], queryFn: cvintelApi.listHistory });
   const { data: documents = [] } = useQuery({ queryKey: ["resumecraft-documents"], queryFn: resumecraftApi.list });
 
-  // Arrived here via CVAnalysis's "Create Resume & Cover Letter" link
-  // (?cvId=&jobTitle=&company=) — pre-fill the Generate tab with that
-  // specific analysis pre-selected rather than making the person hunt
-  // for it in the dropdown again. Consumed once and stripped from the
-  // URL so it doesn't re-apply if they navigate away and back.
+  // Arrived here via CVAnalysis's "Create Resume & Cover Letter" link, or
+  // JobHunter's "Generate Tailored Resume" link
+  // (?cvId=&jobTitle=&company=&jobId=&applyLink=) — pre-fill the Generate
+  // tab with that specific analysis pre-selected rather than making the
+  // person hunt for it in the dropdown again. Consumed once and stripped
+  // from the URL so it doesn't re-apply if they navigate away and back.
   useEffect(() => {
     const cvId = searchParams.get("cvId");
     if (!cvId) return;
@@ -380,6 +389,9 @@ export default function ResumeCraftPage() {
     setUseFreshInput(false);
     setJobTitle(searchParams.get("jobTitle") || "");
     setCompanyName(searchParams.get("company") || "");
+    const jobId = searchParams.get("jobId");
+    setLinkedJobId(jobId ? Number(jobId) : null);
+    setLinkedApplyLink(searchParams.get("applyLink") || "");
     setTab("generate");
     setSearchParams({}, { replace: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -392,6 +404,8 @@ export default function ResumeCraftPage() {
     setResumeData(normalizeResumeData(doc.resumeData));
     setCoverLetterText(doc.coverLetterText || "");
     setWarnings({ resume: doc.resumeWarning, coverLetter: doc.coverLetterWarning, completeness: doc.resumeCompletenessWarning });
+    setLinkedJobId(doc.jobId ?? null);
+    setLinkedApplyLink(doc.applyLink || "");
     setShowEditor(true);
   };
 
@@ -402,6 +416,8 @@ export default function ResumeCraftPage() {
       cvanalysis_record_id: useFreshInput ? null : (selectedCvId || null),
       resume_text: useFreshInput ? freshResumeText : undefined,
       jd_text: useFreshInput ? freshJdText : undefined,
+      job_id: linkedJobId || undefined,
+      apply_link: linkedApplyLink || undefined,
     }),
     onSuccess: (doc) => {
       qc.invalidateQueries({ queryKey: ["resumecraft-documents"] });
@@ -456,6 +472,8 @@ export default function ResumeCraftPage() {
     setResumeData({ ...EMPTY_RESUME, full_name: user?.name || "", email: user?.email || "" });
     setCoverLetterText("");
     setWarnings({});
+    setLinkedJobId(null);
+    setLinkedApplyLink("");
     setShowEditor(true);
     setTab("build");
   };
@@ -558,7 +576,7 @@ export default function ResumeCraftPage() {
               disabled={generateMut.isPending || !jobTitle.trim() || (!useFreshInput && !selectedCvId) || (useFreshInput && (!freshResumeText.trim() || !freshJdText.trim()))}
               onClick={() => generateMut.mutate()}
             >
-              <Sparkles size={14} /> {generateMut.isPending ? "Generating…" : "Generate with AI"}
+              <Sparkles size={14} /> {generateMut.isPending ? "Generating…" : "Generate"}
             </button>
           </div>
         </div>
@@ -621,6 +639,26 @@ export default function ResumeCraftPage() {
               </button>
             </div>
           </div>
+
+          {isExistingDoc && linkedApplyLink && (
+            <div className="tiq-card" style={{
+              marginBottom: 16, display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12,
+              background: "rgba(13,148,136,.06)", border: "1px solid rgba(13,148,136,.25)",
+            }}>
+              <div>
+                <div style={{ fontWeight: 700, fontSize: 14 }}>Ready to submit your application</div>
+                <div style={{ fontSize: 12.5, color: "var(--text-secondary)", marginTop: 2 }}>
+                  Download your tailored resume &amp; cover letter below, then apply on the employer's site — TalentIQ can't submit third-party application forms for you.
+                </div>
+              </div>
+              <a
+                href={linkedApplyLink} target="_blank" rel="noopener noreferrer"
+                className="tiq-btn tiq-btn-primary tiq-btn-sm"
+              >
+                <ExternalLink size={14} /> Apply Now
+              </a>
+            </div>
+          )}
 
           {(warnings.resume || warnings.coverLetter) && (
             <div className="tiq-alert tiq-alert-info" style={{ marginBottom: 16 }}>
@@ -717,6 +755,15 @@ export default function ResumeCraftPage() {
               >
                 <Download size={14} /> Download Cover Letter (.docx)
               </button>
+              {viewDoc.applyLink && (
+                <a
+                  href={viewDoc.applyLink} target="_blank" rel="noopener noreferrer"
+                  className="tiq-btn tiq-btn-outline"
+                  style={{ textAlign: "center" }}
+                >
+                  <ExternalLink size={14} /> Apply Now
+                </a>
+              )}
             </div>
 
             <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>

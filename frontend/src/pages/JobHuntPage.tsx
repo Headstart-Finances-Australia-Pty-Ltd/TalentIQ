@@ -1,8 +1,8 @@
-import { } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { useState, useRef, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Upload, Search, Target, Download, ExternalLink, ChevronDown, ChevronUp, FileText, AlertTriangle } from "lucide-react";
-import { jobhuntApi, downloadBlob } from "../lib/api";
+import { Upload, Search, Target, Download, ExternalLink, ChevronDown, ChevronUp, FileText, AlertTriangle, Sparkles } from "lucide-react";
+import { jobhuntApi, resumecraftApi, downloadBlob } from "../lib/api";
 import { useAuth } from "../hooks/useAuth";
 import { useLatestMutation } from "../hooks/useLatestMutation";
 
@@ -154,6 +154,7 @@ export default function JobHunterPage() {
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
   const qc = useQueryClient();
+  const navigate = useNavigate();
   const [tab, setTab] = useState<"search" | "matches">("search");
   const [expandedJob, setExpandedJob] = useState<number | null>(null);
   const [expandedMatchId, setExpandedMatchId] = useState<number | null>(null);
@@ -162,6 +163,27 @@ export default function JobHunterPage() {
   // Resume
   const { data: resumes = [] } = useQuery({ queryKey: ["resumes"], queryFn: jobhuntApi.listResumes });
   const [selectedResumeId, setSelectedResumeId] = useState<number | null>(null);
+
+  // "Generate Tailored Resume" (JobHunter -> CVAnalysis -> ResumeCraft
+  // bridge): analyzes the chosen resume against THIS job's description
+  // (the same analysis CVAnalysis itself runs), then hands the resulting
+  // record straight to ResumeCraft the same way CVAnalysis's own
+  // "Create Tailored Resume & Cover Letter" link does.
+  const [craftingJobId, setCraftingJobId] = useState<number | null>(null);
+  const craftMut = useMutation({
+    mutationFn: ({ resumeId, jobId }: { resumeId: number; jobId: number }) =>
+      resumecraftApi.analyzeJob(resumeId, jobId),
+    onMutate: ({ jobId }) => setCraftingJobId(jobId),
+    onSuccess: (data: any) => {
+      const params = new URLSearchParams({ cvId: String(data.cvAnalysisRecordId) });
+      if (data.jobTitle) params.set("jobTitle", data.jobTitle);
+      if (data.company) params.set("company", data.company);
+      if (data.jobId) params.set("jobId", String(data.jobId));
+      if (data.applyLink) params.set("applyLink", data.applyLink);
+      navigate(`/app/resumecraft?${params.toString()}`);
+    },
+    onSettled: () => setCraftingJobId(null),
+  });
 
   const uploadMutation = useMutation({
     mutationFn: (file: File) => jobhuntApi.uploadResume(file),
@@ -281,6 +303,12 @@ export default function JobHunterPage() {
         <h1 className="tiq-page-title">JobHunter Agent</h1>
         <p className="tiq-page-sub">Search live jobs — matched against your resume automatically</p>
       </div>
+
+      {craftMut.isError && (
+        <div className="tiq-alert tiq-alert-error" style={{ marginBottom: 16 }}>
+          Couldn't analyze this job: {(craftMut.error as any)?.response?.data?.detail || "Please try again."}
+        </div>
+      )}
 
       {/* TABS */}
       <div className="tiq-tabs">
@@ -530,6 +558,16 @@ export default function JobHunterPage() {
                             <ExternalLink size={12} /> Apply
                           </a>
                         )}
+                        {selectedResumeId && (
+                          <button
+                            className="tiq-btn tiq-btn-outline tiq-btn-sm"
+                            disabled={craftMut.isPending && craftingJobId === job.id}
+                            onClick={() => craftMut.mutate({ resumeId: selectedResumeId, jobId: job.id })}
+                            title="Analyze your resume against this job, then generate a tailored resume & cover letter"
+                          >
+                            <Sparkles size={12} /> {craftMut.isPending && craftingJobId === job.id ? "Analyzing…" : "Generate Tailored Resume"}
+                          </button>
+                        )}
                         <button className="tiq-btn tiq-btn-ghost tiq-btn-sm"
                           onClick={() => setExpandedJob(expanded ? null : job.id)}>
                           {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
@@ -610,6 +648,16 @@ export default function JobHunterPage() {
                             className="tiq-btn tiq-btn-primary tiq-btn-sm">
                             <ExternalLink size={12} /> Apply
                           </a>
+                        )}
+                        {m.resume_id && (
+                          <button
+                            className="tiq-btn tiq-btn-outline tiq-btn-sm"
+                            disabled={craftMut.isPending && craftingJobId === m.job_id}
+                            onClick={() => craftMut.mutate({ resumeId: m.resume_id, jobId: m.job_id })}
+                            title="Analyze your resume against this job, then generate a tailored resume & cover letter"
+                          >
+                            <Sparkles size={12} /> {craftMut.isPending && craftingJobId === m.job_id ? "Analyzing…" : "Generate Tailored Resume"}
+                          </button>
                         )}
                         <button className="tiq-btn tiq-btn-ghost tiq-btn-sm"
                           onClick={() => setExpandedMatchId(expanded ? null : m.id)}>

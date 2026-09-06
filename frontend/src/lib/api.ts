@@ -552,7 +552,7 @@ export const jobhuntApi = {
   listSearches: () => api.get("/api/jobhunt/searches").then((r) => r.data),
   deleteSearch: (id: number) => api.delete(`/api/jobhunt/searches/${id}`).then((r) => r.data),
   deleteAllSearches: () => api.delete("/api/jobhunt/searches").then((r) => r.data),
-  matchResume: (data: any) => api.post("/api/jobhunt/match", data, { timeout: 180_000 }).then((r) => r.data),
+  matchResume: (data: any) => api.post("/api/jobhunt/match", data, { timeout: 240_000 }).then((r) => r.data),
   listMatches: () => api.get("/api/jobhunt/matches").then((r) => r.data),
   exportExcel: (searchId: number) =>
     api.get(`/api/jobhunt/export/${searchId}`, { responseType: "blob" }).then((r) => r.data),
@@ -678,6 +678,12 @@ export const billingApi = {
 export const resumecraftApi = {
   generate: (data: any) => api.post("/api/resumecraft/generate", data, { timeout: 120_000 }).then(r => r.data),
   createManual: (data: any) => api.post("/api/resumecraft/manual", data).then(r => r.data),
+  // Bridges JobHunter -> CVAnalysis: given a resume + a specific job from
+  // JobHunter's search results, runs the same analysis CVAnalysis itself
+  // does and returns a cvAnalysisRecordId ready to hand to ResumeCraft's
+  // ?cvId= pre-fill (see JobHuntPage's "Generate Tailored Resume" button).
+  analyzeJob: (resumeId: number, jobId: number) =>
+    api.post("/api/resumecraft/analyze-job", { resume_id: resumeId, job_id: jobId }, { timeout: 60_000 }).then(r => r.data),
   list: () => api.get("/api/resumecraft/documents").then(r => r.data),
   get: (id: number) => api.get(`/api/resumecraft/documents/${id}`).then(r => r.data),
   update: (id: number, data: any) => api.put(`/api/resumecraft/documents/${id}`, data).then(r => r.data),
