@@ -27,6 +27,7 @@ fillable skeleton) rather than hard-failing.
 """
 import json
 import re
+import asyncio
 from typing import Optional
 
 from utils.credentials import DEFAULT_GROQ_MODEL
@@ -89,11 +90,38 @@ def _extract_json(raw: str) -> Optional[dict]:
     return None
 
 
-def _llm(groq_key: str, groq_model: str, temperature: float):
+def _llm(groq_key: str, groq_model: str, temperature: float, max_tokens: int = 3000):
     return ChatGroq(
         api_key=groq_key, model=groq_model, temperature=temperature,
-        max_tokens=4000, reasoning_format="hidden", reasoning_effort="low", max_retries=0,
+        max_tokens=max_tokens, reasoning_format="hidden", reasoning_effort="low", max_retries=0,
     )
+
+
+def _is_rate_limit_error(e: Exception) -> bool:
+    msg = str(e).lower()
+    return "rate_limit" in msg or "rate limit" in msg or "429" in msg
+
+
+async def _invoke_with_retry(llm, prompt: str, max_retries: int = 2) -> str:
+    """Groq's TPM rate limit is a rolling per-minute window, and the error
+    itself usually reports a sub-second "try again in Xms" wait — so on a
+    rate-limit error specifically (never on other failures), retry a
+    couple of times with a short backoff before giving up. This alone
+    resolves the common case where a request was blocked by only a
+    handful of tokens and the window clears almost immediately, rather
+    than falling back to a blank template for what is often a
+    one-second problem."""
+    last_exc: Optional[Exception] = None
+    for attempt in range(max_retries + 1):
+        try:
+            return llm.invoke(prompt).content
+        except Exception as e:
+            last_exc = e
+            if attempt < max_retries and _is_rate_limit_error(e):
+                await asyncio.sleep(2 * (attempt + 1))
+                continue
+            raise
+    raise last_exc  # pragma: no cover — loop always returns or raises above
 
 
 def _fallback_resume_data(resume_text: str, candidate_profile: dict) -> dict:
@@ -280,7 +308,7 @@ Rules:
 8. Output ONLY one JSON object, no prose before or after, matching EXACTLY this shape (omit no keys; use empty string/array if unknown):
 {RESUME_SCHEMA_HINT}
 """
-            response = llm.invoke(prompt).content
+            response = await _invoke_with_retry(llm, prompt)
             data = _extract_json(response)
             if data:
                 merged = dict(EMPTY_RESUME_DATA)
@@ -328,7 +356,7 @@ async def generate_tailored_cover_letter(
 
     if groq_key and _GROQ_AVAILABLE:
         try:
-            llm = _llm(groq_key, groq_model, temperature=0.5)
+            llm = _llm(groq_key, groq_model, temperature=0.5, max_tokens=1200)
             prompt = f"""Write a professional, ATS-friendly cover letter in standard business-letter format for {candidate_name or "the candidate"}, applying for the {job_title or "advertised"} role at {company_name or "the company"}.
 
 Use these REAL matched strengths (from TalentIQ's CVAnalysis analysis) to justify fit \u2014 do not invent achievements the resume doesn't support:
@@ -345,7 +373,7 @@ Structure, 4 short paragraphs, under 350 words total:
 4. Closing \u2014 call to action, thanks.
 
 Return ONLY the letter body text \u2014 no JSON, no markdown, no bracket placeholders. Start with 'Dear Hiring Manager,' unless a named contact is given."""
-            body = llm.invoke(prompt).content.strip()
+            body = (await _invoke_with_retry(llm, prompt)).strip()
             if body:
                 return {"body": body, "ai_powered": True, "groq_model": groq_model}
         except Exception as e:

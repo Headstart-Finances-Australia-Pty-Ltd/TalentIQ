@@ -658,6 +658,15 @@ class ApplicationDocument(Base):
 
     source_resume_id     = Column(Integer, ForeignKey("tiq_resumes.id", ondelete="SET NULL"), nullable=True)
     cvanalysis_record_id = Column(Integer, ForeignKey("tiq_cvanalysis_records.id", ondelete="SET NULL"), nullable=True)
+    # Set only when this document was generated via the JobHunter ->
+    # CVAnalysis -> ResumeCraft bridge (routers/resumecraft.py's
+    # /analyze-job), never for documents built from the CVAnalysis page
+    # directly or from scratch. apply_link is a snapshot of the job's
+    # external application URL taken at generation time (same reasoning
+    # as jd_text below) so the "Apply Now" button in ResumeCraft/JobHunter
+    # keeps working even if the tiq_jobs row is later cleaned up.
+    job_id     = Column(Integer, ForeignKey("tiq_jobs.id", ondelete="SET NULL"), nullable=True)
+    apply_link = Column(Text)
 
     job_title     = Column(String(300), default="")
     company_name  = Column(String(300), default="")
@@ -684,6 +693,7 @@ class ApplicationDocument(Base):
     user          = relationship("User", back_populates="application_documents")
     source_resume = relationship("Resume")
     cvanalysis    = relationship("CVAnalysisRecord")
+    job           = relationship("Job")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
