@@ -32,7 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from db.database import get_db
-from models.models import User, ApplicationDocument, CVAnalysisRecord, Resume
+from models.models import User, ApplicationDocument, CVAnalysisRecord, Resume, Job, JobSearch
 from utils.auth_utils import get_current_user
 from utils.credentials import get_groq_model
 from utils.groq_pool import resolve_groq_key, record_key_outcome
@@ -58,6 +58,12 @@ class GenerateRequest(BaseModel):
     resume_text: Optional[str] = None
     jd_text: Optional[str] = None
     source_resume_id: Optional[int] = None
+    # Set when this request came from the JobHunter -> CVAnalysis ->
+    # ResumeCraft bridge (see /analyze-job below) — lets the saved
+    # ApplicationDocument carry an "Apply Now" link straight back to the
+    # job it was generated for.
+    job_id: Optional[int] = None
+    apply_link: Optional[str] = None
 
 
 class ManualCreateRequest(BaseModel):
@@ -87,6 +93,8 @@ def _fmt(doc: ApplicationDocument) -> dict:
         "companyName": doc.company_name or "",
         "sourceResumeId": doc.source_resume_id,
         "cvanalysisRecordId": doc.cvanalysis_record_id,
+        "jobId": doc.job_id,
+        "applyLink": doc.apply_link or "",
         "resumeData": doc.resume_data or dict(EMPTY_RESUME_DATA),
         "resumeTemplate": doc.resume_template or "modern",
         "coverLetterText": doc.cover_letter_text or "",
@@ -111,6 +119,82 @@ async def _get_owned_doc(db: AsyncSession, doc_id: int, user_id: int) -> Applica
 
 
 # ── AI generation ────────────────────────────────────────────────────────
+
+class AnalyzeJobRequest(BaseModel):
+    resume_id: int
+    job_id: int
+
+
+@router.post("/analyze-job")
+async def analyze_job_for_resumecraft(
+    payload: AnalyzeJobRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Bridges JobHunter -> CVAnalysis -> ResumeCraft: given a resume the
+    person already uploaded in JobHunter and one specific job from their
+    search results, runs the SAME analysis CVAnalysis itself uses (so the
+    resulting CVAnalysisRecord is indistinguishable from one made by hand
+    on the CVAnalysis page) and returns its id, ready to hand straight to
+    ResumeCraft's ?cvId= pre-fill \u2014 the same query param CVAnalysis's own
+    "Create Tailored Resume & Cover Letter" link uses.
+    """
+    r = await db.execute(
+        select(Job).join(JobSearch, Job.search_id == JobSearch.id).where(
+            Job.id == payload.job_id, JobSearch.user_id == current_user.id,
+        )
+    )
+    job = r.scalar_one_or_none()
+    if not job:
+        raise HTTPException(404, "Job not found")
+
+    r2 = await db.execute(
+        select(Resume).where(Resume.id == payload.resume_id, Resume.user_id == current_user.id)
+    )
+    resume = r2.scalar_one_or_none()
+    if not resume:
+        raise HTTPException(404, "Resume not found")
+
+    resume_text = (resume.raw_text or "").strip()
+    jd_text = (job.description or "").strip()
+    if not resume_text:
+        raise HTTPException(400, "This resume has no extracted text to analyze \u2014 try re-uploading it.")
+    if not jd_text:
+        raise HTTPException(400, "This job listing has no description to analyze against.")
+
+    default_model = await get_groq_model(db, current_user.id)
+    key_resolution = await resolve_groq_key(db, current_user.id)
+
+    from routers.cvintel import _score_resume
+    cv_result = await _score_resume(
+        resume_text, jd_text, key_resolution["groq_key"], key_resolution["model"] or default_model,
+        db=db, user_id=current_user.id,
+    )
+    await record_key_outcome(db, key_resolution["pool_id"], success=cv_result is not None)
+
+    seq_num = await next_sequence_number(db, CVAnalysisRecord, current_user.id)
+    record = CVAnalysisRecord(
+        user_id=current_user.id,
+        sequence_number=seq_num,
+        source_name=resume.filename or job.title or "Resume",
+        overall_score=cv_result.get("overallScore", 0),
+        result=cv_result,
+        candidate_info={"rawText": resume_text},
+        jd_info={"rawText": jd_text},
+        created_at=datetime.utcnow(),
+    )
+    db.add(record)
+    await db.commit()
+    await db.refresh(record)
+
+    return {
+        "cvAnalysisRecordId": record.id,
+        "jobTitle": job.title or "",
+        "company": job.company or "",
+        "jobId": job.id,
+        "applyLink": job.apply_link or "",
+    }
+
 
 @router.post("/generate")
 async def generate_documents(
@@ -207,6 +291,8 @@ async def generate_documents(
         sequence_number=seq_num,
         source_resume_id=payload.source_resume_id,
         cvanalysis_record_id=cvanalysis_record_id,
+        job_id=payload.job_id,
+        apply_link=payload.apply_link or "",
         job_title=payload.job_title,
         company_name=payload.company_name,
         jd_text=jd_text,

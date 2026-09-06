@@ -14,7 +14,7 @@ import pandas as pd
 import fitz  # PyMuPDF
 import docx2txt
 
-from db.database import get_db
+from db.database import get_db, AsyncSessionLocal
 from models.models import User, Resume, JobSearch, Job, JobMatch, UserAPIKey
 from schemas.schemas import (
     JobSearchRequest, JobSearchOut, ResumeOut,
@@ -400,25 +400,63 @@ async def match_resume(
     # every job below instead of re-extracting the same resume repeatedly.
     candidate_profile = await extract_candidate_profile(resume.raw_text or "", groq_key, groq_model)
 
+    # Score + draft a cover letter for every job CONCURRENTLY rather than
+    # one job fully finishing before the next starts — this used to be a
+    # plain sequential `for` loop doing 2 blocking Groq calls per job
+    # (score + cover letter), which for a 25-job search meant up to 50
+    # back-to-back network round trips and routinely blew past the
+    # frontend's 180s timeout. generate_cover_letter is itself a
+    # synchronous function that calls the LLM directly with no `await` —
+    # run un-wrapped inside an async endpoint, each call was blocking the
+    # ENTIRE event loop (every other request this server was handling),
+    # not just this one, so asyncio.to_thread below isn't just about
+    # speed, it's about not stalling the whole app during a match run.
+    #
+    # Concurrency is capped (not one giant asyncio.gather over all N
+    # jobs) because Groq's per-minute token budget is tight enough that
+    # firing 25+ requests at once would mostly just trade "slow but
+    # steady" for "a wall of 429s" — see utils/groq_pool's cooldown
+    # handling. A handful of jobs is done in parallel, so this both
+    # actually finishes and stays under the token-per-minute ceiling
+    # (Groq requests naturally take a moment to send/receive, giving the
+    # rolling TPM window continuous headroom to refill in between rather
+    # than everything landing in the same instant).
+    match_semaphore = asyncio.Semaphore(4)
+
+    async def _process_job(job: Job):
+        async with match_semaphore:
+            job_dict = {
+                "title": job.title,
+                "company": job.company,
+                "description": job.description or "",
+                "apply_link": job.apply_link,
+            }
+            # A fresh, short-lived session for THIS task only — not the
+            # endpoint's shared `db`. calculate_match does real queries
+            # internally (taxonomy enrichment, per-chunk pool key draws),
+            # and SQLAlchemy's AsyncSession is not safe to use from
+            # multiple concurrent coroutines at once; sharing the outer
+            # `db` here would risk "another operation is in progress"
+            # errors or worse once several of these are genuinely running
+            # in parallel. The outer `db` is only touched afterwards,
+            # sequentially, once every task below has finished.
+            async with AsyncSessionLocal() as task_db:
+                match_data = await calculate_match(
+                    resume.raw_text or "", job_dict, groq_key, candidate_profile, groq_model,
+                    ollama_base_url=ollama_base_url, ollama_model=ollama_model,
+                    known_terms_hint=known_terms, db=task_db, user_id=current_user.id,
+                )
+            cover = await asyncio.to_thread(
+                generate_cover_letter, resume.raw_text or "", resume.parsed_data or {}, job_dict, groq_key, groq_model,
+            )
+            return job, match_data, cover
+
+    processed = await asyncio.gather(*(_process_job(job) for job in jobs))
+
     match_objs = []
     match_ai_powered_flags = []
-    for job in jobs:
-        job_dict = {
-            "title": job.title,
-            "company": job.company,
-            "description": job.description or "",
-            "apply_link": job.apply_link,
-        }
-        match_data = await calculate_match(
-            resume.raw_text or "", job_dict, groq_key, candidate_profile, groq_model,
-            ollama_base_url=ollama_base_url, ollama_model=ollama_model,
-            known_terms_hint=known_terms, db=db, user_id=current_user.id,
-        )
+    for job, match_data, cover in processed:
         match_ai_powered_flags.append(bool(match_data.get("ai_powered")))
-        cover = generate_cover_letter(
-            resume.raw_text or "", resume.parsed_data or {}, job_dict, groq_key, groq_model
-        )
-
         match_obj = JobMatch(
             user_id=current_user.id,
             resume_id=resume.id,
@@ -447,6 +485,7 @@ async def match_resume(
         JobMatchOut(
             id=m.id,
             job_id=m.job_id,
+            resume_id=m.resume_id,
             job_title=j.title or "",
             company=j.company or "",
             location=j.location,
@@ -490,7 +529,7 @@ async def list_matches(
 
     return [
         JobMatchOut(
-            id=m.id, job_id=m.job_id,
+            id=m.id, job_id=m.job_id, resume_id=m.resume_id,
             job_title=j.title or "", company=j.company or "",
             location=j.location, ats_score=m.ats_score,
             strengths=m.strengths, improvements=m.improvements,

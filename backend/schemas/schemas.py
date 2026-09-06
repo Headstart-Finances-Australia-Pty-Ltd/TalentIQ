@@ -176,6 +176,7 @@ class MatchRequest(BaseModel):
 class JobMatchOut(BaseModel):
     id: int
     job_id: int
+    resume_id: int
     job_title: str
     company: str
     location: Optional[str] = None
