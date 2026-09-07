@@ -436,18 +436,13 @@ export default function PublicAssessmentPage() {
           {/* Live self-view — deliberately always visible, never hidden
               or minimized, so recording is never happening without the
               candidate being able to see it's happening. */}
-          {cameraStatus === "granted" && (
-            <div style={{ position: "relative", width: 64, height: 48, borderRadius: 6, overflow: "hidden", border: "1px solid #e5e7eb" }}>
-              <video ref={videoRef} autoPlay muted playsInline style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-              <span style={{ position: "absolute", top: 3, left: 3, width: 6, height: 6, borderRadius: "50%", background: "#e11d48" }} />
-            </div>
-          )}
-          {cameraStatus === "denied" && (
-            <span title="No camera access — this sitting has no photo verification" style={{ color: "#9ca3af" }}>
-              <VideoOff size={16} />
-            </span>
-          )}
-          {cameraStatus === "pending" && <Video size={16} color="#9ca3af" />}
+          {/* At this point in the render, the camera gate above (line ~383)
+              guarantees cameraStatus === "granted" — the page never reaches
+              here otherwise — so this is always the live self-view. */}
+          <div style={{ position: "relative", width: 64, height: 48, borderRadius: 6, overflow: "hidden", border: "1px solid #e5e7eb" }}>
+            <video ref={videoRef} autoPlay muted playsInline style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+            <span style={{ position: "absolute", top: 3, left: 3, width: 6, height: 6, borderRadius: "50%", background: "#e11d48" }} />
+          </div>
 
           <div style={{
             display: "flex", alignItems: "center", gap: 6, fontWeight: 700, fontSize: 16,
