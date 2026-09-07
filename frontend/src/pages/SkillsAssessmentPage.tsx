@@ -801,15 +801,29 @@ function ResultsTab() {
 export default function SkillsAssessmentPage({ embedded = false }: { embedded?: boolean } = {}) {
   const [tab, setTab] = useState<"bank" | "assign" | "results">("bank");
 
+  // Kept as plain text (not JSX) so both the standalone header and the
+  // embedded-only sub-line below can render it without reaching into
+  // element props — see the two render paths right below.
+  const DESCRIPTION =
+    "A 60-minute online test of skills, aptitude, and behavior — AI-generated and expert-authored questions, " +
+    "AI-graded with full reasoning. Results are visible to recruiters/admins only, never the candidate.";
+
   return (
     <div className={embedded ? "" : "tiq-content"}>
-      {!embedded && (
+      {embedded ? (
+        // The description stays even when embedded inside the Screening
+        // tab bar (see ScreeningPage.tsx's "skills" tab) — this module
+        // has enough of its own context (60-minute timed test, AI-graded,
+        // results hidden from candidates) that dropping it would leave
+        // the Question Bank/Assign Test/Results sub-tabs below with no
+        // explanation of what they belong to. Only the redundant "Skills
+        // Assessment" title is skipped here, since the selected tab
+        // above already says that.
+        <div className="tiq-page-sub" style={{ marginBottom: 20 }}>{DESCRIPTION}</div>
+      ) : (
         <div className="tiq-page-header">
           <div className="tiq-page-title">Skills Assessment</div>
-          <div className="tiq-page-sub">
-            A 60-minute online test of skills, aptitude, and behavior — AI-generated and expert-authored questions,
-            AI-graded with full reasoning. Results are visible to recruiters/admins only, never the candidate.
-          </div>
+          <div className="tiq-page-sub">{DESCRIPTION}</div>
         </div>
       )}
 
