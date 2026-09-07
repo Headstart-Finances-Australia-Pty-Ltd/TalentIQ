@@ -1058,6 +1058,15 @@ MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS idx_interviewer_payments_org ON tiq_interviewer_payments (organisation_id)",
     "CREATE INDEX IF NOT EXISTS idx_interviewer_payments_interview ON tiq_interviewer_payments (interview_id)",
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_interviewer_payment_round ON tiq_interviewer_payments (interview_id, panel_interviewer_id)",
+
+    # Skills Assessment: candidate login-gated timed sitting (credentials
+    # emailed alongside the link, timer starts on login, auto-finalized
+    # from draft_answers if the candidate never explicitly submits).
+    "ALTER TABLE tiq_test_assignments ADD COLUMN IF NOT EXISTS access_password_hash VARCHAR(255)",
+    "ALTER TABLE tiq_test_assignments ADD COLUMN IF NOT EXISTS invite_sent_at TIMESTAMP",
+    "ALTER TABLE tiq_test_assignments ADD COLUMN IF NOT EXISTS draft_answers JSON DEFAULT '{}'",
+    "ALTER TABLE tiq_test_assignments ADD COLUMN IF NOT EXISTS last_activity_at TIMESTAMP",
+    "ALTER TABLE tiq_test_assignments ADD COLUMN IF NOT EXISTS proctoring_events JSON DEFAULT '[]'",
 ]
 
 async def run():

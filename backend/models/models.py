@@ -83,6 +83,8 @@ class User(Base):
     tracked_candidates = relationship("TrackedCandidate",  back_populates="user", cascade="all, delete-orphan")
     clients            = relationship("Client",            back_populates="user", cascade="all, delete-orphan")
     application_documents = relationship("ApplicationDocument", back_populates="user", cascade="all, delete-orphan")
+    test_questions     = relationship("TestQuestion",    back_populates="user", cascade="all, delete-orphan")
+    test_assignments   = relationship("TestAssignment",  back_populates="user", cascade="all, delete-orphan")
 
 
 class UserAPIKey(Base):
@@ -694,6 +696,212 @@ class ApplicationDocument(Base):
     source_resume = relationship("Resume")
     cvanalysis    = relationship("CVAnalysisRecord")
     job           = relationship("Job")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SKILLS ASSESSMENT (Screening module)
+# An online test of skills/aptitude/behavior, sat by a candidate already in
+# the Screening pipeline (a JobLensCandidate). Three pieces:
+#   TestQuestion   — the question bank (AI-generated or expert-authored),
+#                    reusable across many assignments.
+#   TestAssignment — one specific candidate's sitting: a randomized snapshot
+#                    of question ids drawn from the bank, a public token so
+#                    the candidate can take it without a TalentIQ login (same
+#                    pattern as JobLensCandidate.interview_token), and the
+#                    AI's overall evaluation once submitted.
+#   TestAnswer     — one answer within one assignment. Stores its own
+#                    snapshot of the question text/options/type so a later
+#                    edit or deletion of the bank question never changes
+#                    what a past assignment shows it asked.
+# Evaluations are intentionally never exposed on any candidate-facing
+# endpoint — see routers/skillstest.py's public routes, which return
+# questions only, never scores/reasoning/correct answers.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Aligned with the standard pre-employment assessment taxonomy — the two
+# categories from that taxonomy that AREN'T here (background/verification
+# checks, physical/drug tests) are deliberately excluded: those are
+# external verification processes (records checks, lab results, physical
+# exams), not questions a candidate can answer their way through in a
+# timed test, so they don't belong in this schema at all. A real
+# implementation of those would be a document-upload/compliance-tracking
+# feature, not more question categories.
+#
+# "cognitive_aptitude" carries a required sub-type (numerical / verbal /
+# abstract / logical reasoning — see TEST_APTITUDE_SUBTYPES) since the
+# taxonomy explicitly names these four as distinct reasoning styles, not
+# one undifferentiated "aptitude" bucket.
+TEST_CATEGORIES = ["cognitive_aptitude", "personality_psychometric", "skills_proficiency", "situational_judgment"]
+TEST_APTITUDE_SUBTYPES = ["numerical", "verbal", "abstract", "logical"]
+TEST_QUESTION_TYPES = ["mcq", "short_answer"]
+TEST_DIFFICULTIES = ["easy", "medium", "hard"]
+
+
+class TestQuestion(Base):
+    __tablename__ = "tiq_test_questions"
+
+    id             = Column(Integer, primary_key=True, index=True)
+    user_id        = Column(Integer, ForeignKey("tiq_users.id"), index=True, nullable=False)
+    category       = Column(String(30), default="skills_proficiency")   # see TEST_CATEGORIES
+    # Required when category == "cognitive_aptitude" (numerical / verbal /
+    # abstract / logical — see TEST_APTITUDE_SUBTYPES); null for every
+    # other category. Kept as its own column rather than overloading
+    # skill_tag so it can be validated against a fixed set and filtered
+    # on directly, while skill_tag stays free text for everything else.
+    aptitude_subtype = Column(String(20), nullable=True)
+    question_type  = Column(String(20), default="mcq")          # mcq | short_answer
+    question_text  = Column(Text, nullable=False)
+    # MCQ-only: exactly 4 options, correct_option_index into that list.
+    options              = Column(JSON, default=list)
+    correct_option_index = Column(Integer, nullable=True)
+    # Short-answer-only: not a single "right" string — an expert-written (or
+    # AI-drafted) grading guideline the AI grader is shown alongside the
+    # candidate's answer, e.g. "Should mention rollback strategy, monitoring,
+    # and a gradual rollout — award partial credit for 2 of 3."
+    grading_guideline = Column(Text)
+    skill_tag      = Column(String(120))     # e.g. "Python", "Leadership", "Attention to Detail"
+    difficulty     = Column(String(10), default="medium")
+    # The JD this question was generated/written against — REQUIRED for
+    # AI-generated questions (see routers/skillstest.py's
+    # /questions/generate-ai, which now takes jd_record_id instead of a
+    # freeform role hint), optional for expert questions. build_question_set
+    # in agents/skillstest_agent.py prioritizes matching this against the
+    # candidate's own JD when assembling a sitting, so a candidate's test
+    # is actually about the role they're being screened for rather than
+    # a generic bank grab. jd_title is denormalized purely for display
+    # (bank table, filters) without an extra join on every list call.
+    jd_record_id   = Column(Integer, ForeignKey("tiq_jd_records.id", ondelete="SET NULL"), nullable=True)
+    jd_title       = Column(String(300))
+    # How long this question is budgeted for when assembling a timed test —
+    # see build_question_set() in agents/skillstest_agent.py. Seeded with a
+    # sane default per type/difficulty at creation time, editable afterwards
+    # if a question genuinely runs long/short in practice.
+    estimated_seconds = Column(Integer, default=90)
+    source         = Column(String(20), default="expert")   # expert | ai_generated
+    is_active      = Column(Boolean, default=True)
+    created_at     = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User", back_populates="test_questions")
+    jd   = relationship("JDRecord")
+
+
+class TestAssignment(Base):
+    __tablename__ = "tiq_test_assignments"
+
+    id               = Column(Integer, primary_key=True, index=True)
+    sequence_number  = Column(Integer)
+    user_id          = Column(Integer, ForeignKey("tiq_users.id"), index=True, nullable=False)
+    joblens_candidate_id = Column(Integer, ForeignKey("tiq_joblens_candidates.id", ondelete="CASCADE"), index=True, nullable=False)
+    candidate_name   = Column(String(200))   # denormalized, survives even if the candidate row is later removed
+    candidate_email  = Column(String(200))
+    role_title       = Column(String(300))   # denormalized from the JobLens session's jd_role, for display
+
+    token            = Column(String(64), unique=True, index=True, nullable=False)
+    duration_minutes = Column(Integer, default=60)
+    question_ids     = Column(JSON, default=list)   # ordered snapshot of TestQuestion ids drawn for this sitting
+
+    # Candidate login credentials for this sitting — candidate_email above
+    # doubles as the "username"; this is a bcrypt hash of a one-time
+    # generated password (see routers/skillstest.py's
+    # _generate_access_password), never the plaintext. The plaintext is
+    # only ever handed back to the recruiter once, in the /assign or
+    # /reset-credentials response, for them to paste into the invite
+    # email — exactly like a real password reset flow. invite_sent_at
+    # tracks whether/when that email actually went out.
+    access_password_hash = Column(String(255), nullable=True)
+    invite_sent_at        = Column(DateTime, nullable=True)
+
+    status       = Column(String(20), default="not_started")  # not_started | in_progress | completed | expired
+    started_at   = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    expires_at   = Column(DateTime, nullable=True)   # invite link expiry (separate from the in-test countdown)
+
+    # In-progress answer snapshot, periodically overwritten by the
+    # candidate's browser (see /public/{token}/autosave) purely so an
+    # abandoned sitting can still be auto-finalized with whatever was
+    # answered so far once its clock runs out — see
+    # agents.skillstest_agent / _finalize_assignment in the router for
+    # where this actually gets graded and locked in.
+    draft_answers    = Column(JSON, default=dict)    # {questionId (str): answer}
+    last_activity_at = Column(DateTime, nullable=True)
+
+    # ── Integrity signals — deterrents + an audit trail for the
+    # recruiter, NOT a claim that cheating is prevented. Anything
+    # enforced client-side (paste-blocking, tab-switch detection) can be
+    # bypassed by a determined candidate (browser devtools, a second
+    # device, etc.); this is about raising the bar and giving the
+    # recruiter something concrete to review, not a guarantee.
+    # proctoring_events: capped, newest-appended list of
+    # {"type": "tab_hidden"|"tab_visible"|"window_blur"|"window_focus"|
+    #  "paste_blocked"|"copy_blocked"|"camera_denied", "at": iso timestamp}
+    proctoring_events = Column(JSON, default=list)
+
+    # ── AI evaluation — recruiter/admin-only, never sent to any public
+    # endpoint. Populated once, at submission time (see /public/{token}/submit).
+    overall_score    = Column(Float, nullable=True)
+    category_scores  = Column(JSON, default=dict)   # {"skills": 78.0, "aptitude": 65.0, "behavior": 82.0}
+    ai_summary       = Column(Text)                  # 2-4 sentence overall verdict
+    ai_reasoning     = Column(Text)                  # fuller explanation of how the score was reached
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    user      = relationship("User", back_populates="test_assignments")
+    candidate = relationship("JobLensCandidate")
+    answers   = relationship("TestAnswer", back_populates="assignment", cascade="all, delete-orphan")
+    proctoring_snapshots = relationship(
+        "TestProctoringSnapshot", back_populates="assignment", cascade="all, delete-orphan",
+        order_by="TestProctoringSnapshot.captured_at",
+    )
+
+
+class TestProctoringSnapshot(Base):
+    """A periodic webcam still taken during an in-progress sitting (see
+    PublicAssessmentPage.tsx's capture loop) — NOT continuous video, NOT
+    face-matching/biometric analysis, just occasional frames the
+    recruiter can skim afterward to see who was at the keyboard and
+    what was around them. Small JPEGs stored directly in Postgres
+    (deliberately not S3 — these are a few KB each, not worth the extra
+    infra dependency the way interview videos are); pruned to a capped
+    count per assignment by the router so a long sitting can't grow
+    this table unbounded."""
+    __tablename__ = "tiq_test_proctoring_snapshots"
+
+    id            = Column(Integer, primary_key=True, index=True)
+    assignment_id = Column(Integer, ForeignKey("tiq_test_assignments.id", ondelete="CASCADE"), index=True, nullable=False)
+    captured_at   = Column(DateTime, default=datetime.utcnow)
+    image_data    = Column(Text, nullable=False)  # base64-encoded JPEG, no data: prefix
+
+    assignment = relationship("TestAssignment", back_populates="proctoring_snapshots")
+
+
+class TestAnswer(Base):
+    __tablename__ = "tiq_test_answers"
+
+    id            = Column(Integer, primary_key=True, index=True)
+    assignment_id = Column(Integer, ForeignKey("tiq_test_assignments.id", ondelete="CASCADE"), index=True, nullable=False)
+    question_id   = Column(Integer, ForeignKey("tiq_test_questions.id", ondelete="SET NULL"), nullable=True)
+
+    # Snapshot of the question AS ASKED — so editing/deleting the bank
+    # question later never rewrites what a past sitting actually presented.
+    question_text = Column(Text)
+    question_type = Column(String(20))
+    category      = Column(String(30))
+    aptitude_subtype = Column(String(20), nullable=True)
+    options       = Column(JSON, default=list)
+    correct_option_index = Column(Integer, nullable=True)
+
+    candidate_answer = Column(Text)   # option index (as string) for MCQ, free text for short answer
+
+    # Grading — MCQ is graded instantly/deterministically; short answer is
+    # graded by the AI with a 0-100 score plus its reasoning, both
+    # recruiter/admin-only.
+    is_correct   = Column(Boolean, nullable=True)   # MCQ only
+    ai_score     = Column(Float, nullable=True)      # short answer only, 0-100
+    ai_reasoning = Column(Text)                       # short answer only
+
+    answered_at = Column(DateTime, default=datetime.utcnow)
+
+    assignment = relationship("TestAssignment", back_populates="answers")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
