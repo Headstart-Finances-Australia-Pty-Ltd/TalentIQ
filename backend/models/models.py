@@ -63,6 +63,15 @@ class User(Base):
     is_protected        = Column(Boolean, default=False, nullable=False, server_default=text("false"))
     reset_token         = Column(String(255))
     reset_token_expiry  = Column(DateTime)
+    # Email verification gate — see routers/auth.py's register()/login()/
+    # verify_email(). A brand-new signup is created with is_verified=False
+    # and can't log in until the emailed link is clicked. Pre-existing
+    # accounts were grandfathered to TRUE by the migration that added this
+    # column (db/migrate_fix.py), so this never locks anyone out
+    # retroactively.
+    is_verified              = Column(Boolean, default=False, nullable=False, server_default=text("false"))
+    verification_token       = Column(String(255))
+    verification_token_expiry = Column(DateTime)
     created_at          = Column(DateTime, default=datetime.utcnow)
     updated_at          = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     last_login          = Column(DateTime)

@@ -1067,6 +1067,22 @@ MIGRATIONS = [
     "ALTER TABLE tiq_test_assignments ADD COLUMN IF NOT EXISTS draft_answers JSON DEFAULT '{}'",
     "ALTER TABLE tiq_test_assignments ADD COLUMN IF NOT EXISTS last_activity_at TIMESTAMP",
     "ALTER TABLE tiq_test_assignments ADD COLUMN IF NOT EXISTS proctoring_events JSON DEFAULT '[]'",
+
+    # Email verification at signup: an account can't log in until it's
+    # confirmed via the emailed link. is_verified gates login (see
+    # routers/auth.py's login()); the token/expiry pair are re-issued
+    # each time a verification email goes out (initial signup or a
+    # "resend verification" request), single-use, one hour.
+    "ALTER TABLE tiq_users ADD COLUMN IF NOT EXISTS is_verified BOOLEAN DEFAULT FALSE NOT NULL",
+    "ALTER TABLE tiq_users ADD COLUMN IF NOT EXISTS verification_token VARCHAR(255)",
+    "ALTER TABLE tiq_users ADD COLUMN IF NOT EXISTS verification_token_expiry TIMESTAMP",
+    # Grandfather every account that already existed before this feature
+    # shipped — this runs exactly once (the migration runner skips the
+    # whole batch on future startups once its fingerprint matches), at a
+    # point before any new signup has had a chance to hit the API, so it
+    # only ever touches pre-existing accounts, never a genuinely
+    # unverified new signup.
+    "UPDATE tiq_users SET is_verified = TRUE WHERE is_verified = FALSE",
 ]
 
 async def run():
