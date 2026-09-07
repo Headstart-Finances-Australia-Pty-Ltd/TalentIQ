@@ -16,7 +16,6 @@ import JobIntelPage   from "./pages/JobIntelPage";
 import LinkLensPage   from "./pages/LinkLensPage";
 import CVIntelPage    from "./pages/CVIntelPage";
 import ResumeCraftPage from "./pages/ResumeCraftPage";
-import SkillsAssessmentPage from "./pages/SkillsAssessmentPage";
 import ScreeningPage       from "./pages/ScreeningPage";
 import JobAdsPage     from "./pages/JobAdsPage";
 import PublicInterviewPage from "./pages/PublicInterviewPage";
@@ -96,14 +95,19 @@ export default function App() {
               <Route path="linklens"   element={<LinkLensPage />} />
               <Route path="cvintel"    element={<CVIntelPage />} />
               <Route path="resumecraft" element={<ResumeCraftPage />} />
-              <Route path="skillsassessment" element={<SkillsAssessmentPage />} />
               <Route path="jdcreator"  element={<JobAdsPage />} />
               <Route path="jobads"    element={<JobAdsPage />} />
-              {/* Resume Screening/Phone Interview/Video Interview/Screening
-                  Decision all render the shared ScreeningPage (its own tab
-                  bar) — same pattern as Interview below. */}
+              {/* Resume Screening/Phone Interview/Skills Assessment/Video
+                  Interview/Screening Decision all render the shared
+                  ScreeningPage (its own tab bar) — same pattern as
+                  Interview below. Skills Assessment used to bypass this
+                  and render SkillsAssessmentPage standalone, which is why
+                  the "Screening" header/tab bar never showed up when
+                  landing on it from the sidebar — now consistent with
+                  its four siblings. */}
               <Route path="resumescreening" element={<ScreeningPage />} />
               <Route path="phoneinterview"  element={<ScreeningPage />} />
+              <Route path="skillsassessment" element={<ScreeningPage />} />
               <Route path="videointerview"  element={<ScreeningPage />} />
               <Route path="finaldecision"   element={<ScreeningPage />} />
               <Route path="acquisition" element={<AcquisitionPage />} />
