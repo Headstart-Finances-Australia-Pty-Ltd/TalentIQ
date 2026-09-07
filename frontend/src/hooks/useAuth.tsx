@@ -15,7 +15,8 @@ interface AuthContextType {
   user: User | null;
   loading: boolean;
   login: (email: string, password: string) => Promise<void>;
-  register: (data: any) => Promise<void>;
+  register: (data: any) => Promise<{ message: string; email: string; requires_verification?: boolean }>;
+  loginWithToken: (access_token: string, user: User) => void;
   logout: () => void;
   refreshUser: () => Promise<void>;
 }
@@ -45,9 +46,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const register = async (formData: any) => {
+    // No access token comes back anymore — registration now requires
+    // clicking the emailed verification link before the account can log
+    // in (see backend routers/auth.py's register()). RegisterPage shows
+    // a "check your email" screen from the returned message instead of
+    // signing the person in immediately.
     const data = await authApi.register(formData);
-    localStorage.setItem("talentiq_token", data.access_token);
-    setUser(data.user);
+    return data as { message: string; email: string; requires_verification?: boolean };
+  };
+
+  // Used by VerifyEmailPage after a successful POST /verify-email, which
+  // DOES return a real access token + user (auto-login on verification).
+  const loginWithToken = (access_token: string, verifiedUser: User) => {
+    localStorage.setItem("talentiq_token", access_token);
+    setUser(verifiedUser);
   };
 
   const logout = () => {
@@ -62,7 +74,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, register, logout, refreshUser }}>
+    <AuthContext.Provider value={{ user, loading, login, register, loginWithToken, logout, refreshUser }}>
       {children}
     </AuthContext.Provider>
   );

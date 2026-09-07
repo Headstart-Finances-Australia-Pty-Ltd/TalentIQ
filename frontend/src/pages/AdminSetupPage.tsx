@@ -47,6 +47,7 @@ export default function AdminSetupPage({ embedded = false }: { embedded?: boolea
     const data: any = {
       name: editing.name, email: editing.email, company: editing.company,
       phone: editing.phone, role: editing.role, is_active: editing.is_active,
+      is_verified: editing.is_verified,
     };
     if (newPw) data.password = newPw;
     updateMut.mutate({ id: editing.id, data });
@@ -95,6 +96,13 @@ export default function AdminSetupPage({ embedded = false }: { embedded?: boolea
               </select>
             </div>
             <div className="tiq-form-group">
+              <label className="tiq-label">Email Verified</label>
+              <select className="tiq-input tiq-select" value={editing.is_verified ? "verified" : "pending"} onChange={e => setEditing((p: any) => ({...p, is_verified: e.target.value === "verified"}))}>
+                <option value="verified">Verified</option>
+                <option value="pending">Pending</option>
+              </select>
+            </div>
+            <div className="tiq-form-group">
               <label className="tiq-label">New Password (optional)</label>
               <input type="password" className="tiq-input" value={newPw} onChange={e => setNewPw(e.target.value)} placeholder="Leave blank to keep current" />
             </div>
@@ -124,9 +132,9 @@ export default function AdminSetupPage({ embedded = false }: { embedded?: boolea
           <div className="tiq-spinner-wrap"><div className="tiq-spinner" /></div>
         ) : (
           <DataTable
-            columns={["id", "name", "email", "company", "phone", "role", "is_active", "plan_name", "plan_status", "plan_start_date", "plan_end_date", "payment_date", "transaction_number", "created_at", "last_login"]}
+            columns={["id", "name", "email", "company", "phone", "role", "is_active", "is_verified", "plan_name", "plan_status", "plan_start_date", "plan_end_date", "payment_date", "transaction_number", "created_at", "last_login"]}
             columnLabels={{
-              id: "ID", name: "Name", email: "Email", company: "Company", phone: "Phone", role: "Role", is_active: "Status",
+              id: "ID", name: "Name", email: "Email", company: "Company", phone: "Phone", role: "Role", is_active: "Status", is_verified: "Email",
               plan_name: "Plan", plan_status: "Plan Status", plan_start_date: "Plan Start", plan_end_date: "Plan End",
               payment_date: "Payment Date", transaction_number: "Transaction #",
               created_at: "Created", last_login: "Last Login",
@@ -158,6 +166,11 @@ export default function AdminSetupPage({ embedded = false }: { embedded?: boolea
                 case "is_active": return (
                   <span className={`tiq-badge ${u.is_active ? "tiq-badge-teal" : "tiq-badge-rose"}`}>
                     {u.is_active ? "Active" : "Inactive"}
+                  </span>
+                );
+                case "is_verified": return (
+                  <span className={`tiq-badge ${u.is_verified ? "tiq-badge-teal" : "tiq-badge-amber"}`}>
+                    {u.is_verified ? "Verified" : "Pending"}
                   </span>
                 );
                 case "created_at": return <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{u.created_at ? new Date(u.created_at).toLocaleDateString() : "—"}</span>;

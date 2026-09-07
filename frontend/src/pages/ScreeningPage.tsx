@@ -17,7 +17,7 @@ const TAB_BY_PATH: Record<string, "resume" | "phone" | "video" | "skills" | "dec
 
 // One page, one left-pane sidebar entry ("Screening"), five tabs —
 // mirrors InterviewPage.tsx. Resume Screening -> Phone Interview ->
-// Video Interview -> Skills Assessment -> Screening Decision all share
+// Skills Assessment -> Video Interview -> Screening Decision all share
 // the same JobLensPage workspace already (via the `mode` prop, except
 // Skills Assessment which has its own dedicated data model/page); this
 // just gives them one shared header/tab bar instead of each being its
@@ -50,11 +50,11 @@ export default function ScreeningPage() {
         <button className={`tiq-tab${tab === "phone" ? " active" : ""}`} onClick={() => setTab("phone")}>
           <Phone size={12} style={{ display: "inline", marginRight: 6 }} /> Phone Interview
         </button>
-        <button className={`tiq-tab${tab === "video" ? " active" : ""}`} onClick={() => setTab("video")}>
-          <Video size={12} style={{ display: "inline", marginRight: 6 }} /> Video Interview
-        </button>
         <button className={`tiq-tab${tab === "skills" ? " active" : ""}`} onClick={() => setTab("skills")}>
           <ClipboardCheck size={12} style={{ display: "inline", marginRight: 6 }} /> Skills Assessment
+        </button>
+        <button className={`tiq-tab${tab === "video" ? " active" : ""}`} onClick={() => setTab("video")}>
+          <Video size={12} style={{ display: "inline", marginRight: 6 }} /> Video Interview
         </button>
         <button className={`tiq-tab${tab === "decision" ? " active" : ""}`} onClick={() => setTab("decision")}>
           <CheckCircle size={12} style={{ display: "inline", marginRight: 6 }} /> Screening Decision
@@ -63,8 +63,8 @@ export default function ScreeningPage() {
 
       {tab === "resume" && <ResumeScreeningPage embedded />}
       {tab === "phone" && <PhoneInterviewPage embedded />}
-      {tab === "video" && <VideoInterviewPage embedded />}
       {tab === "skills" && <SkillsAssessmentPage embedded />}
+      {tab === "video" && <VideoInterviewPage embedded />}
       {tab === "decision" && <FinalDecisionPage embedded />}
     </div>
   );

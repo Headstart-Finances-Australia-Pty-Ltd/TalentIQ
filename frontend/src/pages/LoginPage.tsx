@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { Eye, EyeOff, Mail, Lock, ArrowRight, Home, Zap } from "lucide-react";
 import { useAuth } from "../hooks/useAuth";
-import { api } from "../lib/api";
+import { api, authApi } from "../lib/api";
 
 export default function LoginPage() {
   const { login } = useAuth();
@@ -12,6 +12,12 @@ export default function LoginPage() {
   const [showPw, setShowPw] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  // Set when login() fails specifically because the account hasn't
+  // clicked its verification link yet (backend returns a stable "verify
+  // your email" substring for this — see routers/auth.py's login()),
+  // so we can offer a one-click resend instead of just a dead-end error.
+  const [needsVerification, setNeedsVerification] = useState(false);
+  const [resendState, setResendState] = useState<"idle" | "sending" | "sent">("idle");
 
   // Forgot password state
   const [forgotMode, setForgotMode] = useState(false);
@@ -22,14 +28,29 @@ export default function LoginPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
+    setNeedsVerification(false);
+    setResendState("idle");
     setLoading(true);
     try {
       await login(email, password);
       navigate("/app");
     } catch (err: any) {
-      setError(err.response?.data?.detail || "Invalid email or password");
+      const detail = err.response?.data?.detail || "Invalid email or password";
+      setError(detail);
+      if (typeof detail === "string" && detail.toLowerCase().includes("verify your email")) {
+        setNeedsVerification(true);
+      }
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleResendVerification = async () => {
+    setResendState("sending");
+    try {
+      await authApi.resendVerification(email);
+    } finally {
+      setResendState("sent");
     }
   };
 
@@ -113,7 +134,32 @@ export default function LoginPage() {
         <h1 className="tiq-auth-title">Welcome back</h1>
         <p className="tiq-auth-sub">Sign in with your email address</p>
 
-        {error && <div className="tiq-alert tiq-alert-error">{error}</div>}
+        {error && (
+          <div className="tiq-alert tiq-alert-error">
+            {error}
+            {needsVerification && (
+              <div style={{ marginTop: 10 }}>
+                {resendState === "sent" ? (
+                  <span style={{ fontSize: 12.5 }}>
+                    If that email exists and isn't verified yet, a new link was sent.
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={handleResendVerification}
+                    disabled={resendState === "sending"}
+                    style={{
+                      background: "none", border: "1px solid currentColor", borderRadius: 6,
+                      padding: "5px 10px", cursor: "pointer", fontSize: 12.5, color: "inherit",
+                    }}
+                  >
+                    {resendState === "sending" ? "Sending…" : "Resend verification email"}
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        )}
 
         <form onSubmit={handleSubmit}>
           <div className="tiq-form-group">

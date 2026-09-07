@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { Zap, Home, Check } from "lucide-react";
+import { Zap, Home, Check, MailCheck } from "lucide-react";
 import { useAuth } from "../hooks/useAuth";
-import { billingApi } from "../lib/api";
+import { billingApi, authApi } from "../lib/api";
 
 function fmtPrice(cents: number) {
   if (!cents) return "Free";
@@ -15,6 +15,11 @@ export default function RegisterPage() {
   const [form, setForm] = useState({ name: "", email: "", password: "", company: "", phone: "" });
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  // Set once registration succeeds — swaps the form out for a "check
+  // your email" screen instead of navigating anywhere, since the account
+  // isn't usable yet (see backend routers/auth.py's register()/login()).
+  const [registered, setRegistered] = useState<{ email: string; message: string } | null>(null);
+  const [resendState, setResendState] = useState<"idle" | "sending" | "sent">("idle");
 
   // Same plan data the public Pricing page reads (billingApi.listPlans)
   // — shown here as a compact picker so a plan is chosen at signup
@@ -45,15 +50,16 @@ export default function RegisterPage() {
     setError("");
     setLoading(true);
     try {
-      await register({ ...form, plan_slug: selectedSlug || undefined });
-      const chosen = plans.find((p) => p.slug === selectedSlug);
-      // Free/demo plans are activated immediately server-side (see
-      // routers/auth.py's register()) — straight to the dashboard. A
-      // paid plan can't be charged from this form (no card collected
-      // here), so send them on to Pricing to actually complete Stripe
-      // checkout for the plan they just picked.
-      if (chosen && !chosen.is_free_demo) navigate("/pricing");
-      else navigate("/app");
+      const result = await register({ ...form, plan_slug: selectedSlug || undefined });
+      if (result.requires_verification === false) {
+        // Deploy-time exception: the platform's first-ever account is
+        // pre-verified (see backend routers/auth.py's register()) since
+        // there's no admin yet to have received/configured verification
+        // email in the first place. Straight to sign in.
+        navigate("/login");
+        return;
+      }
+      setRegistered({ email: result.email, message: result.message });
     } catch (err: any) {
       const detail = err?.response?.data?.detail;
       const status = err?.response?.status;
@@ -65,6 +71,65 @@ export default function RegisterPage() {
       setLoading(false);
     }
   };
+
+  const handleResend = async () => {
+    if (!registered) return;
+    setResendState("sending");
+    try {
+      await authApi.resendVerification(registered.email);
+    } finally {
+      setResendState("sent");
+    }
+  };
+
+  if (registered) {
+    return (
+      <div className="tiq-auth-wrap" style={{ position: "relative" }}>
+        <Link to="/" style={{
+          position: "absolute", top: 20, right: 20,
+          display: "inline-flex", alignItems: "center", gap: 5,
+          fontSize: 12, fontWeight: 600, color: "var(--text-muted)",
+          textDecoration: "none", padding: "6px 12px", borderRadius: 6,
+          border: "1px solid var(--border)",
+        }}>
+          <Home size={12} /> Home
+        </Link>
+        <div className="tiq-auth-card" style={{ maxWidth: 480, textAlign: "center" }}>
+          <div style={{
+            width: 56, height: 56, borderRadius: "50%", background: "rgba(0,199,183,.1)",
+            display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 16px",
+          }}>
+            <MailCheck size={26} color="#00c7b7" />
+          </div>
+          <h1 className="tiq-auth-title">Check your email</h1>
+          <p className="tiq-auth-sub" style={{ marginBottom: 4 }}>{registered.message}</p>
+          <p style={{ fontSize: 13, color: "var(--text-muted)", marginBottom: 20 }}>
+            Sent to <strong>{registered.email}</strong>. The link expires in 24 hours.
+          </p>
+
+          {resendState === "sent" ? (
+            <div className="tiq-alert tiq-alert-success">
+              If that email exists and isn't verified yet, a new link was sent.
+            </div>
+          ) : (
+            <button
+              type="button"
+              className="tiq-btn"
+              style={{ width: "100%", justifyContent: "center" }}
+              onClick={handleResend}
+              disabled={resendState === "sending"}
+            >
+              {resendState === "sending" ? "Sending…" : "Resend verification email"}
+            </button>
+          )}
+
+          <div className="tiq-auth-footer">
+            Already verified? <Link to="/login" className="tiq-auth-link">Sign in</Link>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="tiq-auth-wrap" style={{ position: "relative" }}>

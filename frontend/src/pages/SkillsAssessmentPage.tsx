@@ -802,14 +802,14 @@ export default function SkillsAssessmentPage({ embedded = false }: { embedded?: 
   const [tab, setTab] = useState<"bank" | "assign" | "results">("bank");
 
   return (
-    <div>
+    <div className={embedded ? "" : "tiq-content"}>
       {!embedded && (
         <div className="tiq-page-header">
-          <h1 className="tiq-page-title">Skills Assessment</h1>
-          <p className="tiq-page-sub">
+          <div className="tiq-page-title">Skills Assessment</div>
+          <div className="tiq-page-sub">
             A 60-minute online test of skills, aptitude, and behavior — AI-generated and expert-authored questions,
             AI-graded with full reasoning. Results are visible to recruiters/admins only, never the candidate.
-          </p>
+          </div>
         </div>
       )}
 

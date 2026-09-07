@@ -553,12 +553,121 @@ function S3Panel() {
   );
 }
 
+// Platform's own outbound mailbox — used only for account-lifecycle
+// system email (signup verification links, resend-verification). Kept
+// entirely separate from the per-user, strictly-private "smtp" service
+// each recruiter configures in Settings for candidate-facing emails
+// (Send Interview Invite, Calendly links) — see utils/credentials.py's
+// SHAREABLE_SERVICES docstring for the split. No "Test Connection" here
+// (unlike S3/Stripe/Database above) since there's no cheap read-only
+// probe for SMTP short of actually sending mail — Save persists
+// straight away, same shape as the per-user SMTP panel in Settings.
+const SYSTEM_SMTP_FIELDS: { name: string; label: string; type?: string; placeholder: string }[] = [
+  { name: "host", label: "SMTP Host", placeholder: "e.g. smtp.gmail.com" },
+  { name: "port", label: "SMTP Port", placeholder: "587" },
+  { name: "username", label: "Username", placeholder: "system@company.com" },
+  { name: "password", label: "Password", type: "password", placeholder: "••••••••" },
+  { name: "from_email", label: "From Email", type: "email", placeholder: "noreply@company.com" },
+];
+
+function SystemSmtpPanel() {
+  const qc = useQueryClient();
+  const [form, setForm] = useState<Record<string, string>>({});
+  const [showPw, setShowPw] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  const { data: globalKeys = [] } = useQuery({ queryKey: ["global-keys"], queryFn: authApi.listGlobalKeys });
+  const savedKeys = globalKeys.filter((k: any) => k.service === "system_smtp");
+
+  const set = (name: string, value: string) => setForm((f) => ({ ...f, [name]: value }));
+
+  const saveMut = useMutation({
+    mutationFn: async () => {
+      const entries = SYSTEM_SMTP_FIELDS.filter((f) => (form[f.name] || "").trim());
+      for (const f of entries) {
+        await authApi.saveApiKey({ service: "system_smtp", key_name: f.name, key_value: form[f.name].trim(), is_global: true });
+      }
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["global-keys"] });
+      setForm({});
+      setMsg("✅ System email settings saved.");
+      setTimeout(() => setMsg(""), 3000);
+    },
+    onError: (e: any) => {
+      setMsg(`❌ Failed to save: ${e?.response?.data?.detail || e.message}`);
+      setTimeout(() => setMsg(""), 4000);
+    },
+  });
+
+  const deleteMut = useMutation({
+    mutationFn: (id: number) => authApi.deleteApiKey(id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["global-keys"] }),
+  });
+
+  const anyFilled = SYSTEM_SMTP_FIELDS.some((f) => (form[f.name] || "").trim());
+
+  return (
+    <div className="tiq-card tiq-mb-6">
+      <div className="tiq-card-title">System Email (Signup Verification)</div>
+      <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14, lineHeight: 1.5 }}>
+        Sends the account-verification link every new signup receives, and any "resend verification email"
+        request. This is separate from the per-user SMTP each recruiter can configure in Settings for
+        candidate-facing emails — that one never sends system mail like this. Registrations will fail with
+        a clear error until this is configured.
+      </p>
+      {msg && <div style={{ fontSize: 13, marginBottom: 10 }}>{msg}</div>}
+
+      {SYSTEM_SMTP_FIELDS.map((f) => (
+        <div className="tiq-form-group" key={f.name}>
+          <label className="tiq-label">{f.label}</label>
+          {f.type === "password" ? (
+            <div style={{ display: "flex", gap: 8 }}>
+              <input
+                className="tiq-input" type={showPw ? "text" : "password"}
+                placeholder={f.placeholder} value={form[f.name] || ""}
+                onChange={(e) => set(f.name, e.target.value)}
+              />
+              <button type="button" className="tiq-btn tiq-btn-sm" onClick={() => setShowPw((s) => !s)} title={showPw ? "Hide" : "Show"}>
+                {showPw ? <EyeOff size={13} /> : <Eye size={13} />}
+              </button>
+            </div>
+          ) : (
+            <input
+              className="tiq-input" type={f.type || "text"} placeholder={f.placeholder}
+              value={form[f.name] || ""} onChange={(e) => set(f.name, e.target.value)}
+            />
+          )}
+        </div>
+      ))}
+
+      <button
+        className="tiq-btn tiq-btn-primary tiq-btn-sm"
+        disabled={!anyFilled || saveMut.isPending}
+        onClick={() => saveMut.mutate()}
+      >
+        {saveMut.isPending ? "Saving…" : savedKeys.length > 0 ? "Update System Email Settings" : "Save System Email Settings"}
+      </button>
+
+      {savedKeys.length > 0 && (
+        <div style={{ marginTop: 18 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text-muted)", marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.4 }}>
+            Currently configured
+          </div>
+          {savedKeys.map((k: any) => <SavedKeyRow key={k.id} k={k} onDelete={(id) => deleteMut.mutate(id)} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function ApiKeysTab() {
   return (
     <div>
       <DatabasePanel />
       <S3Panel />
       <StripePanel />
+      <SystemSmtpPanel />
 
       <div style={{ margin: "28px 0 16px", fontSize: 13, fontWeight: 700, color: "var(--text-secondary)" }}>
         Job Ad Posting

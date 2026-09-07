@@ -974,8 +974,8 @@ export default function SettingsPage() {
             <div className="tiq-card-title">All users ({users.length})</div>
             <div className="tiq-table-wrap">
               <DataTable
-                columns={["idx", "name", "email", "role", "company", "is_active", "last_login"]}
-                columnLabels={{ idx: "#", name: "Name", email: "Email (User ID)", role: "Role", company: "Company", is_active: "Status", last_login: "Last login" }}
+                columns={["idx", "name", "email", "role", "company", "is_active", "is_verified", "last_login"]}
+                columnLabels={{ idx: "#", name: "Name", email: "Email (User ID)", role: "Role", company: "Company", is_active: "Status", is_verified: "Email", last_login: "Last login" }}
                 rows={users.map((u: any, i: number) => ({ ...u, idx: i + 1 }))}
                 getRowKey={(u: any) => u.id}
                 actionsLabel=""
@@ -994,6 +994,7 @@ export default function SettingsPage() {
                     case "role": return <span className={`tiq-badge ${u.role === "admin" ? "tiq-badge-violet" : "tiq-badge-slate"}`}>{u.role}</span>;
                     case "company": return <span style={{ fontSize: 13, color: "var(--text-muted)" }}>{u.company || "—"}</span>;
                     case "is_active": return <span className={`tiq-badge ${u.is_active ? "tiq-badge-teal" : "tiq-badge-rose"}`}>{u.is_active ? "Active" : "Inactive"}</span>;
+                    case "is_verified": return <span className={`tiq-badge ${u.is_verified ? "tiq-badge-teal" : "tiq-badge-amber"}`}>{u.is_verified ? "Verified" : "Pending"}</span>;
                     case "last_login": return <span style={{ fontSize: 12, color: "var(--text-muted)" }}>{u.last_login ? new Date(u.last_login).toLocaleDateString() : "Never"}</span>;
                     default: return null;
                   }

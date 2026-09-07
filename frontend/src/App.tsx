@@ -9,6 +9,7 @@ import PrivacyPolicyPage from "./pages/PrivacyPolicyPage";
 import DataSecurityPage from "./pages/DataSecurityPage";
 import LoginPage      from "./pages/LoginPage";
 import RegisterPage   from "./pages/RegisterPage";
+import VerifyEmailPage from "./pages/VerifyEmailPage";
 import DashboardPage  from "./pages/DashboardPage";
 import JobHuntPage    from "./pages/JobHuntPage";
 import JobIntelPage   from "./pages/JobIntelPage";
@@ -76,6 +77,7 @@ export default function App() {
             <Route path="/data-security" element={<DataSecurityPage />} />
             <Route path="/login" element={<LoginPage />} />
             <Route path="/register" element={<RegisterPage />} />
+            <Route path="/verify-email" element={<VerifyEmailPage />} />
             <Route path="/interview/:token" element={<PublicInterviewPage />} />
             <Route path="/assessment/:token" element={<PublicAssessmentPage />} />
             <Route path="/careers/:slug" element={<CareerApplyPage />} />
