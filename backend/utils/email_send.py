@@ -67,6 +67,7 @@ def send_verification_email(smtp_cfg: dict, to_email: str, name: str, token: str
     """
     send_email(
         smtp_cfg, to_email, subject, html_body,
+        credentials_location="Admin Console > API Keys > System Email (service: system_smtp)",
         unconfigured_hint=(
             "The platform's system mailbox (System Email / SMTP) hasn't been configured yet. "
             "An admin needs to set it up under Admin Console > API Keys > System Email "
@@ -76,19 +77,41 @@ def send_verification_email(smtp_cfg: dict, to_email: str, name: str, token: str
     )
 
 
-def send_email(smtp_cfg: dict, to_email: str, subject: str, html_body: str, unconfigured_hint: str = None):
+def send_email(
+    smtp_cfg: dict, to_email: str, subject: str, html_body: str,
+    unconfigured_hint: str = None,
+    # Where an auth-failure message should send the person to fix it —
+    # this function is shared by every email path in TalentIQ (candidate
+    # invites via the per-user "smtp" service AND system email via
+    # "system_smtp"), and those two live on completely different screens
+    # (Settings vs Admin Console). Defaulting to the per-user location
+    # keeps every existing caller's message unchanged; only
+    # send_verification_email above overrides it.
+    credentials_location: str = "Settings > API Keys > SMTP",
+):
     host = smtp_cfg.get("host")
     port = int(smtp_cfg.get("port") or 587)
-    username = smtp_cfg.get("username")
-    password = smtp_cfg.get("password")
-    from_email = smtp_cfg.get("from_email") or username
+    # Trim edges on everything, and additionally strip ALL whitespace from
+    # the password specifically. This is the single most common way an
+    # otherwise-correct Gmail credential fails: Google displays App
+    # Passwords with spaces for readability ("abcd efgh ijkl mnop"), but
+    # the real secret has none — paste it as shown into this field and
+    # Gmail's SMTP AUTH rejects it with the exact 535 error below, even
+    # though the very same password with spaces removed works fine. A
+    # normal account password or API-style secret never legitimately
+    # contains whitespace either, so stripping it here is safe for every
+    # provider, not just Gmail, and fixes already-saved bad values
+    # immediately without anyone needing to re-save anything.
+    username = (smtp_cfg.get("username") or "").strip()
+    password = "".join((smtp_cfg.get("password") or "").split())
+    from_email = (smtp_cfg.get("from_email") or username or "").strip()
 
     if not (host and username and password and from_email):
         raise HTTPException(
             400,
             unconfigured_hint or (
-                "SMTP is not configured. Add credentials in Settings > API Keys "
-                "(service: smtp; key names: host, port, username, password, from_email)."
+                f"SMTP is not configured. Add credentials in {credentials_location} "
+                "(key names: host, port, username, password, from_email)."
             ),
         )
 
@@ -128,8 +151,12 @@ def send_email(smtp_cfg: dict, to_email: str, subject: str, html_body: str, unco
             raise HTTPException(
                 400,
                 "Gmail rejected these SMTP credentials (535 Bad Credentials). Gmail no longer accepts a plain "
-                "account password for SMTP — generate a 16-character App Password instead: Google Account -> "
-                "Security -> 2-Step Verification -> App passwords, then update it under Settings -> API Keys -> "
-                "SMTP. (Or switch to a transactional email provider like SendGrid/Postmark/Resend/SES.)",
+                "account password for SMTP — it needs a 16-character App Password: Google Account -> Security "
+                "-> 2-Step Verification -> App passwords (2-Step Verification must be turned on first, or this "
+                "option won't appear). Update it under "
+                f"{credentials_location}. If an App Password is already saved there and this still fails, "
+                "double-check it wasn't accidentally regenerated/revoked, and that the account isn't a Google "
+                "Workspace account whose admin has blocked SMTP/App Passwords. (Or switch to a transactional "
+                "email provider like SendGrid/Postmark/Resend/SES.)",
             )
         raise HTTPException(500, f"Failed to send email: {text[:200]}")
