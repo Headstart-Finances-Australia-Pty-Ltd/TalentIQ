@@ -148,13 +148,88 @@ def _html_to_text(html_fragment: str) -> str:
     return text.strip()
 
 
+def _link_density(el) -> float:
+    """Fraction of an element's own text that sits inside <a> tags — the
+    standard readability-algorithm signal for "this is a list of links
+    (navigation/related-content/social), not prose". A genuine JD section
+    is almost entirely plain paragraph/bullet text with at most a couple
+    of incidental links, so it scores low; a "People you can reach out
+    to" or "Meet the hiring team" block is essentially made of links, so
+    it scores high."""
+    text_len = len(el.get_text())
+    if text_len == 0:
+        return 1.0
+    link_len = sum(len(a.get_text()) for a in el.find_all("a"))
+    return link_len / text_len
+
+
+_MAX_LINK_DENSITY = 0.25
+
+# Words that show up in essentially every real job description somewhere
+# (responsibilities, requirements, qualifications framing) — used as a
+# last-line sanity check after heuristic extraction. This is deliberately
+# a low bar (any 2 of these, case-insensitive) since JDs vary hugely in
+# wording; it exists to catch the case where extraction confidently
+# returns entirely-wrong content (e.g. an about-us page, a cookie notice,
+# or boilerplate that slipped past the filters below), not to validate
+# JD quality.
+_JD_SIGNAL_WORDS = [
+    "responsibilit", "requirement", "qualif", "experience", "skill",
+    "role", "duties", "candidate", "position", "you will", "we are looking",
+]
+
+
+def _looks_like_a_jd(text: str) -> bool:
+    lowered = text.lower()
+    return sum(1 for w in _JD_SIGNAL_WORDS if w in lowered) >= 2
+
+
 def _generic_extract(soup: BeautifulSoup) -> str:
     """Fallback when no JobPosting structured data is present: strip
     obviously-non-content elements, then take the largest remaining text
     block — a reasonable heuristic for "which part of this page is
-    probably the job description" without a full readability algorithm."""
-    for tag in soup(["script", "style", "nav", "header", "footer", "noscript", "svg", "form"]):
+    probably the job description" without a full readability algorithm.
+
+    The naive version of this (largest text block, full stop) has a real
+    failure mode on pages like LinkedIn's logged-out job view: the page's
+    outer content wrapper legitimately IS the single largest text block
+    once nav/footer/script are stripped, because it also contains
+    "People you can reach out to", "Meet the hiring team", premium-upsell
+    prompts, related-jobs, and similar sidebar furniture alongside the
+    actual JD — none of which is nav/header/footer, so the earlier strip
+    doesn't catch it, and a pure "biggest chunk of text" heuristic
+    happily returns all of it concatenated together. That contaminated
+    text then goes straight into skill/requirement extraction, which is
+    exactly how something like "React", "Sage", "CA" can show up as
+    "requirements" for a Data Architect JD that never mentions them —
+    "Sage" is a true substring of "Message" (the contact-hiring-team
+    button), and the rest of that boilerplate is real page content, not
+    an LLM hallucination.
+
+    The fix: LinkedIn's contaminating sections are characteristically
+    LINK-DENSE (profile links, "Connect"/"Message" CTAs, "Practice an
+    interview", premium upsell links, apply-tracker links) while genuine
+    JD prose has few or no links. A candidate whose text is mostly inside
+    <a> tags is boilerplate/navigation-like content, not article prose —
+    a standard, well-established signal (the same idea readability
+    algorithms use), not a LinkedIn-specific hack, so it holds up for
+    other job boards' sidebar cruft too.
+    """
+    for tag in soup(["script", "style", "nav", "header", "footer", "noscript", "svg", "form", "aside"]):
         tag.decompose()
+    # Common sidebar/CTA/social-proof section naming across job boards —
+    # stripped up front so they can't ever win the "largest block" vote,
+    # belt-and-suspenders alongside the link-density filter below.
+    noise_pattern = re.compile(
+        r"similar.?jobs|related.?jobs|people.?also|hiring.?team|job.?poster|"
+        r"reach.?out|premium|upsell|recommend|social.?proof|jobs.?tracker|"
+        r"mutual.?connection|apply.?button|sidebar",
+        re.I,
+    )
+    for el in soup.find_all(attrs={"class": noise_pattern}):
+        el.decompose()
+    for el in soup.find_all(attrs={"id": noise_pattern}):
+        el.decompose()
 
     # Prefer a plausibly-named JD container if one exists (common patterns
     # across job boards / ATS platforms), before falling back to "biggest
@@ -166,12 +241,14 @@ def _generic_extract(soup: BeautifulSoup) -> str:
         container = soup.find(attrs=selector)
         if container:
             text = container.get_text(separator="\n").strip()
-            if len(text) >= _MIN_USABLE_TEXT_CHARS:
+            if len(text) >= _MIN_USABLE_TEXT_CHARS and _link_density(container) <= _MAX_LINK_DENSITY:
                 return text
 
     candidates = soup.find_all(["article", "main", "section", "div"])
     best_text = ""
     for c in candidates:
+        if _link_density(c) > _MAX_LINK_DENSITY:
+            continue  # link-heavy — nav/sidebar/social content, not JD prose
         text = c.get_text(separator="\n").strip()
         if len(text) > len(best_text):
             best_text = text
@@ -237,7 +314,7 @@ async def fetch_jd_from_url(url: str) -> dict:
 
     # Fallback: generic heuristic extraction
     jd_text = _generic_extract(soup)
-    if len(jd_text) >= _MIN_USABLE_TEXT_CHARS:
+    if len(jd_text) >= _MIN_USABLE_TEXT_CHARS and _looks_like_a_jd(jd_text):
         title_tag = soup.find("title")
         return {
             "jd_text": jd_text,
@@ -249,7 +326,8 @@ async def fetch_jd_from_url(url: str) -> dict:
         }
 
     raise JDFetchError(
-        "Couldn't extract enough job description text from that page — it may require login "
-        "(common for LinkedIn) or render its content via JavaScript that a simple page fetch "
-        "can't see. Please copy and paste the JD text directly instead."
+        "Couldn't reliably identify the job description on that page — it may require login "
+        "(common for LinkedIn), render its content via JavaScript that a simple page fetch "
+        "can't see, or the page mostly contains navigation/sidebar content this fetcher "
+        "couldn't separate from the actual JD. Please copy and paste the JD text directly instead."
     )
