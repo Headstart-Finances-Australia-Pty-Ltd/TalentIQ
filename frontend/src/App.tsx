@@ -15,9 +15,11 @@ import JobIntelPage   from "./pages/JobIntelPage";
 import LinkLensPage   from "./pages/LinkLensPage";
 import CVIntelPage    from "./pages/CVIntelPage";
 import ResumeCraftPage from "./pages/ResumeCraftPage";
+import SkillsAssessmentPage from "./pages/SkillsAssessmentPage";
 import ScreeningPage       from "./pages/ScreeningPage";
 import JobAdsPage     from "./pages/JobAdsPage";
 import PublicInterviewPage from "./pages/PublicInterviewPage";
+import PublicAssessmentPage from "./pages/PublicAssessmentPage";
 import CareerApplyPage    from "./pages/CareerApplyPage";
 import CandidatePortalPage from "./pages/CandidatePortalPage";
 import RequisitionsPage    from "./pages/RequisitionsPage";
@@ -75,6 +77,7 @@ export default function App() {
             <Route path="/login" element={<LoginPage />} />
             <Route path="/register" element={<RegisterPage />} />
             <Route path="/interview/:token" element={<PublicInterviewPage />} />
+            <Route path="/assessment/:token" element={<PublicAssessmentPage />} />
             <Route path="/careers/:slug" element={<CareerApplyPage />} />
             <Route path="/my-profile/:token" element={<CandidatePortalPage />} />
             <Route path="/hm/:token" element={<HiringManagerViewPage />} />
@@ -91,6 +94,7 @@ export default function App() {
               <Route path="linklens"   element={<LinkLensPage />} />
               <Route path="cvintel"    element={<CVIntelPage />} />
               <Route path="resumecraft" element={<ResumeCraftPage />} />
+              <Route path="skillsassessment" element={<SkillsAssessmentPage />} />
               <Route path="jdcreator"  element={<JobAdsPage />} />
               <Route path="jobads"    element={<JobAdsPage />} />
               {/* Resume Screening/Phone Interview/Video Interview/Screening

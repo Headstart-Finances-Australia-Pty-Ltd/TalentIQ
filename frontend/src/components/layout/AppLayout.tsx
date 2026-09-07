@@ -136,10 +136,10 @@ export default function AppLayout() {
             return (
               <>
                 <div className="tiq-nav-section">Job Seeker Tools</div>
-                {visibleJobseekerModules.map(({ route, name, icon: Icon, emoji }) => (
+                {visibleJobseekerModules.map(({ route, name, icon: Icon, emoji, color }) => (
                   <NavLink key={route} to={route}
                     className={({ isActive }) => `tiq-nav-item${isActive ? " active" : ""}`}>
-                    {emoji ? <span style={{ width: 16, textAlign: "center", fontSize: 14 }}>{emoji}</span> : <Icon size={16} />}
+                    {emoji ? <span style={{ width: 16, textAlign: "center", fontSize: 14 }}>{emoji}</span> : <Icon size={16} color={color} />}
                     {name}
                   </NavLink>
                 ))}

@@ -737,9 +737,7 @@ export default function CVAnalysisPage() {
       {/* ── Header ── */}
       <div className="tiq-page-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
         <div>
-          <h1 className="tiq-page-title" style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <BrainCircuit size={22} color="var(--violet-500)" /> CVAnalysis
-          </h1>
+          <h1 className="tiq-page-title">CVAnalysis</h1>
           <p className="tiq-page-sub">Score your resume against any job description</p>
         </div>
       </div>

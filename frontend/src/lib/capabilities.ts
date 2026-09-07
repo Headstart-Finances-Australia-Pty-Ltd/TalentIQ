@@ -2,6 +2,7 @@ import type { LucideIcon } from "lucide-react";
 import {
   UserPlus, Users, Users2, FileEdit, ClipboardList, Briefcase, BrainCircuit, BarChart2,
   Video, Workflow, Building2, MessageSquare, Receipt, LineChart, Phone, CheckCircle, UserCheck, Gavel, Truck,
+  ClipboardCheck, Wrench,
 } from "lucide-react";
 
 export type CapabilityModule = {
@@ -103,6 +104,12 @@ export const CAPABILITIES: Capability[] = [
         tagline: "AI call questions, recruiter-logged outcomes",
         desc: "For candidates shortlisted in Resume Screening: AI-generated phone screening questions, plus a simple recommendation and notes once the call happens.",
         features: ["AI-generated screening questions", "Contacted / outcome tracking", "Proceed, Hold, or Reject recommendation", "Call notes"],
+      },
+      {
+        name: "Skills Assessment", route: "/app/skillsassessment", icon: ClipboardCheck, color: "#a855f7", built: true,
+        tagline: "Timed online test of skills, aptitude & behavior",
+        desc: "A 60-minute online test — AI-generated and expert-authored multiple-choice and short-answer questions, a different randomized set per candidate. AI grades every answer and gives a full reasoned evaluation, visible to recruiters/admins only — never the candidate.",
+        features: ["AI-generated + expert question bank", "50/50 multiple-choice & short-answer", "AI grading with reasoning", "Recruiter/admin-only results"],
       },
       {
         name: "Video Interview", route: "/app/videointerview", icon: Video, color: "#00c7b7", built: true,
@@ -232,13 +239,13 @@ export const JOBSEEKER_MODULES: CapabilityModule[] = [
     features: ["Live Seek job scraping via Apify", "ATS resume scoring 0–100%", "AI cover letter generation", "One-click Excel export"],
   },
   {
-    name: "CVAnalysis", route: "/app/cvintel", icon: BrainCircuit, color: "#ef4444", emoji: "📄", built: true,
+    name: "CVAnalysis", route: "/app/cvintel", icon: BrainCircuit, color: "#8b5cf6", built: true,
     tagline: "ATS resume analyser & gap finder",
     desc: "Score your own resume against a job description instantly. Get matched skills, missing skills, and AI-powered improvement suggestions.",
     features: ["Instant ATS keyword scoring", "Matched vs missing skills", "AI improvement suggestions", "ATS formatting checker"],
   },
   {
-    name: "ResumeCraft", route: "/app/resumecraft", icon: FileEdit, color: "#8b5cf6", emoji: "🧰", built: true,
+    name: "ResumeCraft", route: "/app/resumecraft", icon: Wrench, color: "#00c7b7", built: true,
     tagline: "Build a tailored resume & cover letter for one job",
     desc: "Generate a resume and cover letter tailored to a specific job — pulling the matched skills, gaps, and requirements straight from a CVAnalysis analysis via AI — or build both from scratch with a resume.io-style form.",
     features: ["Uses CVAnalysis's strengths/gaps/requirements", "AI-drafted resume + cover letter", "Manual editing after generation", "Build-from-scratch form + .docx download"],

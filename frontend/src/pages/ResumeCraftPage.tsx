@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Wrench, Sparkles, Download, Trash2, Plus, X, Save, FileEdit,
+  Sparkles, Download, Trash2, Plus, X, Save, FileEdit,
   Briefcase, GraduationCap, Award, FolderKanban, User as UserIcon,
   Mail, Phone, MapPin, Link2, AlertTriangle, CheckCircle, PenLine, ExternalLink,
 } from "lucide-react";
@@ -489,9 +489,7 @@ export default function ResumeCraftPage() {
   return (
     <div>
       <div className="tiq-page-header">
-        <h1 className="tiq-page-title" style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <Wrench size={22} color="var(--teal-500)" /> ResumeCraft
-        </h1>
+        <h1 className="tiq-page-title">ResumeCraft</h1>
         <p className="tiq-page-sub">
           Generate a tailored resume &amp; cover letter for one job — using CVAnalysis's matched skills, gaps and
           requirements — or build both from scratch.

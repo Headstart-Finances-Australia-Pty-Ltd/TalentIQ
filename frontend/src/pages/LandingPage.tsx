@@ -57,7 +57,7 @@ function slugify(name: string) {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
 }
 
-function NavDropdown({ label, items }: { label: string; items: { name: string; route: string; capability?: string; emoji?: string }[] }) {
+function NavDropdown({ label, items }: { label: string; items: { name: string; route: string; capability?: string; emoji?: string; icon?: typeof Zap; color?: string }[] }) {
   const [open, setOpen] = useState(false);
   // The panel below renders with `marginTop: 4` and is taken out of
   // normal flow (position: absolute), so this wrapper's own hoverable
@@ -95,18 +95,21 @@ function NavDropdown({ label, items }: { label: string; items: { name: string; r
           background: "#ffffff", borderRadius: 10, border: "1px solid #f1f5f9",
           boxShadow: "0 12px 32px rgba(0,0,0,.12)", padding: 6, minWidth: 220, zIndex: 200,
         }}>
-          {items.map(m => (
-            <Link key={m.name} to={m.route}
-              style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, fontSize: 13, color: "#374151", padding: "8px 10px", borderRadius: 6, textDecoration: "none", fontWeight: 500 }}
-              onMouseEnter={e => { e.currentTarget.style.background = "#f8fafc"; e.currentTarget.style.color = "#0f172a"; }}
-              onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "#374151"; }}>
-              <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                {m.emoji && <span style={{ fontSize: 14 }}>{m.emoji}</span>}
-                {m.name}
-              </span>
-              {m.capability && <span style={{ fontSize: 9.5, color: "#94a3b8", fontWeight: 700 }}>{m.capability}</span>}
-            </Link>
-          ))}
+          {items.map(m => {
+            const Icon = m.icon;
+            return (
+              <Link key={m.name} to={m.route}
+                style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, fontSize: 13, color: "#374151", padding: "8px 10px", borderRadius: 6, textDecoration: "none", fontWeight: 500 }}
+                onMouseEnter={e => { e.currentTarget.style.background = "#f8fafc"; e.currentTarget.style.color = "#0f172a"; }}
+                onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "#374151"; }}>
+                <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  {m.emoji ? <span style={{ fontSize: 14 }}>{m.emoji}</span> : Icon ? <Icon size={14} color={m.color} /> : null}
+                  {m.name}
+                </span>
+                {m.capability && <span style={{ fontSize: 9.5, color: "#94a3b8", fontWeight: 700 }}>{m.capability}</span>}
+              </Link>
+            );
+          })}
         </div>
       )}
     </div>
@@ -198,7 +201,7 @@ function RecruitmentMegaMenu({ core, supporting }: { core: typeof CAPABILITIES; 
 
 type ModuleDef = {
   icon: typeof Zap; emoji?: string; name: string; route: string;
-  tagline: string; desc: string; features: string[]; built: boolean;
+  tagline: string; desc: string; features: string[]; built: boolean; color?: string;
 };
 
 function ModuleCard({ m, isEven, color, bg }: { m: ModuleDef; isEven: boolean; color: string; bg: string }) {
@@ -522,7 +525,7 @@ export default function LandingPage() {
               platform above, sharing the same AI engine underneath.
             </p>
             {visibleJobseekerModules.map((m, i) => (
-              <ModuleCard key={m.name} m={m} isEven={i % 2 === 0} color="#0ea5e9" bg="rgba(14,165,233,.12)" />
+              <ModuleCard key={m.name} m={m} isEven={i % 2 === 0} color={m.color || "#0ea5e9"} bg={m.color ? `${m.color}1f` : "rgba(14,165,233,.12)"} />
             ))}
           </div>
         </section>

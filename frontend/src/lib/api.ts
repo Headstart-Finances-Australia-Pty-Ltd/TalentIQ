@@ -596,6 +596,47 @@ export function downloadBlob(blob: Blob, filename: string) {
 export const joblensApi = {
   deleteSession: (id: number) => api.delete(`/api/joblens/sessions/${id}`).then(r => r.data),
   deleteAllSessions: () => api.delete("/api/joblens/sessions").then(r => r.data),
+  listSessions: () => api.get("/api/joblens/sessions").then(r => r.data),
+  getSession: (id: number) => api.get(`/api/joblens/sessions/${id}`).then(r => r.data),
+};
+
+// Skills Assessment — Screening module. Question bank (expert + AI),
+// timed test assignment per candidate, and AI-graded results that are
+// deliberately never exposed to the /assessment/:token public routes.
+export const skillstestApi = {
+  listQuestions: (params?: { category?: string; question_type?: string; source?: string }) =>
+    api.get("/api/skillstest/questions", { params }).then(r => r.data),
+  createQuestion: (data: any) => api.post("/api/skillstest/questions", data).then(r => r.data),
+  updateQuestion: (id: number, data: any) => api.put(`/api/skillstest/questions/${id}`, data).then(r => r.data),
+  deleteQuestion: (id: number) => api.delete(`/api/skillstest/questions/${id}`).then(r => r.data),
+  generateAiQuestions: (data: any) =>
+    api.post("/api/skillstest/questions/generate-ai", data, { timeout: 90_000 }).then(r => r.data),
+
+  assignTest: (data: any) => api.post("/api/skillstest/assign", data).then(r => r.data),
+  listAssignments: () => api.get("/api/skillstest/assignments").then(r => r.data),
+  getAssignment: (id: number) => api.get(`/api/skillstest/assignments/${id}`).then(r => r.data),
+  deleteAssignment: (id: number) => api.delete(`/api/skillstest/assignments/${id}`).then(r => r.data),
+  regenerateAssignment: (id: number) => api.post(`/api/skillstest/assignments/${id}/regenerate`).then(r => r.data),
+  resetAssignmentCredentials: (id: number) =>
+    api.post(`/api/skillstest/assignments/${id}/reset-credentials`).then(r => r.data),
+  sendAssignmentInvite: (id: number, data: { to_email: string; subject: string; body_html: string }) =>
+    api.post(`/api/skillstest/assignments/${id}/send-invite`, data).then(r => r.data),
+
+  // Public/candidate-facing — no auth header needed (token + the
+  // candidate's own emailed password carry access instead).
+  getPublicTest: (token: string) => api.get(`/api/skillstest/public/${token}`).then(r => r.data),
+  loginPublicTest: (token: string, password: string) =>
+    api.post(`/api/skillstest/public/${token}/login`, { password }).then(r => r.data),
+  autosavePublicTest: (token: string, answers: { questionId: number; answer: string }[]) =>
+    api.post(`/api/skillstest/public/${token}/autosave`, { answers }).then(r => r.data),
+  logProctoringEvent: (token: string, type: string) =>
+    api.post(`/api/skillstest/public/${token}/proctoring-event`, { type }).catch(() => null),
+  uploadProctoringSnapshot: (token: string, image: string) =>
+    api.post(`/api/skillstest/public/${token}/proctoring-snapshot`, { image }).catch(() => null),
+  getProctoringSnapshots: (assignmentId: number) =>
+    api.get(`/api/skillstest/assignments/${assignmentId}/proctoring-snapshots`).then(r => r.data),
+  submitPublicTest: (token: string, answers: { questionId: number; answer: string }[]) =>
+    api.post(`/api/skillstest/public/${token}/submit`, { answers }, { timeout: 120_000 }).then(r => r.data),
 };
 
 export const jdcreatorApi = {
