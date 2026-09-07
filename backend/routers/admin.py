@@ -443,6 +443,7 @@ async def list_users(_: User = Depends(require_admin), db: AsyncSession = Depend
             "id": u.id, "name": u.name, "email": u.email,
             "company": u.company, "phone": u.phone, "role": u.role,
             "is_active": u.is_active,
+            "is_verified": u.is_verified,
             "created_at": _iso(u.created_at),
             "last_login": _iso(u.last_login),
             # Plan/billing columns — from tiq_subscriptions (+ its plan's
@@ -470,6 +471,11 @@ class UserUpdate(BaseModel):
     phone: Optional[str] = None
     role: Optional[str] = None
     is_active: Optional[bool] = None
+    # Manual override for support cases — e.g. the person's mail
+    # provider swallowed the verification email, or System Email wasn't
+    # configured yet when they signed up. Flipping this straight to True
+    # also clears any pending token so a stale link can't be reused.
+    is_verified: Optional[bool] = None
     password: Optional[str] = None
 
 
@@ -490,6 +496,11 @@ async def update_user(
     if payload.phone is not None: user.phone = payload.phone
     if payload.role is not None: user.role = payload.role
     if payload.is_active is not None: user.is_active = payload.is_active
+    if payload.is_verified is not None:
+        user.is_verified = payload.is_verified
+        if payload.is_verified:
+            user.verification_token = None
+            user.verification_token_expiry = None
     if payload.password:
         import bcrypt
         user.password_hash = bcrypt.hashpw(payload.password.encode(), bcrypt.gensalt()).decode()

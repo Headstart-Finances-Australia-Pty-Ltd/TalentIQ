@@ -12,6 +12,7 @@ routers/joblens.py re-exports _get_smtp_config / _send_email from here
 (same names, so nothing else in that file needs to change) purely for
 backwards compatibility with anything importing them from there.
 """
+import os
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -19,7 +20,7 @@ from email.mime.text import MIMEText
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from utils.credentials import get_all_credentials
+from utils.credentials import get_all_credentials, get_global_credentials
 
 
 async def get_smtp_config(user_id: int, db: AsyncSession) -> dict:
@@ -28,7 +29,54 @@ async def get_smtp_config(user_id: int, db: AsyncSession) -> dict:
     return await get_all_credentials(db, user_id, "smtp")
 
 
-def send_email(smtp_cfg: dict, to_email: str, subject: str, html_body: str):
+async def get_system_smtp_config(db: AsyncSession) -> dict:
+    """The platform's own mailbox for account-lifecycle system email
+    (signup verification, resend-verification) — admin-configured under
+    Admin Console > API Keys (service: system_smtp), pure global lookup,
+    no per-user override (see utils/credentials.py's SHAREABLE_SERVICES
+    docstring)."""
+    return await get_global_credentials(db, "system_smtp")
+
+
+def frontend_base_url() -> str:
+    """Base URL used to build links inside system emails (verification,
+    etc). Sourced from FRONTEND_URL if set (recommended for production —
+    Northflank exposes a public URL that differs from any backend-internal
+    one); falls back to localhost for local dev so this never crashes
+    with an unset env var."""
+    return os.getenv("FRONTEND_URL", "http://localhost:5173").rstrip("/")
+
+
+def send_verification_email(smtp_cfg: dict, to_email: str, name: str, token: str):
+    link = f"{frontend_base_url()}/verify-email?token={token}"
+    subject = "Verify your email — TalentIQ Solution"
+    html_body = f"""
+    <div style="font-family: -apple-system, Arial, sans-serif; max-width: 480px; margin: 0 auto;">
+      <h2 style="color:#00c7b7;">Confirm your email</h2>
+      <p>Hi {name or ''},</p>
+      <p>Thanks for creating a TalentIQ Solution account. Click the button below to verify
+      your email address and activate your account — you won't be able to log in until it's confirmed.</p>
+      <p style="text-align:center; margin: 28px 0;">
+        <a href="{link}" style="background:#00c7b7; color:#fff; padding:12px 24px; border-radius:8px;
+           text-decoration:none; font-weight:600; display:inline-block;">Verify email address</a>
+      </p>
+      <p style="font-size:12px; color:#6b7280;">Or paste this link into your browser:<br>{link}</p>
+      <p style="font-size:12px; color:#6b7280;">This link expires in 24 hours. If you didn't create this
+      account, you can safely ignore this email.</p>
+    </div>
+    """
+    send_email(
+        smtp_cfg, to_email, subject, html_body,
+        unconfigured_hint=(
+            "The platform's system mailbox (System Email / SMTP) hasn't been configured yet. "
+            "An admin needs to set it up under Admin Console > API Keys > System Email "
+            "(service: system_smtp; key names: host, port, username, password, from_email) "
+            "before signups can be verified."
+        ),
+    )
+
+
+def send_email(smtp_cfg: dict, to_email: str, subject: str, html_body: str, unconfigured_hint: str = None):
     host = smtp_cfg.get("host")
     port = int(smtp_cfg.get("port") or 587)
     username = smtp_cfg.get("username")
@@ -38,8 +86,10 @@ def send_email(smtp_cfg: dict, to_email: str, subject: str, html_body: str):
     if not (host and username and password and from_email):
         raise HTTPException(
             400,
-            "SMTP is not configured. Add credentials in Settings > API Keys "
-            "(service: smtp; key names: host, port, username, password, from_email).",
+            unconfigured_hint or (
+                "SMTP is not configured. Add credentials in Settings > API Keys "
+                "(service: smtp; key names: host, port, username, password, from_email)."
+            ),
         )
 
     msg = MIMEMultipart("alternative")

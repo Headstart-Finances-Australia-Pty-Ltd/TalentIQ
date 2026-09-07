@@ -40,6 +40,7 @@ class UserOut(BaseModel):
     address: Optional[str] = None
     role: str
     is_active: bool
+    is_verified: bool = True
     created_at: datetime
     last_login: Optional[datetime] = None
 
@@ -50,6 +51,24 @@ class TokenOut(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user: UserOut
+
+
+class RegisterOut(BaseModel):
+    """Returned by POST /register now that a fresh signup no longer gets
+    an access token immediately — see routers/auth.py's register(). The
+    frontend shows a "check your email" screen from this instead of
+    logging the person straight in."""
+    message: str
+    email: str
+    requires_verification: bool = True
+
+
+class EmailVerifyRequest(BaseModel):
+    token: str
+
+
+class ResendVerificationRequest(BaseModel):
+    email: EmailStr
 
 
 class PasswordResetRequest(BaseModel):

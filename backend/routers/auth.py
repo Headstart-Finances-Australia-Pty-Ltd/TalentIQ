@@ -14,7 +14,8 @@ from db.database import get_db
 from models.models import User, UserAPIKey, AuditLog, GroqKeyPool
 from models.billing_models import Subscription, PricingPlan, SubscriptionHistory
 from schemas.schemas import (
-    UserRegister, UserLogin, UserOut, TokenOut,
+    UserRegister, UserLogin, UserOut, TokenOut, RegisterOut,
+    EmailVerifyRequest, ResendVerificationRequest,
     PasswordResetRequest, PasswordReset, UserUpdate,
     APIKeyCreate, APIKeyOut,
 )
@@ -22,13 +23,17 @@ from utils.auth_utils import (
     hash_password, verify_password, create_access_token,
     generate_reset_token, get_current_user, require_admin
 )
+from utils.email_send import get_system_smtp_config, send_verification_email
 
 router = APIRouter()
 
 
 # ─── REGISTER ────────────────────────────────
 
-@router.post("/register", response_model=TokenOut, status_code=201)
+VERIFICATION_TOKEN_EXPIRE_HOURS = 24
+
+
+@router.post("/register", response_model=RegisterOut, status_code=201)
 async def register(payload: UserRegister, request: Request, db: AsyncSession = Depends(get_db)):
     # Check duplicate email
     result = await db.execute(select(User).where(User.email == payload.email))
@@ -39,6 +44,8 @@ async def register(payload: UserRegister, request: Request, db: AsyncSession = D
     count_result = await db.execute(select(func.count()).select_from(User))
     is_first = count_result.scalar() == 0
 
+    verification_token = generate_reset_token()
+
     user = User(
         name=payload.name,
         email=payload.email,
@@ -47,11 +54,30 @@ async def register(payload: UserRegister, request: Request, db: AsyncSession = D
         phone=payload.phone,
         address=payload.address,
         role='admin' if is_first else 'user',
+        # Every new signup starts unverified and can't log in (see
+        # login() below) until the emailed link is clicked, which hits
+        # POST /verify-email and flips this. The platform's first-ever
+        # user (below) is the one deploy-time exception: there's no
+        # verification email infrastructure to have sent it a link
+        # BEFORE that admin account exists, since the admin is who
+        # would go configure it — so it's created pre-verified rather
+        # than being unable to ever log in and set the platform up.
+        is_verified=is_first,
+        verification_token=None if is_first else verification_token,
+        verification_token_expiry=None if is_first else (
+            datetime.utcnow() + timedelta(hours=VERIFICATION_TOKEN_EXPIRE_HOURS)
+        ),
     )
     db.add(user)
     await db.flush()
 
-    token = create_access_token({"sub": str(user.id)})
+    if not is_first:
+        # Fails loudly (HTTPException from send_email, propagated up) if
+        # the platform's system mailbox isn't configured yet — the
+        # get_db() transaction rolls back, so no half-registered,
+        # unreachable account is left behind. See utils/email_send.py.
+        smtp_cfg = await get_system_smtp_config(db)
+        send_verification_email(smtp_cfg, user.email, user.name, verification_token)
 
     db.add(AuditLog(
         user_id=user.id,
@@ -111,7 +137,18 @@ async def register(payload: UserRegister, request: Request, db: AsyncSession = D
         # A chosen paid plan is intentionally not persisted as a
         # Subscription row here — see comment above.
 
-    return TokenOut(access_token=token, user=UserOut.model_validate(user))
+    if is_first:
+        return RegisterOut(
+            message="Account created. You can log in now.",
+            email=user.email,
+            requires_verification=False,
+        )
+    return RegisterOut(
+        message="Account created. We've sent a verification link to your email — "
+                "click it to activate your account before logging in.",
+        email=user.email,
+        requires_verification=True,
+    )
 
 
 # ─── LOGIN ────────────────────────────────────
@@ -125,6 +162,17 @@ async def login(payload: UserLogin, request: Request, db: AsyncSession = Depends
         raise HTTPException(status_code=401, detail="Invalid email or password")
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Account is deactivated")
+    if not user.is_verified:
+        # Distinct, stable detail text (frontend matches on "verify your
+        # email" to show a "Resend verification email" action — see
+        # LoginPage.tsx) rather than a generic 403, since this is a
+        # different, self-service-recoverable situation from a
+        # deactivated account.
+        raise HTTPException(
+            status_code=403,
+            detail="Please verify your email before logging in. Check your inbox for the verification link, "
+                   "or request a new one.",
+        )
 
     user.last_login = datetime.utcnow()
     token = create_access_token({"sub": str(user.id)})
@@ -137,6 +185,57 @@ async def login(payload: UserLogin, request: Request, db: AsyncSession = Depends
     ))
 
     return TokenOut(access_token=token, user=UserOut.model_validate(user))
+
+
+# ─── EMAIL VERIFICATION ───────────────────────
+
+@router.post("/verify-email", response_model=TokenOut)
+async def verify_email(payload: EmailVerifyRequest, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(User).where(
+            User.verification_token == payload.token,
+            User.verification_token_expiry > datetime.utcnow(),
+        )
+    )
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(
+            status_code=400,
+            detail="This verification link is invalid or has expired. Request a new one from the login page.",
+        )
+
+    user.is_verified = True
+    user.verification_token = None
+    user.verification_token_expiry = None
+    user.last_login = datetime.utcnow()
+
+    # Auto-login on successful verification — "confirmed and login
+    # allowed" happens in the same step, so the person lands straight in
+    # the app instead of being bounced back to a login form right after
+    # proving they own the email.
+    token = create_access_token({"sub": str(user.id)})
+    return TokenOut(access_token=token, user=UserOut.model_validate(user))
+
+
+@router.post("/resend-verification")
+async def resend_verification(payload: ResendVerificationRequest, db: AsyncSession = Depends(get_db)):
+    generic_response = {"message": "If that email exists and isn't verified yet, a new verification link was sent."}
+
+    result = await db.execute(select(User).where(User.email == payload.email))
+    user = result.scalar_one_or_none()
+    # Same "don't reveal whether the email exists" shape as reset-request
+    # above — also silently no-ops for an already-verified account rather
+    # than telling a prober that.
+    if not user or user.is_verified:
+        return generic_response
+
+    user.verification_token = generate_reset_token()
+    user.verification_token_expiry = datetime.utcnow() + timedelta(hours=VERIFICATION_TOKEN_EXPIRE_HOURS)
+
+    smtp_cfg = await get_system_smtp_config(db)
+    send_verification_email(smtp_cfg, user.email, user.name, user.verification_token)
+
+    return generic_response
 
 
 # ─── GET PROFILE ──────────────────────────────

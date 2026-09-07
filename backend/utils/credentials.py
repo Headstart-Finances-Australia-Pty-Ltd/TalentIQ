@@ -66,7 +66,14 @@ def ollama_enabled() -> bool:
 # "linkedin" service LinkLens uses for candidate search). One Partner API
 # agreement covers every recruiter on the deployment, admin-configured
 # only via Admin Console > API Keys, same as groq/apify/stripe.
-SHAREABLE_SERVICES = {"groq", "ollama", "apify", "interview", "database", "s3", "stripe", "linkedin_jobs", "seek_jobs"}
+# "system_smtp" is the platform's OWN outbound mailbox — used only for
+# account-lifecycle system email (signup verification links, "resend
+# verification"), never for the candidate-facing emails a recruiter sends
+# (those go through each user's strictly-private "smtp" credential —
+# see utils/email_send.py). One mailbox for the whole deployment, same
+# reasoning as database/s3/stripe: admin-configured only via Admin
+# Console > API Keys, with no per-user override.
+SHAREABLE_SERVICES = {"groq", "ollama", "apify", "interview", "database", "s3", "stripe", "linkedin_jobs", "seek_jobs", "system_smtp"}
 
 # Fallback ONLY — used when a user (and no admin-shared global) has set a
 # Groq model. Groq periodically deprecates models (llama3-70b-8192, then
