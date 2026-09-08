@@ -72,6 +72,16 @@ async def lifespan(app: FastAPI):
             await conn.run_sync(Base.metadata.create_all)
         print("  [OK] Tables ready.")
 
+        # Catch columns that were added to a model but never given a
+        # matching ALTER TABLE line in migrate_fix.py (create_all() only
+        # creates brand-new tables — it never alters existing ones). See
+        # db/schema_sync.py docstring for the incident that motivated this
+        # and exactly what it will/won't do automatically.
+        print("  Checking for schema drift (model columns missing in DB)...")
+        from db.schema_sync import sync_missing_columns
+        await sync_missing_columns(engine, Base)
+        print("  [OK] Schema drift check complete.")
+
         # Backfill tiq_jd_vendor_links from existing candidate submissions —
         # this junction table didn't exist for earlier rows, and new rows
         # already maintain it directly (see routers/candidatetrack.py). Safe
