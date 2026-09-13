@@ -23,7 +23,7 @@ from utils.auth_utils import (
     hash_password, verify_password, create_access_token,
     generate_reset_token, get_current_user, require_admin
 )
-from utils.email_send import get_system_smtp_config, send_verification_email
+from utils.email_send import get_system_smtp_config, send_verification_email, send_password_reset_email
 
 router = APIRouter()
 
@@ -282,15 +282,21 @@ async def change_password(
 
 @router.post("/reset-request")
 async def reset_request(payload: PasswordResetRequest, db: AsyncSession = Depends(get_db)):
+    generic_response = {"message": "If that email exists, a reset link was sent"}
+
     result = await db.execute(select(User).where(User.email == payload.email))
     user = result.scalar_one_or_none()
-    if user:
-        token = generate_reset_token()
-        user.reset_token = token
-        user.reset_token_expiry = datetime.utcnow() + timedelta(hours=1)
-        # In production: send email with reset link
-        return {"message": "Reset token generated", "token": token}  # Remove token from prod response
-    return {"message": "If that email exists, a reset link was sent"}
+    if not user:
+        return generic_response
+
+    token = generate_reset_token()
+    user.reset_token = token
+    user.reset_token_expiry = datetime.utcnow() + timedelta(hours=1)
+
+    smtp_cfg = await get_system_smtp_config(db)
+    send_password_reset_email(smtp_cfg, user.email, user.name, token)
+
+    return generic_response
 
 
 # ─── PASSWORD RESET ───────────────────────────
