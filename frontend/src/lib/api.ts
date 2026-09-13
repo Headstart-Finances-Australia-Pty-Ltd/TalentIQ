@@ -517,6 +517,7 @@ export const authApi = {
   deleteApiKey: (id: number) => api.delete(`/api/auth/api-keys/${id}`).then((r) => r.data),
   listUsers: () => api.get("/api/auth/users").then((r) => r.data),
   deactivateUser: (id: number) => api.put(`/api/auth/users/${id}/deactivate`).then((r) => r.data),
+  resetPassword: (token: string, new_password: string) =>api.post("/api/auth/reset-password", { token, new_password }).then((r) => r.data),
 };
 
 export const systemApi = {
