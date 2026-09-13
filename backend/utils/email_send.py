@@ -82,6 +82,35 @@ def send_verification_email(smtp_cfg: dict, to_email: str, name: str, token: str
         ),
     )
 
+    
+def send_password_reset_email(smtp_cfg: dict, to_email: str, name: str, token: str):
+    link = f"{frontend_base_url()}/reset-password?token={token}"
+    subject = "Reset your password — TalentIQ Solution"
+    html_body = f"""
+    <div style="font-family: -apple-system, Arial, sans-serif; max-width: 480px; margin: 0 auto;">
+      <h2 style="color:#00c7b7;">Reset your password</h2>
+      <p>Hi {name or ''},</p>
+      <p>We received a request to reset your TalentIQ Solution password. Click the button below to
+      choose a new one.</p>
+      <p style="text-align:center; margin: 28px 0;">
+        <a href="{link}" style="background:#00c7b7; color:#fff; padding:12px 24px; border-radius:8px;
+           text-decoration:none; font-weight:600; display:inline-block;">Reset password</a>
+      </p>
+      <p style="font-size:12px; color:#6b7280;">Or paste this link into your browser:<br>{link}</p>
+      <p style="font-size:12px; color:#6b7280;">This link expires in 1 hour. If you didn't request this,
+      you can safely ignore this email — your password won't be changed.</p>
+    </div>
+    """
+    send_email(
+        smtp_cfg, to_email, subject, html_body,
+        credentials_location="Admin Console > API Keys > System Email (service: system_smtp)",
+        unconfigured_hint=(
+            "The platform's system mailbox (System Email / SMTP) hasn't been configured yet. "
+            "An admin needs to set it up under Admin Console > API Keys > System Email "
+            "(service: system_smtp; key names: host, port, username, password, from_email) "
+            "before password resets can be emailed."
+        ),
+    )
 
 def send_email(
     smtp_cfg: dict, to_email: str, subject: str, html_body: str,
