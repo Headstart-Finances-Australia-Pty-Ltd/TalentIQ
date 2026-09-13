@@ -44,7 +44,7 @@ def frontend_base_url() -> str:
     Northflank exposes a public URL that differs from any backend-internal
     one); falls back to tiqs.ai for local dev so this never crashes
     with an unset env var."""
-    return os.getenv("FRONTEND_URL", "https://www.tiqs.ai").rstrip("/")
+    return os.getenv("FRONTEND_URL", "https://tiqs.ai").rstrip("/")
 
 
 def send_verification_email(smtp_cfg: dict, to_email: str, name: str, token: str):
