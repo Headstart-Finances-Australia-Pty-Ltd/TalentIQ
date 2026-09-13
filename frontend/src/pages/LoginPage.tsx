@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { Eye, EyeOff, Mail, Lock, ArrowRight, Home, Zap } from "lucide-react";
 import { useAuth } from "../hooks/useAuth";
@@ -18,6 +18,17 @@ export default function LoginPage() {
   // so we can offer a one-click resend instead of just a dead-end error.
   const [needsVerification, setNeedsVerification] = useState(false);
   const [resendState, setResendState] = useState<"idle" | "sending" | "sent">("idle");
+  // Keeps a failed-login error on screen for a guaranteed minimum duration
+  // instead of disappearing at the mercy of whatever else re-renders the
+  // page. Cleared/reset on every new submit attempt so it never fires
+  // late and wipes out a *different*, more recent error message.
+  const errorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
+    };
+  }, []);
 
   // Forgot password state
   const [forgotMode, setForgotMode] = useState(false);
@@ -27,6 +38,10 @@ export default function LoginPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (errorTimerRef.current) {
+      clearTimeout(errorTimerRef.current);
+      errorTimerRef.current = null;
+    }
     setError("");
     setNeedsVerification(false);
     setResendState("idle");
@@ -40,6 +55,12 @@ export default function LoginPage() {
       if (typeof detail === "string" && detail.toLowerCase().includes("verify your email")) {
         setNeedsVerification(true);
       }
+      // Stays visible for at least 20s even if the person does nothing
+      // else — auto-clears after that so it doesn't linger indefinitely
+      // on an abandoned tab. Submitting again (success or another
+      // failure) always takes priority over this timer, via the
+      // clearTimeout above.
+      errorTimerRef.current = setTimeout(() => setError(""), 20_000);
     } finally {
       setLoading(false);
     }
