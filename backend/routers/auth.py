@@ -39,10 +39,8 @@ async def register(payload: UserRegister, request: Request, db: AsyncSession = D
     result = await db.execute(select(User).where(User.email == payload.email))
     user = result.scalar_one_or_none()
 
-    if not user:
-        raise HTTPException(status_code=401, detail="No account found with this email address.")
-    if not verify_password(payload.password, user.password_hash):
-        raise HTTPException(status_code=401, detail="Invalid email or password.")
+    if user:
+        raise HTTPException(status_code=400, detail="An account with this email already exists.")
 
     # First ever user becomes admin
     count_result = await db.execute(select(func.count()).select_from(User))
@@ -162,8 +160,10 @@ async def login(payload: UserLogin, request: Request, db: AsyncSession = Depends
     result = await db.execute(select(User).where(User.email == payload.email))
     user = result.scalar_one_or_none()
 
-    if not user or not verify_password(payload.password, user.password_hash):
-        raise HTTPException(status_code=401, detail="Invalid email or password")
+    if not user:
+        raise HTTPException(status_code=401, detail="No account found with this email address.")
+    if not verify_password(payload.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Account is deactivated")
     if not user.is_verified:
