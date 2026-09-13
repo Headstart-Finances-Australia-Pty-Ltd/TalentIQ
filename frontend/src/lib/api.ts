@@ -15,7 +15,25 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use(
   (res) => res,
   (err) => {
-    if (err.response?.status === 401) {
+    // A 401 from the login/register/verify/resend/reset endpoints means
+    // "bad credentials" or "invalid token" — not "your session expired".
+    // Auto-redirecting on those wipes the on-screen error message via a
+    // full page reload before the user ever sees it (LoginPage.tsx sets
+    // its own error state right after this same 401, and window.location
+    // navigation blows that state away, along with any pending timers).
+    // Only an unauthenticated-session 401 (missing/expired JWT on an
+    // authenticated request) should force the redirect to /login.
+    const authEndpoints = [
+      "/api/auth/login",
+      "/api/auth/register",
+      "/api/auth/verify-email",
+      "/api/auth/resend-verification",
+      "/api/auth/reset-request",
+      "/api/auth/reset-password",
+    ];
+    const url = err.config?.url || "";
+    const isAuthEndpoint = authEndpoints.some((p) => url.includes(p));
+    if (err.response?.status === 401 && !isAuthEndpoint) {
       localStorage.removeItem("talentiq_token");
       window.location.href = "/login";
     }
