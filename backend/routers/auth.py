@@ -37,8 +37,12 @@ VERIFICATION_TOKEN_EXPIRE_HOURS = 24
 async def register(payload: UserRegister, request: Request, db: AsyncSession = Depends(get_db)):
     # Check duplicate email
     result = await db.execute(select(User).where(User.email == payload.email))
-    if result.scalar_one_or_none():
-        raise HTTPException(status_code=409, detail="Email already registered")
+    user = result.scalar_one_or_none()
+
+    if not user:
+        raise HTTPException(status_code=401, detail="No account found with this email address.")
+    if not verify_password(payload.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
 
     # First ever user becomes admin
     count_result = await db.execute(select(func.count()).select_from(User))
