@@ -42,9 +42,9 @@ def frontend_base_url() -> str:
     """Base URL used to build links inside system emails (verification,
     etc). Sourced from FRONTEND_URL if set (recommended for production —
     Northflank exposes a public URL that differs from any backend-internal
-    one); falls back to localhost for local dev so this never crashes
+    one); falls back to tiqs.ai for local dev so this never crashes
     with an unset env var."""
-    return os.getenv("FRONTEND_URL", "http://localhost:5173").rstrip("/")
+    return os.getenv("FRONTEND_URL", "https://www.tiqs.ai").rstrip("/")
 
 
 def send_verification_email(smtp_cfg: dict, to_email: str, name: str, token: str):
