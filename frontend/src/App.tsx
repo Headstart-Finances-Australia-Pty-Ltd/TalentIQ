@@ -43,6 +43,7 @@ import AdminSetupPage from "./pages/AdminSetupPage";
 import FileManagerPage from "./pages/FileManagerPage";
 import AdminConsolePage from "./pages/AdminConsolePage";
 import AppLayout      from "./components/layout/AppLayout";
+import ResetPasswordPage from "./pages/ResetPasswordPage";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: 1, staleTime: 30_000 } },
@@ -77,6 +78,7 @@ export default function App() {
             <Route path="/login" element={<LoginPage />} />
             <Route path="/register" element={<RegisterPage />} />
             <Route path="/verify-email" element={<VerifyEmailPage />} />
+            <Route path="/reset-password" element={<ResetPasswordPage />} />
             <Route path="/interview/:token" element={<PublicInterviewPage />} />
             <Route path="/assessment/:token" element={<PublicAssessmentPage />} />
             <Route path="/careers/:slug" element={<CareerApplyPage />} />
