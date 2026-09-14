@@ -1083,6 +1083,9 @@ MIGRATIONS = [
     # only ever touches pre-existing accounts, never a genuinely
     # unverified new signup.
     "UPDATE tiq_users SET is_verified = TRUE WHERE is_verified = FALSE",
+    "ALTER TABLE tiq_subscriptions ADD COLUMN IF NOT EXISTS stripe_payment_intent_id VARCHAR(120) DEFAULT ''",
+    "ALTER TABLE tiq_subscriptions ADD COLUMN IF NOT EXISTS refunded_cents INTEGER DEFAULT 0",
+    "ALTER TABLE tiq_subscriptions ADD COLUMN IF NOT EXISTS pending_refund_cents INTEGER DEFAULT 0",
 ]
 
 async def run():
