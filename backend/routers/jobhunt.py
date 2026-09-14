@@ -96,6 +96,7 @@ async def upload_resume(
         resume.applicant_name = parsed.get("applicant_name")
         resume.skills = parsed.get("skills", [])
         resume.experience_years = parsed.get("experience_years")
+        resume.education = parsed.get("education")
         resume.parsed_data = parsed
     else:
         resume = Resume(
@@ -105,12 +106,25 @@ async def upload_resume(
             applicant_name=parsed.get("applicant_name"),
             skills=parsed.get("skills", []),
             experience_years=parsed.get("experience_years"),
+            education=parsed.get("education"),
             parsed_data=parsed,
         )
         db.add(resume)
     await db.commit()
     await db.refresh(resume)
-    return ResumeOut.model_validate(resume)
+    return _resume_to_out(resume)
+
+
+def _resume_to_out(resume: Resume) -> ResumeOut:
+    """email/phone aren't Resume columns — they only ever lived inside
+    parsed_data (see parse_resume_text) — so ResumeOut.model_validate(resume)
+    alone can't populate them; pulled in here instead so both
+    upload_resume and list_resumes return the same complete shape."""
+    out = ResumeOut.model_validate(resume)
+    pd = resume.parsed_data or {}
+    out.email = pd.get("email")
+    out.phone = pd.get("phone")
+    return out
 
 
 @router.get("/resumes", response_model=List[ResumeOut])
@@ -128,7 +142,7 @@ async def list_resumes(
     for r in result.scalars().all():
         if r.filename not in seen:
             seen.add(r.filename)
-            resumes.append(ResumeOut.model_validate(r))
+            resumes.append(_resume_to_out(r))
     return resumes
 
 
