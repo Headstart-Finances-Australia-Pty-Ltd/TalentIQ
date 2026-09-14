@@ -89,7 +89,30 @@ class Subscription(Base):
     amount_paid_cents        = Column(Integer, default=0)      # last successful payment amount, for reference
     stripe_customer_id       = Column(String(120), default="")
     stripe_checkout_session_id = Column(String(120), default="")
-    notes                    = Column(Text, default="")         # short human-readable log: "2026-06-01: Pro (monthly) - $49.00"
+    # The actual charge behind amount_paid_cents — required to issue a
+    # refund (stripe.Refund.create(payment_intent=...)) for mid-cycle
+    # downgrades/cancellations. Checkout Sessions don't expose this
+    # directly in the webhook payload for "payment" mode the way
+    # "subscription" mode does, so routers/billing.py's webhook handler
+    # fetches it via stripe.checkout.Session.retrieve(session_id) right
+    # after checkout.session.completed and stores it here once, rather
+    # than re-fetching from Stripe every time a refund might be needed.
+    stripe_payment_intent_id = Column(String(120), default="")
+    # Running total refunded against THIS term specifically (mid-cycle
+    # downgrade/cancel credit) — kept separate from amount_paid_cents
+    # (which stays as "what the plan nominally cost") so the two numbers
+    # together always answer "what did they actually end up paying,
+    # net" without destructively editing the original charge amount.
+    refunded_cents            = Column(Integer, default=0)
+    # Prorated credit calculated at cancellation time, awaiting an
+    # admin's manual "Issue Refund" click (see routers/billing.py's
+    # cancel_plan / admin_issue_refund) — unlike upgrade/downgrade,
+    # which apply credit and move money automatically, a cancellation's
+    # refund is real cash leaving the account and always needs a human
+    # to actually fire it. Zeroed out once the admin issues it (at
+    # which point the same amount moves into refunded_cents instead).
+    pending_refund_cents      = Column(Integer, default=0)
+    notes                     = Column(Text, default="")         # short human-readable log: "2026-06-01: Pro (monthly) - $49.00"
     created_at               = Column(DateTime, default=datetime.utcnow)
     updated_at               = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -103,6 +126,8 @@ class Subscription(Base):
             "start_date": self.start_date.isoformat() if self.start_date else None,
             "end_date": self.end_date.isoformat() if self.end_date else None,
             "amount_paid_cents": self.amount_paid_cents or 0,
+            "refunded_cents": self.refunded_cents or 0,
+            "pending_refund_cents": self.pending_refund_cents or 0,
         }
 
 
