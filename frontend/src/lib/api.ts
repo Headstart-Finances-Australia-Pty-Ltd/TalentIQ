@@ -728,6 +728,12 @@ export const billingApi = {
   startFreeDemo: () => api.post("/api/billing/start-free-demo").then((r) => r.data),
   createCheckout: (plan_slug: string, billing_period: "monthly" | "yearly") =>
     api.post("/api/billing/create-checkout", { plan_slug, billing_period }).then((r) => r.data),
+  changePlan: (plan_slug: string, billing_period: "monthly" | "yearly") =>
+    api.post("/api/billing/change-plan", { plan_slug, billing_period }).then((r) => r.data),
+  cancelPlan: () => api.post("/api/billing/cancel-plan").then((r) => r.data),
+  adminListPendingRefunds: () => api.get("/api/billing/admin/pending-refunds").then((r) => r.data),
+  adminIssueRefund: (userId: number, amount_cents = 0) =>
+    api.post(`/api/billing/admin/subscriptions/${userId}/issue-refund`, { amount_cents }).then((r) => r.data),
   adminListPlans: () => api.get("/api/billing/admin/plans").then((r) => r.data),
   adminCreatePlan: (data: any) => api.post("/api/billing/admin/plans", data).then((r) => r.data),
   adminUpdatePlan: (id: number, data: any) => api.put(`/api/billing/admin/plans/${id}`, data).then((r) => r.data),
