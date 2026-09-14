@@ -1,7 +1,7 @@
 import { useNavigate } from "react-router-dom";
 import { useState, useRef, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Upload, Search, Target, Download, ExternalLink, ChevronDown, ChevronUp, FileText, AlertTriangle, Sparkles } from "lucide-react";
+import { Upload, Search, Target, Download, ExternalLink, ChevronDown, ChevronUp, FileText, AlertTriangle, Sparkles, X } from "lucide-react";
 import { jobhuntApi, resumecraftApi, downloadBlob } from "../lib/api";
 import { useAuth } from "../hooks/useAuth";
 import { useLatestMutation } from "../hooks/useLatestMutation";
@@ -163,6 +163,10 @@ export default function JobHunterPage() {
   // Resume
   const { data: resumes = [] } = useQuery({ queryKey: ["resumes"], queryFn: jobhuntApi.listResumes });
   const [selectedResumeId, setSelectedResumeId] = useState<number | null>(null);
+    // Opens the "all extracted details" popup — see TC-JH-01. Deliberately
+  // separate from selectedResumeId so opening/closing the popup never
+  // touches which resume is actually selected for matching.
+  const [showResumeDetails, setShowResumeDetails] = useState(false);
 
   // "Generate Tailored Resume" (JobHunter -> CVAnalysis -> ResumeCraft
   // bridge): analyzes the chosen resume against THIS job's description
@@ -362,12 +366,18 @@ export default function JobHunterPage() {
                 <span className="tiq-badge tiq-badge-teal">✓ Uploaded</span>
               )}
             </div>
+            
             {selectedResumeId && resumes.find((r: any) => r.id === selectedResumeId) && (
-              <div style={{ marginTop: 12, padding: "10px 14px", background: "var(--slate-100)", borderRadius: 8, fontSize: 13 }}>
+              <div
+                onClick={() => setShowResumeDetails(true)}
+                title="Click to view all extracted details"
+                style={{ marginTop: 12, padding: "10px 14px", background: "var(--slate-100)", borderRadius: 8, fontSize: 13, cursor: "pointer" }}
+              >
                 <strong>Skills detected:</strong>{" "}
                 {resumes.find((r: any) => r.id === selectedResumeId)?.skills?.slice(0, 8).join(", ") || "—"}
               </div>
             )}
+            
             {!selectedResumeId && (
               <div style={{ marginTop: 12, fontSize: 12, color: "var(--text-muted)" }}>
                 Select or upload a resume to have match scores attached to your search results automatically.
@@ -668,11 +678,78 @@ export default function JobHunterPage() {
                     {expanded && <MatchDetailsPanel match={m} isAdmin={isAdmin} />}
                   </div>
                 );
-              })}
+                            })}
             </div>
           )}
         </div>
       )}
+
+      {showResumeDetails && selectedResumeId && (
+        <ResumeDetailsModal
+          resume={resumes.find((r: any) => r.id === selectedResumeId)}
+          onClose={() => setShowResumeDetails(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+// Popup triggered by clicking the "Skills detected" bar — shows every
+// field parse_resume_text (agents/jobhunt_agent.py) actually extracts:
+// full skill list (untruncated, unlike the 8-item teaser in the bar
+// itself), experience, education and contact details. Deliberately a
+// separate component/overlay rather than changing the existing bar's
+// own layout — the bar itself is unchanged aside from becoming clickable.
+function ResumeDetailsModal({ resume, onClose }: { resume: any; onClose: () => void }) {
+  if (!resume) return null;
+  const Row = ({ label, value }: { label: string; value: any }) =>
+    value ? (
+      <div style={{ marginBottom: 12 }}>
+        <div style={{ fontSize: 10.5, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 3 }}>
+          {label}
+        </div>
+        <div style={{ fontSize: 13.5, color: "#111827" }}>{value}</div>
+      </div>
+    ) : null;
+
+  return (
+    <div
+      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", zIndex: 1300, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}
+      onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div style={{ background: "#fff", borderRadius: 14, padding: 24, maxWidth: 520, width: "100%", maxHeight: "82vh", overflowY: "auto", boxShadow: "0 25px 60px rgba(0,0,0,.4)" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <div style={{ fontWeight: 800, fontSize: 17, color: "#111827" }}>Extracted Resume Details</div>
+          <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: "#6b7280" }}>
+            <X size={18} />
+          </button>
+        </div>
+
+        <Row label="Applicant Name" value={resume.applicant_name} />
+        <Row label="Email" value={resume.email} />
+        <Row label="Phone" value={resume.phone} />
+        <Row label="Experience" value={resume.experience_years ? `${resume.experience_years}+ years` : null} />
+        <Row label="Education" value={resume.education} />
+
+        {resume.skills?.length > 0 && (
+          <div style={{ marginBottom: 4 }}>
+            <div style={{ fontSize: 10.5, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 6 }}>
+              All Skills Detected ({resume.skills.length})
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+              {resume.skills.map((s: string, i: number) => (
+                <span key={i} className="tiq-badge tiq-badge-teal" style={{ fontSize: 11.5 }}>{s}</span>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {!resume.email && !resume.phone && !resume.education && !resume.experience_years && (
+          <div style={{ fontSize: 12.5, color: "var(--text-muted)", marginTop: 8 }}>
+            No additional details (phone/education/experience) could be extracted from this file beyond skills.
+          </div>
+        )}
+      </div>
     </div>
   );
 }
