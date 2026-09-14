@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
-import { Shield, Grid3x3, Database, Save, KeyRound, DollarSign } from "lucide-react";
+import { Shield, Grid3x3, Database, Save, KeyRound, DollarSign, Banknote } from "lucide-react";
 import { CAPABILITIES, JOBSEEKER_MODULES } from "../lib/capabilities";
 import AdminSetupPage from "./AdminSetupPage";
 import FileManagerPage from "./FileManagerPage";
 import ApiKeysTab from "./admin/ApiKeysTab";
 import PricingPlansTab from "./admin/PricingPlansTab";
+import RefundsTab from "./admin/RefundsTab";
 import DataTable from "../components/DataTable";
 
 const moduleToggleApi = {
@@ -199,7 +200,7 @@ const SYNC_CANDIDATELENS_MODULE_ROUTE = "interviews/sync-candidatelens-completio
 const PULL_FROM_REQUISITIONS_MODULE_ROUTE = "hiring-managers/pull-from-requisitions";
 
 export default function AdminConsolePage() {
-  const [tab, setTab] = useState<"modules" | "users" | "files" | "apikeys" | "pricing">("modules");
+  const [tab, setTab] = useState<"modules" | "users" | "files" | "apikeys" | "pricing" | "refunds">("modules");
 
   return (
     <div>
@@ -226,6 +227,9 @@ export default function AdminConsolePage() {
         <button className={`tiq-tab${tab === "pricing" ? " active" : ""}`} onClick={() => setTab("pricing")}>
           <DollarSign size={12} style={{ display: "inline", marginRight: 6 }} /> Pricing Plans
         </button>
+        <button className={`tiq-tab${tab === "refunds" ? " active" : ""}`} onClick={() => setTab("refunds")}>
+          <Banknote size={12} style={{ display: "inline", marginRight: 6 }} /> Refunds
+        </button>
       </div>
 
       {tab === "modules" && <ModulesManagementTab />}
@@ -233,6 +237,7 @@ export default function AdminConsolePage() {
       {tab === "files" && <FileManagerPage embedded />}
       {tab === "apikeys" && <ApiKeysTab />}
       {tab === "pricing" && <PricingPlansTab />}
+      {tab === "refunds" && <RefundsTab />}
     </div>
   );
 }
