@@ -182,6 +182,15 @@ class ResumeOut(BaseModel):
     applicant_name: Optional[str] = None
     skills: Optional[List[str]] = None
     experience_years: Optional[float] = None
+    # education is a real Resume column, already populated by
+    # parse_resume_text and simply never exposed here before. email/phone
+    # are NOT model columns — routers/jobhunt.py fills them in manually
+    # from resume.parsed_data when building this response, since that's
+    # where parse_resume_text's output already lives; from_attributes
+    # alone can't pick them up.
+    education: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
     uploaded_at: datetime
 
     model_config = {"from_attributes": True}
