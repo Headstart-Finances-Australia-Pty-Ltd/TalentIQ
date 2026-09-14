@@ -82,7 +82,7 @@ def send_verification_email(smtp_cfg: dict, to_email: str, name: str, token: str
         ),
     )
 
-    
+
 def send_password_reset_email(smtp_cfg: dict, to_email: str, name: str, token: str):
     link = f"{frontend_base_url()}/reset-password?token={token}"
     subject = "Reset your password — TalentIQ Solution"
@@ -111,6 +111,45 @@ def send_password_reset_email(smtp_cfg: dict, to_email: str, name: str, token: s
             "before password resets can be emailed."
         ),
     )
+
+
+def send_payment_confirmation_email(smtp_cfg: dict, to_email: str, name: str, plan_name: str, billing_period: str, amount_display: str):
+    """A TalentIQ-branded confirmation, sent via the platform's own
+    System Email SMTP — independent of Stripe's own native receipt
+    email, which Stripe deliberately withholds in test mode unless the
+    checkout email belongs to a verified user on the Stripe account
+    itself (see https://docs.stripe.com/receipts#test-receipts). Using
+    our own configured SMTP here means this confirmation always sends,
+    in test mode and live mode alike, regardless of that Stripe-side
+    restriction — Stripe's receipt (when it does send) is a separate,
+    additional email, not a replacement for this one."""
+    subject = f"Payment confirmed — TalentIQ {plan_name}"
+    html_body = f"""
+    <div style="font-family: -apple-system, Arial, sans-serif; max-width: 480px; margin: 0 auto;">
+      <h2 style="color:#00c7b7;">Payment confirmed</h2>
+      <p>Hi {name or ''},</p>
+      <p>Thanks for your payment — your <strong>TalentIQ {plan_name}</strong> plan ({billing_period}) is now active.</p>
+      <p style="background:#f8fafc; border-radius:8px; padding:14px 18px; font-size:14px;">
+        <strong>Plan:</strong> {plan_name}<br>
+        <strong>Billing period:</strong> {billing_period}<br>
+        <strong>Amount charged:</strong> {amount_display}
+      </p>
+      <p style="font-size:12px; color:#6b7280;">You can review your plan and billing history anytime under
+      Settings &gt; Billing. This is a confirmation from TalentIQ — Stripe may also send its own separate
+      payment receipt to this address.</p>
+    </div>
+    """
+    send_email(
+        smtp_cfg, to_email, subject, html_body,
+        credentials_location="Admin Console > API Keys > System Email (service: system_smtp)",
+        unconfigured_hint=(
+            "The platform's system mailbox (System Email / SMTP) hasn't been configured yet, so "
+            "payment confirmation emails can't be sent — the payment itself still succeeded. "
+            "An admin needs to set it up under Admin Console > API Keys > System Email "
+            "(service: system_smtp; key names: host, port, username, password, from_email)."
+        ),
+    )
+
 
 def send_email(
     smtp_cfg: dict, to_email: str, subject: str, html_body: str,
