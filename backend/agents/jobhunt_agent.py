@@ -757,6 +757,36 @@ def parse_resume_text(text: str) -> Dict:
     )
     email = email_match.group() if email_match else None
 
+    # Phone — same permissive shape CVIntel's own extraction uses
+    # (frontend/src/pages/CVIntelPage.tsx's phoneM regex), kept consistent
+    # so a phone number that CVIntel finds on a resume isn't silently
+    # missed here just because JobHunt's parser used a stricter pattern.
+    phone_match = re.search(r"(\+?\d[\d\s\-()]{7,18}\d)", text)
+    phone = phone_match.group(0).strip() if phone_match else None
+
+    # Education — best-effort: prefer an explicit "EDUCATION" section
+    # header and take the next non-blank line(s) under it; fall back to
+    # scanning the whole document for a line containing a common
+    # degree/qualification keyword, since not every resume uses a
+    # section header at all (e.g. a single-paragraph CV).
+    education = None
+    degree_kw = re.compile(
+        r"\b(bachelor|master|mba|phd|b\.?sc|b\.?eng|b\.?a|b\.?com|m\.?sc|m\.?eng|"
+        r"m\.?it|diploma|associate degree|higher diploma)\b", re.IGNORECASE,
+    )
+    for i, line in enumerate(lines):
+        if re.match(r"^education\b", line, re.IGNORECASE):
+            for follow in lines[i + 1: i + 4]:
+                if follow and not re.match(r"^[A-Z ]{4,}$", follow):  # skip a following section header
+                    education = follow
+                    break
+            break
+    if not education:
+        for line in lines:
+            if degree_kw.search(line):
+                education = line
+                break
+
     # Skills detection (simple keyword matching)
     tech_keywords = [
         "python", "java", "javascript", "typescript", "react", "sql", "postgresql",
@@ -775,11 +805,12 @@ def parse_resume_text(text: str) -> Dict:
     return {
         "applicant_name": applicant_name,
         "email": email,
+        "phone": phone,
+        "education": education,
         "skills": skills,
         "experience_years": experience_years,
         "raw_text": text,
     }
-
 
 # ─────────────────────────────────────────────
 # RESUME-JOB MATCHER
