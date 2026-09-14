@@ -29,6 +29,7 @@ from models.models import User
 from models.billing_models import PricingPlan, Subscription, SubscriptionHistory
 from utils.auth_utils import get_current_user, require_admin
 from utils.credentials import get_global_credentials
+from utils.email_send import get_system_smtp_config, send_payment_confirmation_email
 
 router = APIRouter()
 
@@ -248,6 +249,25 @@ async def stripe_webhook(request: Request, stripe_signature: str = Header(None, 
                 amount_display = f"${(session.get('amount_total', 0) or 0) / 100:.2f}"
                 sub.notes = ((sub.notes or "") + f"\n{now.date()}: {plan.name} ({billing_period}) — {amount_display}").strip()
                 await db.commit()
+
+                # TalentIQ's own confirmation, via the platform's
+                # configured System Email SMTP — deliberately independent
+                # of Stripe's native receipt, which Stripe withholds in
+                # test mode unless the checkout email belongs to a
+                # verified user on the Stripe account itself. Best-effort:
+                # a failure here must never roll back or re-raise, since
+                # the subscription is already committed and the payment
+                # already succeeded — an unconfigured/broken mailbox
+                # shouldn't turn a successful purchase into a 500 for
+                # Stripe's webhook retry logic to keep hammering.
+                user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+                if user:
+                    try:
+                        smtp_cfg = await get_system_smtp_config(db)
+                        send_payment_confirmation_email(smtp_cfg, user.email, user.name, plan.name, billing_period, amount_display)
+                        print(f"[billing webhook] Payment confirmation email sent to {user.email}")
+                    except Exception as e:
+                        print(f"[billing webhook] Failed to send payment confirmation email to {user.email}: {e}")
 
     return {"received": True}
 
