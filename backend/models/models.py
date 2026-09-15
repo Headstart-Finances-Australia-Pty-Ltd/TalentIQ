@@ -201,6 +201,14 @@ class JobSearch(Base):
     id            = Column(Integer, primary_key=True, index=True)
     sequence_number = Column(Integer)  # per-user sequential display number (1, 2, 3...)
     user_id       = Column(Integer, ForeignKey("tiq_users.id"), index=True, nullable=False)
+    # Which resume (if any) was selected in the dropdown when this search
+    # was run. Nullable — a search can be run with no resume selected at
+    # all (plain listing, no matching). Lets the Results tab, and
+    # deleting/clearing a resume, scope a search to the resume that
+    # produced it instead of every search bleeding together regardless of
+    # which resume was active. Plain column only (see schema_sync.py) —
+    # no DB-level FK constraint is auto-applied for existing deployments.
+    resume_id     = Column(Integer, ForeignKey("tiq_resumes.id"), index=True, nullable=True)
     role          = Column(String(200))
     location      = Column(String(200))
     industry      = Column(String(200))
