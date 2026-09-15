@@ -254,6 +254,11 @@ export default function JobHuntPage() {
     mutationFn: (id: number) => jobhuntApi.deleteResume(id),
     onSuccess: (_data, deletedId) => {
       qc.invalidateQueries({ queryKey: ["resumes"] });
+      // The backend also deletes every search/match tied to this resume
+      // (see delete_resume) — invalidate both so the Results tab doesn't
+      // keep showing stale, now-deleted searches/matches for it.
+      qc.invalidateQueries({ queryKey: ["searches"] });
+      qc.invalidateQueries({ queryKey: ["matches"] });
       // If the deleted resume was the selected one, clear the selection
       // (and close its details popup, if open) so nothing stale lingers.
       setSelectedResumeId((cur) => {
@@ -277,6 +282,7 @@ export default function JobHuntPage() {
     mutationKey: ["jobhunt-search"],
     mutationFn: () => jobhuntApi.searchJobs({
       ...searchForm,
+      resume_id: selectedResumeId,
       salary_min: searchForm.salary_min ? parseInt(searchForm.salary_min) : null,
       salary_max: searchForm.salary_max ? parseInt(searchForm.salary_max) : null,
       max_results: searchForm.max_results ? parseInt(searchForm.max_results) : 25,
@@ -291,7 +297,13 @@ export default function JobHuntPage() {
   // scraped, and shows the result here again whenever they come back,
   // regardless of which mount originally triggered it.
   const searchState = useLatestMutation<any>(["jobhunt-search"]);
-  const currentSearch = searchState.status === "success" ? searchState.data ?? null : null;
+  const rawCurrentSearch = searchState.status === "success" ? searchState.data ?? null : null;
+  // Only trust the live in-session search if it was actually run against
+  // the resume that's CURRENTLY selected. Without this check, switching
+  // the resume dropdown after running a search kept showing that old
+  // search's jobs/notice under the new resume, since rawCurrentSearch
+  // just sits in mutation cache regardless of what's selected now.
+  const currentSearch = rawCurrentSearch && rawCurrentSearch.resume_id === selectedResumeId ? rawCurrentSearch : null;
 
   // Persisted searches (unlike currentSearch above, this survives a page
   // reload/navigation — it's a real GET, not in-memory mutation state).
@@ -302,9 +314,16 @@ export default function JobHuntPage() {
   // very same search's matches, which is exactly the confusing state this
   // fixes — that had nothing to do with matching being broken, it was the
   // Results tab losing track of which search to display.
+  //
+  // Scoped to the selected resume (?resume_id=) — and refetched whenever
+  // that selection changes, via selectedResumeId in the query key — so
+  // the Results tab only ever shows the searches/jobs that were run under
+  // THIS resume, not every resume's history mixed together. With no
+  // resume selected there's nothing resume-specific to show yet.
   const { data: persistedSearches = [] } = useQuery({
-    queryKey: ["searches"],
-    queryFn: jobhuntApi.listSearches,
+    queryKey: ["searches", selectedResumeId],
+    queryFn: () => jobhuntApi.listSearches(selectedResumeId),
+    enabled: !!selectedResumeId,
   });
   const latestPersistedSearch = persistedSearches[0] || null;
   // Prefer the live in-session search (has the freshest `notice`, and is
@@ -312,8 +331,11 @@ export default function JobHuntPage() {
   // recent persisted one so results survive a reload.
   const displaySearch = currentSearch || latestPersistedSearch;
 
+  // Wipes this resume's search/match history only — scoped by passing
+  // selectedResumeId through to the backend, so clearing history for one
+  // resume never touches another resume's searches or matches.
   const deleteAllMutation = useMutation({
-    mutationFn: () => jobhuntApi.deleteAllSearches(),
+    mutationFn: () => jobhuntApi.deleteAllSearches(selectedResumeId),
     onSuccess: () => {
       // Both query keys — the previous version only invalidated
       // "searches", so the Results tab kept showing already-deleted
@@ -375,9 +397,14 @@ export default function JobHuntPage() {
     }
   }, [searchState.status, searchState.submittedAt]);
 
+  // Scoped to the selected resume for the same reason as persistedSearches
+  // above — otherwise "All-time top matches" mixed every resume's matches
+  // together and switching resumes in the dropdown never changed what
+  // showed up here.
   const { data: matches = [], isLoading: matchLoading } = useQuery({
-    queryKey: ["matches"],
-    queryFn: jobhuntApi.listMatches,
+    queryKey: ["matches", selectedResumeId],
+    queryFn: () => jobhuntApi.listMatches(selectedResumeId),
+    enabled: !!selectedResumeId,
   });
 
   // Matches for the CURRENT search (matchMutation's own response) take
@@ -698,6 +725,44 @@ export default function JobHuntPage() {
 
       {tab === "results" && (
         <div>
+          {/* Resume-scoped header: which resume's history is showing, and
+              a "Clear history" button for THAT resume's searches/matches
+              — moved up here (out from under "All-time top matches" below)
+              so it's visible on the Results tab regardless of whether any
+              matches have come back yet, and so it's unambiguous which
+              resume's history it clears. */}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
+            <div style={{ fontSize: 12.5, color: "var(--text-muted)" }}>
+              {selectedResumeId ? (
+                <>Showing results for <strong style={{ color: "var(--text-secondary)" }}>
+                  {resumes.find((r: any) => r.id === selectedResumeId)?.filename || "selected resume"}
+                </strong></>
+              ) : (
+                "Select a resume on Search & Match to see its results here."
+              )}
+            </div>
+            <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+              {deleteAllMutation.isError && (
+                <span style={{ fontSize: 12, color: "#ef4444" }}>
+                  Couldn't clear history: {(deleteAllMutation.error as any)?.response?.data?.detail || (deleteAllMutation.error as any)?.message || "Please try again."}
+                </span>
+              )}
+              {selectedResumeId && (jobs.length > 0 || matches.length > 0) && (
+                <button
+                  className="tiq-btn tiq-btn-ghost tiq-btn-sm"
+                  onClick={() => {
+                    if (window.confirm("Clear this resume's search & match history? This cannot be undone.")) {
+                      deleteAllMutation.mutate();
+                    }
+                  }}
+                  disabled={deleteAllMutation.isPending}
+                >
+                  <Trash2 size={12} /> {deleteAllMutation.isPending ? "Clearing…" : "Clear history"}
+                </button>
+              )}
+            </div>
+          </div>
+
           {displaySearch?.notice && (
             <div className="tiq-alert tiq-alert-warning" style={{ marginBottom: 12 }}>
               {displaySearch.notice}
@@ -824,16 +889,25 @@ export default function JobHuntPage() {
           ) : (
             <div className="tiq-empty tiq-mb-6">
               <Search size={40} />
-              <div className="tiq-empty-title">No search results yet</div>
-              <div>Run a search on the Search & Match tab — results open here automatically once it's done</div>
+              <div className="tiq-empty-title">
+                {selectedResumeId ? "No search results yet for this resume" : "No search results yet"}
+              </div>
+              <div>
+                {selectedResumeId
+                  ? "Run a search on the Search & Match tab with this resume selected — results open here automatically once it's done"
+                  : "Select a resume, then run a search on the Search & Match tab — results open here automatically once it's done"}
+              </div>
             </div>
           )}
 
-          {/* ALL-TIME TOP MATCHES — unchanged from the previous "Match
-              History" tab, just relocated underneath this search's own
-              results instead of being the only thing this tab showed. */}
+          {/* ALL-TIME TOP MATCHES (for the selected resume) — unchanged
+              layout from the previous "Match History" tab, just relocated
+              underneath this search's own results instead of being the
+              only thing this tab showed, and now scoped to whichever
+              resume is selected (see the `matches` query above) instead
+              of mixing every resume's matches together. */}
           <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text-secondary)", margin: "8px 0 10px" }}>
-            All-time top matches
+            Top matches for this resume
           </div>
           {matchLoading ? (
             <div className="tiq-spinner-wrap"><div className="tiq-spinner" /></div>
@@ -845,22 +919,6 @@ export default function JobHuntPage() {
             </div>
           ) : (
             <div className="tiq-card">
-              <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 8, gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-                {deleteAllMutation.isError && (
-                  <span style={{ fontSize: 12, color: "#ef4444" }}>
-                    Couldn't clear history: {(deleteAllMutation.error as any)?.response?.data?.detail || (deleteAllMutation.error as any)?.message || "Please try again."}
-                  </span>
-                )}
-                <button className="tiq-btn tiq-btn-ghost tiq-btn-sm"
-                  onClick={() => {
-                    if (window.confirm(`Clear all ${matches.length} match${matches.length === 1 ? "" : "es"} and their searches? This cannot be undone.`)) {
-                      deleteAllMutation.mutate();
-                    }
-                  }}
-                  disabled={deleteAllMutation.isPending}>
-                  {deleteAllMutation.isPending ? "Clearing…" : "Clear history"}
-                </button>
-              </div>
               {matches.map((m: any, i: number) => {
                 const expanded = expandedMatchId === m.id;
                 return (
