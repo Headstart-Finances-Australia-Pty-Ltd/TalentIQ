@@ -116,6 +116,11 @@ class APIKeyOut(BaseModel):
 class JobSearchRequest(BaseModel):
     role: str
     location: str = "All"
+    # Resume selected in the dropdown at the moment this search was
+    # launched, if any — stamped onto the persisted JobSearch so the
+    # Results tab (and resume delete/clear-history) can scope a search to
+    # the resume that produced it. None if no resume was selected.
+    resume_id: Optional[int] = None
     industry: Optional[str] = None
     job_type: Optional[str] = "All"
     salary_min: Optional[int] = None
@@ -177,6 +182,11 @@ class JobSearchOut(BaseModel):
     sequence_number: Optional[int] = None
     role: str
     location: Optional[str] = None
+    # Resume this search was run against (None if none was selected at the
+    # time) — lets the frontend confirm a just-completed in-memory search
+    # still belongs to whichever resume is currently selected before
+    # displaying it.
+    resume_id: Optional[int] = None
     results_count: int
     searched_at: datetime
     jobs: List[JobOut] = []
