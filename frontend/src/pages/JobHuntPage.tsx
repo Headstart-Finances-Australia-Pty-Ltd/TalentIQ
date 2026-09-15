@@ -293,6 +293,25 @@ export default function JobHuntPage() {
   const searchState = useLatestMutation<any>(["jobhunt-search"]);
   const currentSearch = searchState.status === "success" ? searchState.data ?? null : null;
 
+  // Persisted searches (unlike currentSearch above, this survives a page
+  // reload/navigation — it's a real GET, not in-memory mutation state).
+  // Needed because currentSearch resets to null on reload even though the
+  // search and its jobs are still sitting in the database: without this,
+  // the Results tab would say "No search results yet" right after a
+  // refresh while "All-time top matches" right below it still showed the
+  // very same search's matches, which is exactly the confusing state this
+  // fixes — that had nothing to do with matching being broken, it was the
+  // Results tab losing track of which search to display.
+  const { data: persistedSearches = [] } = useQuery({
+    queryKey: ["searches"],
+    queryFn: jobhuntApi.listSearches,
+  });
+  const latestPersistedSearch = persistedSearches[0] || null;
+  // Prefer the live in-session search (has the freshest `notice`, and is
+  // guaranteed to be the one that was JUST run); fall back to the most
+  // recent persisted one so results survive a reload.
+  const displaySearch = currentSearch || latestPersistedSearch;
+
   const deleteAllMutation = useMutation({
     mutationFn: () => jobhuntApi.deleteAllSearches(),
     onSuccess: () => {
@@ -356,17 +375,24 @@ export default function JobHuntPage() {
     }
   }, [searchState.status, searchState.submittedAt]);
 
-  // Matches for the CURRENT search only (matchMutation's own response) —
-  // deliberately not the global `matches` list below, which is capped at
-  // the top 50 by score across ALL history and could cut off a fresh,
-  // lower-scoring batch entirely.
-  const currentMatches: any[] = matchState.status === "success" ? matchState.data ?? [] : [];
-  const matchesByJobId: Record<number, any> = Object.fromEntries(currentMatches.map((m: any) => [m.job_id, m]));
-
   const { data: matches = [], isLoading: matchLoading } = useQuery({
     queryKey: ["matches"],
     queryFn: jobhuntApi.listMatches,
   });
+
+  // Matches for the CURRENT search (matchMutation's own response) take
+  // priority — they're the freshest and cover every job in this search
+  // regardless of score. The global `matches` list is layered underneath
+  // as a fallback ONLY so scores survive a reload (see displaySearch
+  // above): it's capped at the top 50 by score across ALL history, so a
+  // job whose match exists in the database but didn't make that top-50
+  // cut still won't show a score here after a refresh — a real, if
+  // narrower, gap than the "no results at all" bug this was added to fix.
+  const currentMatches: any[] = matchState.status === "success" ? matchState.data ?? [] : [];
+  const matchesByJobId: Record<number, any> = {
+    ...Object.fromEntries(matches.map((m: any) => [m.job_id, m])),
+    ...Object.fromEntries(currentMatches.map((m: any) => [m.job_id, m])),
+  };
 
   const exportMutation = useMutation({
     mutationFn: (searchId: number) => jobhuntApi.exportExcel(searchId),
@@ -376,7 +402,7 @@ export default function JobHuntPage() {
   const setF = (k: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
     setSearchForm((f) => ({ ...f, [k]: e.target.value }));
 
-  const rawJobs = currentSearch?.jobs || [];
+  const rawJobs = displaySearch?.jobs || [];
   // "ats_score" sort has to happen client-side: no match exists yet at
   // search time (matching runs automatically right after, see the effect
   // above), so this re-sorts once scores start coming in. Jobs without a
@@ -672,9 +698,9 @@ export default function JobHuntPage() {
 
       {tab === "results" && (
         <div>
-          {currentSearch?.notice && (
+          {displaySearch?.notice && (
             <div className="tiq-alert tiq-alert-warning" style={{ marginBottom: 12 }}>
-              {currentSearch.notice}
+              {displaySearch.notice}
             </div>
           )}
           {matchState.status === "pending" && (
@@ -692,15 +718,20 @@ export default function JobHuntPage() {
               free-form card list) so clicking a column header rearranges
               rows by that column immediately; the whole row expands into a
               detail row underneath for description/match breakdown,
-              exactly as the old cards did. */}
+              exactly as the old cards did. Sourced from displaySearch
+              (currentSearch if this session ran the search, otherwise the
+              latest persisted search) so results survive a page reload
+              instead of showing "No search results yet" underneath an
+              "All-time top matches" list that's clearly non-empty — see
+              displaySearch's own comment above for why that happened. */}
           {jobs.length > 0 ? (
             <div className="tiq-card tiq-mb-6">
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
                 <div className="tiq-card-title" style={{ marginBottom: 0 }}>
-                  {jobs.length} job{jobs.length === 1 ? "" : "s"} found for "{currentSearch?.role}"
+                  {jobs.length} job{jobs.length === 1 ? "" : "s"} found for "{displaySearch?.role}"
                 </div>
-                {currentSearch && (
-                  <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" onClick={() => exportMutation.mutate(currentSearch.id)} disabled={exportMutation.isPending}>
+                {displaySearch && (
+                  <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" onClick={() => exportMutation.mutate(displaySearch.id)} disabled={exportMutation.isPending}>
                     <Download size={14} /> Export Excel
                   </button>
                 )}
