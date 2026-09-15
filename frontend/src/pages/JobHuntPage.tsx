@@ -1,13 +1,64 @@
 import { useNavigate } from "react-router-dom";
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useMemo, Fragment } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Upload, Search, Target, Download, ExternalLink, ChevronDown, ChevronUp, FileText, AlertTriangle, Sparkles, X, Trash2 } from "lucide-react";
+import { Upload, Search, Target, Download, ExternalLink, ChevronDown, ChevronUp, FileText, AlertTriangle, Sparkles, X, Trash2, ArrowUp, ArrowDown, ArrowUpDown } from "lucide-react";
 import { jobhuntApi, resumecraftApi, downloadBlob } from "../lib/api";
 import { useAuth } from "../hooks/useAuth";
 import { useLatestMutation } from "../hooks/useLatestMutation";
 
 function scoreColor(score: number) {
   return score >= 70 ? "var(--teal-500)" : score >= 50 ? "#f59e0b" : "#f43f5e";
+}
+
+// Client-side mirror of agents/jobhunt_agent.py's estimate_recency_rank —
+// used to sort the Results table by "Posted" since that field arrives as
+// wildly different formats per source (LinkedIn's relative text like "3
+// days ago" vs Seek's ISO date), and the Results table's own sort control
+// needs to compare them client-side without a round trip to the backend.
+// Lower = more recent; unparseable/missing sorts last.
+function recencyRank(publishedDate?: string | null): number {
+  if (!publishedDate) return 9999;
+  const text = publishedDate.trim().toLowerCase();
+  if (["just now", "just posted", "today", "new"].includes(text)) return 0;
+  const relative = text.match(/^(\d+)\s*(second|minute|hour|day|week|month|year)s?\s*ago$/);
+  if (relative) {
+    const amount = parseInt(relative[1], 10);
+    const daysPerUnit: Record<string, number> = {
+      second: 1 / 86400, minute: 1 / 1440, hour: 1 / 24,
+      day: 1, week: 7, month: 30, year: 365,
+    };
+    return amount * daysPerUnit[relative[2]];
+  }
+  const compact = text.match(/^(\d+)\s*(mo|w|d|h)$/);
+  if (compact) {
+    const amount = parseInt(compact[1], 10);
+    const daysPerUnit: Record<string, number> = { h: 1 / 24, d: 1, w: 7, mo: 30 };
+    return amount * daysPerUnit[compact[2]];
+  }
+  const iso = text.slice(0, 10).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (iso) {
+    const parsed = new Date(text.slice(0, 10));
+    if (!isNaN(parsed.getTime())) {
+      return Math.max(0, (Date.now() - parsed.getTime()) / 86400000);
+    }
+  }
+  return 9999;
+}
+
+// Clickable column header for the Results table — click sorts by that
+// column (toggling direction on repeated clicks), with an arrow showing
+// the currently-active column and direction so it's clear at a glance
+// what the table is sorted by, not just that it CAN be sorted.
+function SortableTh({ label, sortKey, sort, onSort, width }: { label: string; sortKey: string; sort: { key: string; dir: "asc" | "desc" }; onSort: (key: any) => void; width?: string }) {
+  const active = sort.key === sortKey;
+  const Icon = active ? (sort.dir === "asc" ? ArrowUp : ArrowDown) : ArrowUpDown;
+  return (
+    <th style={{ width, cursor: "pointer", userSelect: "none" }} onClick={() => onSort(sortKey)}>
+      <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+        {label} <Icon size={12} style={{ opacity: active ? 1 : 0.4 }} />
+      </span>
+    </th>
+  );
 }
 
 // Distinguishes "nothing configured" from "something's configured but the
@@ -155,7 +206,7 @@ export default function JobHuntPage() {
   const isAdmin = user?.role === "admin";
   const qc = useQueryClient();
   const navigate = useNavigate();
-  const [tab, setTab] = useState<"search" | "matches">("search");
+  const [tab, setTab] = useState<"search" | "results">("search");
   const [expandedJob, setExpandedJob] = useState<number | null>(null);
   const [expandedMatchId, setExpandedMatchId] = useState<number | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -246,7 +297,7 @@ export default function JobHuntPage() {
     mutationFn: () => jobhuntApi.deleteAllSearches(),
     onSuccess: () => {
       // Both query keys — the previous version only invalidated
-      // "searches", so the Match History tab kept showing already-deleted
+      // "searches", so the Results tab kept showing already-deleted
       // matches until something else happened to invalidate "matches"
       // (e.g. a fresh match run). That's why "Clear history" looked like
       // it wasn't doing anything even though the backend deletion itself
@@ -285,6 +336,26 @@ export default function JobHuntPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchState.status, searchState.submittedAt, selectedResumeId]);
 
+  // Opens the Results tab the moment a search finishes — the job list
+  // used to render inline at the bottom of THIS tab (Search & Match),
+  // which meant results and the search form that produced them were
+  // stacked in the same place and easy to miss after scrolling past the
+  // form. Switching immediately on search success (rather than waiting
+  // for matching too, which can take a few seconds per job) means the
+  // person lands on Results right away and watches match scores fill in
+  // there, instead of staring at an unchanged form.
+  const lastAutoTabSwitchAt = useRef<number | null>(null);
+  useEffect(() => {
+    if (
+      searchState.status === "success" &&
+      searchState.submittedAt &&
+      searchState.submittedAt !== lastAutoTabSwitchAt.current
+    ) {
+      lastAutoTabSwitchAt.current = searchState.submittedAt;
+      setTab("results");
+    }
+  }, [searchState.status, searchState.submittedAt]);
+
   // Matches for the CURRENT search only (matchMutation's own response) —
   // deliberately not the global `matches` list below, which is capped at
   // the top 50 by score across ALL history and could cut off a fresh,
@@ -319,6 +390,51 @@ export default function JobHuntPage() {
       })
     : rawJobs;
 
+  // Sorting for the Results tab's table — separate from searchForm.sort_by
+  // above, which only controls the order each SOURCE is asked to return
+  // results in (and the one-time "ats_score" client sort right after a
+  // search). This is a live, column-click-driven re-sort of whatever's
+  // currently displayed, so clicking a different column header rearranges
+  // the table immediately without re-running the search.
+  type ResultsSortKey = "match" | "title" | "company" | "location" | "posted" | "salary";
+  const [resultsSort, setResultsSort] = useState<{ key: ResultsSortKey; dir: "asc" | "desc" }>({ key: "match", dir: "desc" });
+  const toggleResultsSort = (key: ResultsSortKey) =>
+    setResultsSort((cur) => cur.key === key ? { key, dir: cur.dir === "asc" ? "desc" : "asc" } : { key, dir: key === "title" || key === "company" || key === "location" ? "asc" : "desc" });
+
+  const sortedJobs = useMemo(() => {
+    const arr = [...jobs];
+    const { key, dir } = resultsSort;
+    const mul = dir === "asc" ? 1 : -1;
+    arr.sort((a: any, b: any) => {
+      switch (key) {
+        case "match": {
+          const sa = matchesByJobId[a.id]?.ats_score ?? -1;
+          const sb = matchesByJobId[b.id]?.ats_score ?? -1;
+          return (sa - sb) * mul;
+        }
+        case "title":
+          return (a.title || "").localeCompare(b.title || "") * mul;
+        case "company":
+          return (a.company || "").localeCompare(b.company || "") * mul;
+        case "location":
+          return (a.location || "").localeCompare(b.location || "") * mul;
+        case "posted":
+          // recencyRank is "lower = more recent", so "desc" (newest first,
+          // the sensible default direction for a date column) needs the
+          // comparison INVERTED relative to every other numeric column.
+          return (recencyRank(a.published_date) - recencyRank(b.published_date)) * -mul;
+        case "salary": {
+          const sa = a.salary_max ?? a.salary_min ?? -1;
+          const sb = b.salary_max ?? b.salary_min ?? -1;
+          return (sa - sb) * mul;
+        }
+        default:
+          return 0;
+      }
+    });
+    return arr;
+  }, [jobs, resultsSort, matchesByJobId]);
+
   return (
     <div>
       <div className="tiq-page-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 8 }}>
@@ -337,8 +453,8 @@ export default function JobHuntPage() {
         <button className={`tiq-tab${tab === "search" ? " active" : ""}`} onClick={() => setTab("search")}>
           Search & Match
         </button>
-        <button className={`tiq-tab${tab === "matches" ? " active" : ""}`} onClick={() => setTab("matches")}>
-          Match History ({matches.length})
+        <button className={`tiq-tab${tab === "results" ? " active" : ""}`} onClick={() => setTab("results")}>
+          Results ({jobs.length > 0 ? jobs.length : matches.length})
         </button>
       </div>
 
@@ -534,30 +650,10 @@ export default function JobHuntPage() {
                 <Search size={14} />
                 {searchState.status === "pending" ? "Searching…" : "Search jobs"}
               </button>
-              {currentSearch && (
-                <button
-                  className="tiq-btn tiq-btn-ghost"
-                  onClick={() => exportMutation.mutate(currentSearch.id)}
-                  disabled={exportMutation.isPending}
-                >
-                  <Download size={14} />
-                  Export Excel
-                </button>
-              )}
             </div>
             {searchState.status === "pending" && (
               <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 8 }}>
                 This keeps running even if you switch to another page.
-              </div>
-            )}
-            {matchState.status === "pending" && (
-              <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 8 }}>
-                Matching your resume against {jobs.length} job{jobs.length === 1 ? "" : "s"}…
-              </div>
-            )}
-            {matchState.status === "error" && (
-              <div className="tiq-alert tiq-alert-error" style={{ marginTop: 12 }}>
-                Matching failed: {(matchState.error as any)?.response?.data?.detail || (matchState.error as any)?.message || "Unknown error."}
               </div>
             )}
             {searchState.status === "error" && (
@@ -571,95 +667,143 @@ export default function JobHuntPage() {
               </div>
             )}
           </div>
+        </div>
+      )}
 
-          {/* JOB RESULTS — compact, collapsed rows; match score (if a
-              resume was selected) sits right in the row header, full
-              breakdown/cover letter only shown once expanded. */}
+      {tab === "results" && (
+        <div>
           {currentSearch?.notice && (
             <div className="tiq-alert tiq-alert-warning" style={{ marginBottom: 12 }}>
               {currentSearch.notice}
             </div>
           )}
-          {jobs.length > 0 && (
-            <div className="tiq-card">
-              <div className="tiq-card-title">
-                {jobs.length} jobs found for "{currentSearch?.role}"
-              </div>
-              {jobs.map((job: any) => {
-                const match = matchesByJobId[job.id];
-                const expanded = expandedJob === job.id;
-                return (
-                  <div key={job.id} style={{ borderTop: "1px solid var(--border)", paddingTop: 16, marginTop: 16 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, cursor: "pointer" }}
-                      onClick={() => setExpandedJob(expanded ? null : job.id)}>
-                      <div style={{ flex: 1 }}>
-                        <div style={{ fontSize: 15, fontWeight: 700, color: "var(--text-primary)", fontFamily: "var(--font-display)" }}>
-                          {job.title}
-                        </div>
-                        <div style={{ fontSize: 13, color: "var(--text-secondary)", marginTop: 3 }}>
-                          {job.company} · {job.location} · {job.job_type}
-                        </div>
-                        <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap", alignItems: "center" }}>
-                          <span className="tiq-badge tiq-badge-slate">{job.source}</span>
-                          {job.published_date && <span className="tiq-badge tiq-badge-slate">{job.published_date}</span>}
-                          {match && (
-                            <span className="tiq-badge" style={{ background: `${scoreColor(match.ats_score)}20`, color: scoreColor(match.ats_score), fontWeight: 700 }}>
-                              {match.ats_score}% match
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                      <div style={{ display: "flex", gap: 8, flexShrink: 0 }} onClick={(e) => e.stopPropagation()}>
-                        {job.apply_link && (
-                          <a href={job.apply_link} target="_blank" rel="noopener noreferrer"
-                            className="tiq-btn tiq-btn-primary tiq-btn-sm">
-                            <ExternalLink size={12} /> Apply
-                          </a>
-                        )}
-                        {selectedResumeId && (
-                          <button
-                            className="tiq-btn tiq-btn-outline tiq-btn-sm"
-                            disabled={craftMut.isPending && craftingJobId === job.id}
-                            onClick={() => craftMut.mutate({ resumeId: selectedResumeId, jobId: job.id })}
-                            title="Analyze your resume against this job, then generate a tailored resume & cover letter"
-                          >
-                            <Sparkles size={12} /> {craftMut.isPending && craftingJobId === job.id ? "Analyzing…" : "Generate Tailored Resume"}
-                          </button>
-                        )}
-                        <button className="tiq-btn tiq-btn-ghost tiq-btn-sm"
-                          onClick={() => setExpandedJob(expanded ? null : job.id)}>
-                          {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-                        </button>
-                      </div>
-                    </div>
-                    {expanded && (
-                      <div style={{ marginTop: 12 }}>
-                        {job.description && (
-                          <div style={{ fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.7,
-                            background: "var(--slate-100)", padding: "12px 14px", borderRadius: 8, marginBottom: match ? 12 : 0 }}>
-                            {job.description.slice(0, 600)}
-                            {job.description.length > 600 && "…"}
-                          </div>
-                        )}
-                        {match ? (
-                          <MatchDetailsPanel match={match} isAdmin={isAdmin} />
-                        ) : selectedResumeId ? (
-                          <div style={{ fontSize: 12, color: "var(--text-muted)" }}>No match score for this job yet.</div>
-                        ) : (
-                          <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Select a resume above to see a match score here.</div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
+          {matchState.status === "pending" && (
+            <div className="tiq-card tiq-mb-6" style={{ fontSize: 12, color: "var(--text-muted)" }}>
+              Matching your resume against {jobs.length} job{jobs.length === 1 ? "" : "s"}…
             </div>
           )}
-        </div>
-      )}
+          {matchState.status === "error" && (
+            <div className="tiq-alert tiq-alert-error" style={{ marginBottom: 12 }}>
+              Matching failed: {(matchState.error as any)?.response?.data?.detail || (matchState.error as any)?.message || "Unknown error."}
+            </div>
+          )}
 
-      {tab === "matches" && (
-        <div>
+          {/* CURRENT SEARCH RESULTS — a real sortable table (not the old
+              free-form card list) so clicking a column header rearranges
+              rows by that column immediately; the whole row expands into a
+              detail row underneath for description/match breakdown,
+              exactly as the old cards did. */}
+          {jobs.length > 0 ? (
+            <div className="tiq-card tiq-mb-6">
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
+                <div className="tiq-card-title" style={{ marginBottom: 0 }}>
+                  {jobs.length} job{jobs.length === 1 ? "" : "s"} found for "{currentSearch?.role}"
+                </div>
+                {currentSearch && (
+                  <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" onClick={() => exportMutation.mutate(currentSearch.id)} disabled={exportMutation.isPending}>
+                    <Download size={14} /> Export Excel
+                  </button>
+                )}
+              </div>
+              <div className="tiq-table-wrap">
+                <table className="tiq-table" style={{ tableLayout: "fixed" }}>
+                  <thead>
+                    <tr>
+                      <SortableTh label="Title" sortKey="title" sort={resultsSort} onSort={toggleResultsSort} width="24%" />
+                      <SortableTh label="Company" sortKey="company" sort={resultsSort} onSort={toggleResultsSort} width="16%" />
+                      <SortableTh label="Location" sortKey="location" sort={resultsSort} onSort={toggleResultsSort} width="14%" />
+                      <SortableTh label="Posted" sortKey="posted" sort={resultsSort} onSort={toggleResultsSort} width="11%" />
+                      <SortableTh label="Match" sortKey="match" sort={resultsSort} onSort={toggleResultsSort} width="9%" />
+                      <th style={{ width: "26%" }}>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sortedJobs.map((job: any) => {
+                      const match = matchesByJobId[job.id];
+                      const expanded = expandedJob === job.id;
+                      return (
+                        <Fragment key={job.id}>
+                          <tr style={{ cursor: "pointer" }} onClick={() => setExpandedJob(expanded ? null : job.id)}>
+                            <td style={{ fontSize: 13, fontWeight: 700 }}>{job.title}</td>
+                            <td style={{ fontSize: 12.5 }}>{job.company}</td>
+                            <td style={{ fontSize: 12.5 }}>{job.location}</td>
+                            <td style={{ fontSize: 12.5 }}>{job.published_date || "—"}</td>
+                            <td>
+                              {match ? (
+                                <span className="tiq-badge" style={{ background: `${scoreColor(match.ats_score)}20`, color: scoreColor(match.ats_score), fontWeight: 700 }}>
+                                  {match.ats_score}%
+                                </span>
+                              ) : "—"}
+                            </td>
+                            <td onClick={(e) => e.stopPropagation()}>
+                              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                                {job.apply_link && (
+                                  <a href={job.apply_link} target="_blank" rel="noopener noreferrer"
+                                    className="tiq-btn tiq-btn-primary tiq-btn-sm">
+                                    <ExternalLink size={12} /> Apply
+                                  </a>
+                                )}
+                                {selectedResumeId && (
+                                  <button
+                                    className="tiq-btn tiq-btn-outline tiq-btn-sm"
+                                    disabled={craftMut.isPending && craftingJobId === job.id}
+                                    onClick={() => craftMut.mutate({ resumeId: selectedResumeId, jobId: job.id })}
+                                    title="Analyze your resume against this job, then generate a tailored resume & cover letter"
+                                  >
+                                    <Sparkles size={12} /> {craftMut.isPending && craftingJobId === job.id ? "Analyzing…" : "Tailor"}
+                                  </button>
+                                )}
+                                <button className="tiq-btn tiq-btn-ghost tiq-btn-sm"
+                                  onClick={() => setExpandedJob(expanded ? null : job.id)}>
+                                  {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                          {expanded && (
+                            <tr>
+                              <td colSpan={6} style={{ background: "var(--slate-100)" }}>
+                                <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginBottom: job.description ? 10 : 0 }}>
+                                  <span className="tiq-badge tiq-badge-slate">{job.source}</span>
+                                  <span className="tiq-badge tiq-badge-slate">{job.job_type}</span>
+                                </div>
+                                {job.description && (
+                                  <div style={{ fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.7, marginBottom: match ? 12 : 0 }}>
+                                    {job.description.slice(0, 600)}
+                                    {job.description.length > 600 && "…"}
+                                  </div>
+                                )}
+                                {match ? (
+                                  <MatchDetailsPanel match={match} isAdmin={isAdmin} />
+                                ) : selectedResumeId ? (
+                                  <div style={{ fontSize: 12, color: "var(--text-muted)" }}>No match score for this job yet.</div>
+                                ) : (
+                                  <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Select a resume on Search & Match to see a match score here.</div>
+                                )}
+                              </td>
+                            </tr>
+                          )}
+                        </Fragment>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ) : (
+            <div className="tiq-empty tiq-mb-6">
+              <Search size={40} />
+              <div className="tiq-empty-title">No search results yet</div>
+              <div>Run a search on the Search & Match tab — results open here automatically once it's done</div>
+            </div>
+          )}
+
+          {/* ALL-TIME TOP MATCHES — unchanged from the previous "Match
+              History" tab, just relocated underneath this search's own
+              results instead of being the only thing this tab showed. */}
+          <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text-secondary)", margin: "8px 0 10px" }}>
+            All-time top matches
+          </div>
           {matchLoading ? (
             <div className="tiq-spinner-wrap"><div className="tiq-spinner" /></div>
           ) : matches.length === 0 ? (
