@@ -206,9 +206,13 @@ async def delete_resume(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Delete an uploaded resume and any job matches made against it —
-    the dropdown had no way to remove a resume before this (upload/list
-    only), so a mis-uploaded or outdated file could never be cleared out."""
+    """Delete an uploaded resume and everything derived from it — any job
+    matches made against it, AND every search that was run while it was
+    the selected resume (plus that search's own jobs). Previously only
+    the matches were cleaned up, so a deleted resume's searches/jobs kept
+    sitting in the database forever with nothing pointing at them (the
+    resume that "owned" them was gone) and no way left to reach or clear
+    them from the UI."""
     from sqlalchemy import delete as sql_delete
     result = await db.execute(
         select(Resume).where(Resume.id == resume_id, Resume.user_id == current_user.id)
@@ -217,8 +221,30 @@ async def delete_resume(
     if not resume:
         raise HTTPException(404, "Resume not found")
     # JobMatch.resume_id is NOT NULL, so matches referencing this resume
-    # have to go first — same pattern as delete_search below.
+    # have to go first — same pattern as delete_search below. This alone
+    # covers matches run against searches launched under a DIFFERENT
+    # resume (matching can be re-run on an existing search after
+    # switching resumes), which the search-scoped cleanup below wouldn't.
     await db.execute(sql_delete(JobMatch).where(JobMatch.resume_id == resume_id))
+
+    # Every search this resume was selected for when it ran, and — via
+    # the same cascade delete_search/delete_all_searches use — that
+    # search's own jobs and any matches still hanging off those jobs.
+    search_ids_r = await db.execute(
+        select(JobSearch.id).where(
+            JobSearch.resume_id == resume_id,
+            JobSearch.user_id == current_user.id,
+        )
+    )
+    search_ids = [r[0] for r in search_ids_r.all()]
+    if search_ids:
+        job_ids_r = await db.execute(select(Job.id).where(Job.search_id.in_(search_ids)))
+        job_ids = [r[0] for r in job_ids_r.all()]
+        if job_ids:
+            await db.execute(sql_delete(JobMatch).where(JobMatch.job_id.in_(job_ids)))
+        await db.execute(sql_delete(Job).where(Job.search_id.in_(search_ids)))
+        await db.execute(sql_delete(JobSearch).where(JobSearch.id.in_(search_ids)))
+
     await db.delete(resume)
     await db.commit()
     return {"message": "Deleted"}
@@ -386,6 +412,7 @@ async def search_jobs(
     search = JobSearch(
         user_id=current_user.id,
         sequence_number=seq_num,
+        resume_id=payload.resume_id,
         role=payload.role,
         location=payload.location,
         industry=payload.industry,
@@ -428,6 +455,7 @@ async def search_jobs(
         sequence_number=search.sequence_number or search.id,
         role=search.role,
         location=search.location,
+        resume_id=search.resume_id,
         results_count=search.results_count,
         searched_at=search.searched_at,
         jobs=[JobOut.model_validate(j) for j in job_objs],
@@ -437,13 +465,17 @@ async def search_jobs(
 
 @router.get("/searches", response_model=List[JobSearchOut])
 async def list_searches(
+    resume_id: int | None = None,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    result = await db.execute(
-        select(JobSearch).where(JobSearch.user_id == current_user.id)
-        .order_by(JobSearch.searched_at.desc()).limit(20)
-    )
+    """Optionally scoped to a single resume (?resume_id=) so the Results
+    tab can show only the searches that were run while that resume was
+    selected, instead of every search across every resume mixed together."""
+    query = select(JobSearch).where(JobSearch.user_id == current_user.id)
+    if resume_id is not None:
+        query = query.where(JobSearch.resume_id == resume_id)
+    result = await db.execute(query.order_by(JobSearch.searched_at.desc()).limit(20))
     searches = result.scalars().all()
     out = []
     for s in searches:
@@ -451,7 +483,7 @@ async def list_searches(
         jobs = [JobOut.model_validate(j) for j in jobs_result.scalars().all()]
         out.append(JobSearchOut(
             id=s.id, sequence_number=s.sequence_number or s.id, role=s.role, location=s.location,
-            results_count=s.results_count, searched_at=s.searched_at, jobs=jobs
+            resume_id=s.resume_id, results_count=s.results_count, searched_at=s.searched_at, jobs=jobs
         ))
     return out
 
@@ -617,15 +649,21 @@ async def match_resume(
 
 @router.get("/matches", response_model=List[JobMatchOut])
 async def list_matches(
+    resume_id: int | None = None,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    result = await db.execute(
+    """Optionally scoped to a single resume (?resume_id=) — without this,
+    "top matches" mixed every resume's matches together, so switching the
+    selected resume in the dropdown never changed what this list showed."""
+    query = (
         select(JobMatch, Job)
         .join(Job, JobMatch.job_id == Job.id)
         .where(JobMatch.user_id == current_user.id)
-        .order_by(JobMatch.ats_score.desc()).limit(50)
     )
+    if resume_id is not None:
+        query = query.where(JobMatch.resume_id == resume_id)
+    result = await db.execute(query.order_by(JobMatch.ats_score.desc()).limit(50))
     # Best-effort "is AI configured RIGHT NOW" hint for historical matches
     # too — reflects the CURRENT Settings, not necessarily what was
     # configured at the time each match ran, but that's the useful
@@ -737,21 +775,38 @@ async def delete_search(
 
 @router.delete("/searches")
 async def delete_all_searches(
+    resume_id: int | None = None,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Delete all job searches for the current user."""
+    """Delete job searches for the current user. With ?resume_id= (how the
+    Results tab's "Clear history" button now calls this), scopes the wipe
+    to just the searches run under that resume — plus that resume's
+    matches against ANY search (including ones re-matched after switching
+    resumes, which wouldn't otherwise be reachable through a search-scoped
+    delete). Without resume_id, keeps the old "delete everything" behavior."""
     from sqlalchemy import delete as sql_delete
-    searches_r = await db.execute(
-        select(JobSearch.id).where(JobSearch.user_id == current_user.id)
-    )
+
+    search_q = select(JobSearch.id).where(JobSearch.user_id == current_user.id)
+    if resume_id is not None:
+        search_q = search_q.where(JobSearch.resume_id == resume_id)
+    searches_r = await db.execute(search_q)
     search_ids = [r[0] for r in searches_r.all()]
+
+    if resume_id is not None:
+        await db.execute(
+            sql_delete(JobMatch).where(
+                JobMatch.user_id == current_user.id,
+                JobMatch.resume_id == resume_id,
+            )
+        )
+
     if search_ids:
         job_ids_r = await db.execute(select(Job.id).where(Job.search_id.in_(search_ids)))
         job_ids = [r[0] for r in job_ids_r.all()]
         if job_ids:
             await db.execute(sql_delete(JobMatch).where(JobMatch.job_id.in_(job_ids)))
         await db.execute(sql_delete(Job).where(Job.search_id.in_(search_ids)))
-        await db.execute(sql_delete(JobSearch).where(JobSearch.user_id == current_user.id))
+        await db.execute(sql_delete(JobSearch).where(JobSearch.id.in_(search_ids)))
     await db.commit()
-    return {"message": f"Deleted {len(search_ids)} searches"}
+    return {"message": f"Deleted {len(search_ids)} search(es)"}
