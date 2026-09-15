@@ -1,6 +1,6 @@
 """
 TalentIQ – Dashboard Router
-Aggregates stats across all 5 modules: JobHunter, MarketIntel, LinkExplore,
+Aggregates stats across all 5 modules: JobHunt, MarketIntel, LinkExplore,
 CVAnalysis (session-only, no DB), and CandidateLens — for the user dashboard.
 """
 
@@ -27,7 +27,7 @@ async def get_dashboard_stats(
 ):
     uid = current_user.id
 
-    # ── JobHunter ──────────────────────────────────────────────────────
+    # ── JobHunt ────────────────────────────────────────────────────────
     total_searches = (await db.execute(
         select(func.count()).select_from(JobSearch).where(JobSearch.user_id == uid)
     )).scalar() or 0
@@ -118,13 +118,13 @@ async def get_dashboard_stats(
     )
 
 
-@router.get("/jobhunter-summary")
-async def jobhunter_dashboard_summary(
+@router.get("/jobhunt-summary")
+async def jobhunt_dashboard_summary(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Real-time, per-role breakdown of JobHunter activity — grouped by the
-    role searched for, since JobHunter has no client/vendor-style entity to
+    """Real-time, per-role breakdown of JobHunt activity — grouped by the
+    role searched for, since JobHunt has no client/vendor-style entity to
     group by (search criteria is the natural dimension here)."""
     uid = current_user.id
     role_expr = case((JobSearch.role.is_(None), "Unspecified"), (JobSearch.role == "", "Unspecified"), else_=JobSearch.role)

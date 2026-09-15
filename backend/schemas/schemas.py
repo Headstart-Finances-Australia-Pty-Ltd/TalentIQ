@@ -191,6 +191,17 @@ class ResumeOut(BaseModel):
     education: Optional[str] = None
     email: Optional[str] = None
     phone: Optional[str] = None
+    # Categorized breakdown from the SAME LLM extraction module CVAnalysis
+    # uses (utils/llm_extraction.py's extract_resume_facts) — see
+    # routers/jobhunt.py's upload_resume. Also filled in manually from
+    # resume.parsed_data, same as email/phone above, since these aren't
+    # their own Resume columns either.
+    technical_skills: Optional[List[str]] = None
+    business_skills: Optional[List[str]] = None
+    soft_skills: Optional[List[str]] = None
+    significant_experience: Optional[List[str]] = None
+    certifications_degrees: Optional[List[str]] = None
+    ai_powered: Optional[bool] = None
     uploaded_at: datetime
 
     model_config = {"from_attributes": True}

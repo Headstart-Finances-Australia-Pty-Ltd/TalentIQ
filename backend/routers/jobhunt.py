@@ -81,7 +81,51 @@ async def upload_resume(
     current_user: User = Depends(get_current_user),
 ):
     raw_text = await _extract_text_from_file(file)
+    # parse_resume_text still supplies applicant_name/email/phone (its
+    # regex approach works fine for those) but its skills/education/
+    # experience_years were a small, hardcoded, data-science-flavored
+    # keyword list and a strict "EDUCATION header" / "X years experience"
+    # regex — silently empty for any resume that phrased things
+    # differently, which is why the popup showed no experience/education
+    # for most real resumes and only ever showed data-science skills.
     parsed = parse_resume_text(raw_text)
+
+    # Same LLM-powered extraction module CVAnalysis uses (utils/
+    # llm_extraction.py's extract_resume_facts — the exact function
+    # routers/cvintel.py calls) instead of the old keyword/regex-only
+    # approach above. Falls back to parse_resume_text's heuristic result
+    # (already in `parsed`) if no Groq/Ollama is configured or the LLM
+    # call fails, so a resume never regresses to "nothing extracted."
+    from utils.groq_pool import resolve_groq_key
+    from utils.llm_extraction import extract_resume_facts
+    key_resolution = await resolve_groq_key(db, current_user.id)
+    groq_key = key_resolution["groq_key"]
+    groq_model = await get_groq_model(db, current_user.id)
+    ollama_creds = await get_all_credentials(db, current_user.id, "ollama") if ollama_enabled() else {}
+    ollama_base_url = ollama_creds.get("base_url")
+    ollama_model = ollama_creds.get("model")
+
+    facts = await extract_resume_facts(
+        raw_text, groq_key, groq_model, ollama_base_url, ollama_model,
+        db=db, user_id=current_user.id,
+    )
+    if facts:
+        # technical + business skills combined — covers ALL technical
+        # domains the LLM finds (not just the old data-science-skewed
+        # keyword list) plus domain/business skills, same as the
+        # hard_skills merge JobHunt's own matching already does in
+        # agents/jobhunt_agent.py's extract_candidate_profile.
+        parsed["skills"] = (facts.get("technical_skills") or []) + (facts.get("business_skills") or [])
+        parsed["technical_skills"] = facts.get("technical_skills") or []
+        parsed["business_skills"] = facts.get("business_skills") or []
+        parsed["soft_skills"] = facts.get("soft_skills") or []
+        parsed["significant_experience"] = facts.get("significant_experience") or []
+        parsed["certifications_degrees"] = facts.get("certifications_degrees") or []
+        parsed["experience_years"] = facts.get("years_experience") or parsed.get("experience_years")
+        parsed["education"] = facts.get("education") or parsed.get("education")
+        parsed["ai_powered"] = True
+    else:
+        parsed["ai_powered"] = False
 
     # If same filename already exists for this user, update it instead of duplicating
     existing = await db.execute(
@@ -116,14 +160,23 @@ async def upload_resume(
 
 
 def _resume_to_out(resume: Resume) -> ResumeOut:
-    """email/phone aren't Resume columns — they only ever lived inside
-    parsed_data (see parse_resume_text) — so ResumeOut.model_validate(resume)
-    alone can't populate them; pulled in here instead so both
-    upload_resume and list_resumes return the same complete shape."""
+    """email/phone/technical_skills/business_skills/soft_skills/
+    significant_experience/certifications_degrees/ai_powered aren't Resume
+    columns — they only ever live inside parsed_data (see parse_resume_text
+    and, for the LLM-extracted fields, upload_resume's extract_resume_facts
+    call) — so ResumeOut.model_validate(resume) alone can't populate them;
+    pulled in here instead so both upload_resume and list_resumes return
+    the same complete shape."""
     out = ResumeOut.model_validate(resume)
     pd = resume.parsed_data or {}
     out.email = pd.get("email")
     out.phone = pd.get("phone")
+    out.technical_skills = pd.get("technical_skills")
+    out.business_skills = pd.get("business_skills")
+    out.soft_skills = pd.get("soft_skills")
+    out.significant_experience = pd.get("significant_experience")
+    out.certifications_degrees = pd.get("certifications_degrees")
+    out.ai_powered = pd.get("ai_powered", False)
     return out
 
 
@@ -144,6 +197,30 @@ async def list_resumes(
             seen.add(r.filename)
             resumes.append(_resume_to_out(r))
     return resumes
+
+
+@router.delete("/resume/{resume_id}")
+async def delete_resume(
+    resume_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Delete an uploaded resume and any job matches made against it —
+    the dropdown had no way to remove a resume before this (upload/list
+    only), so a mis-uploaded or outdated file could never be cleared out."""
+    from sqlalchemy import delete as sql_delete
+    result = await db.execute(
+        select(Resume).where(Resume.id == resume_id, Resume.user_id == current_user.id)
+    )
+    resume = result.scalar_one_or_none()
+    if not resume:
+        raise HTTPException(404, "Resume not found")
+    # JobMatch.resume_id is NOT NULL, so matches referencing this resume
+    # have to go first — same pattern as delete_search below.
+    await db.execute(sql_delete(JobMatch).where(JobMatch.resume_id == resume_id))
+    await db.delete(resume)
+    await db.commit()
+    return {"message": "Deleted"}
 
 
 # ─── JOB SEARCH ───────────────────────────────

@@ -530,7 +530,7 @@ def _heuristic_jd_details(jd_text: str) -> dict:
 
 # ── SCORING (mirrors calculateScore exactly) ─────────────────────────────────
 
-# Same synonym/abbreviation set used in CVAnalysis and JobHunter — plain
+# Same synonym/abbreviation set used in CVAnalysis and JobHunt — plain
 # substring matching alone produces false-negative "gaps"/"missing skills"
 # for skills genuinely present but phrased/abbreviated/spelled differently
 # than the JD's exact wording (e.g. resume says "ML", JD extraction says
@@ -622,7 +622,7 @@ def _score_from_verdicts(strengths: dict, cv_text: str, essential_count: int, go
     """Builds the same score/matched/gap/bonus shape calculate_score() used
     to return, but driven by the LLM's per-item essential/good-to-have
     verdicts (utils.llm_extraction.extract_candidate_strengths) instead of
-    deterministic keyword matching — same fix as CVAnalysis and JobHunter,
+    deterministic keyword matching — same fix as CVAnalysis and JobHunt,
     for the same reason: exact/token matching can't judge long
     capability-statement requirements or requirements phrased differently
     than the resume (e.g. "Data Modeling" vs a resume that says

@@ -58,7 +58,7 @@ class GenerateRequest(BaseModel):
     resume_text: Optional[str] = None
     jd_text: Optional[str] = None
     source_resume_id: Optional[int] = None
-    # Set when this request came from the JobHunter -> CVAnalysis ->
+    # Set when this request came from the JobHunt -> CVAnalysis ->
     # ResumeCraft bridge (see /analyze-job below) — lets the saved
     # ApplicationDocument carry an "Apply Now" link straight back to the
     # job it was generated for.
@@ -131,8 +131,8 @@ async def analyze_job_for_resumecraft(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Bridges JobHunter -> CVAnalysis -> ResumeCraft: given a resume the
-    person already uploaded in JobHunter and one specific job from their
+    """Bridges JobHunt -> CVAnalysis -> ResumeCraft: given a resume the
+    person already uploaded in JobHunt and one specific job from their
     search results, runs the SAME analysis CVAnalysis itself uses (so the
     resulting CVAnalysisRecord is indistinguishable from one made by hand
     on the CVAnalysis page) and returns its id, ready to hand straight to

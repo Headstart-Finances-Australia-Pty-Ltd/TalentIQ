@@ -1,7 +1,7 @@
 """
 TalentIQ - Shared structured LLM extraction.
 
-Used by CVAnalysis, JobHunter, and CandidateLens so all three present JD
+Used by CVAnalysis, JobHunt, and CandidateLens so all three present JD
 requirements and candidate strengths the same way, and so improving the
 prompt/schema only has to happen in one place (unlike the skill-matching
 taxonomy, which unfortunately ended up triplicated across the three
@@ -96,7 +96,7 @@ async def _run_in_llm_pool(fn, *args):
 # model variance, since the exact model in use is user-configurable.
 #
 # This used to be several different hardcoded, much smaller limits
-# (1,500-5,000 chars) scattered across CVAnalysis/CandidateLens/JobHunter,
+# (1,500-5,000 chars) scattered across CVAnalysis/CandidateLens/JobHunt,
 # which silently dropped entire sections of longer real-world JDs (a
 # Required Qualifications section starting past the cutoff point, for
 # example — every hard requirement in that JD was invisible to the LLM
@@ -1480,7 +1480,7 @@ async def extract_candidate_strengths_general(
     resume_text: str, groq_key: Optional[str], groq_model: str,
 ) -> dict:
     """Same categorized breakdown as extract_candidate_strengths, but not
-    evaluated against any specific JD — used by JobHunter, which matches
+    evaluated against any specific JD — used by JobHunt, which matches
     ONE resume against MANY jobs: this extraction happens once per batch
     (the categorization is resume-intrinsic and doesn't change per job),
     while essential_matched/gaps per job are computed deterministically
