@@ -220,7 +220,7 @@ export default function JobHuntPage() {
     role: "", location: "", job_type: "All",
     salary_min: "", salary_max: "", industry: "", source: "both",
     date_posted: "", remote_type: "", experience_level: "",
-    sort_by: "relevance", max_results: "25",
+    sort_by: "relevance", max_results: "25", strict_title_match: false,
   });
   const searchMutation = useMutation({
     mutationKey: ["jobhunt-search"],
@@ -433,6 +433,14 @@ export default function JobHuntPage() {
               <div className="tiq-form-group">
                 <label className="tiq-label">Keyword *</label>
                 <input className="tiq-input" value={searchForm.role} onChange={setF("role")} placeholder="e.g. Data Analyst" />
+                <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6, fontSize: 12, color: "var(--text-secondary)", cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={searchForm.strict_title_match}
+                    onChange={(e) => setSearchForm((f) => ({ ...f, strict_title_match: e.target.checked }))}
+                  />
+                  Strict title match
+                </label>
               </div>
               <div className="tiq-form-group">
                 <label className="tiq-label">Location</label>
@@ -515,6 +523,7 @@ export default function JobHuntPage() {
             </div>
             <p style={{ fontSize: 11, color: "var(--text-muted)", marginTop: -8, marginBottom: 16 }}>
               Remote and Experience filters apply to LinkedIn results only — Seek's actor has no equivalent filters.
+              Strict title match keeps only jobs whose title actually contains your keyword (e.g. excludes "Business Analyst" or "Master Data Specialist" from a "Data Analyst" search) — LinkedIn/Seek's own search normally also matches skills and description text, not just the title.
             </p>
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
               <button
