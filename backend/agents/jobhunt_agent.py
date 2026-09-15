@@ -953,17 +953,26 @@ def _skill_present(skill: str, candidate_skills: set, resume_lower: str) -> bool
     checks extracted-skill overlap, exact substring (after UK/US spelling
     normalization), known synonyms/specific-technique relationships, and
     (for multi-word skills) all significant words appearing anywhere in
-    the resume, not just as one exact contiguous phrase."""
+    the resume, not just as one exact contiguous phrase.
+
+    The substring checks are bounded on alphanumeric adjacency (see
+    utils.technical_scoring.contains_skill_token) so a short/generic
+    token — "ca", "go", "bas" — can't match purely because it's hiding
+    inside an unrelated word ("communication", "governance", "database").
+    Plain `in` here was exactly why a Data Architect resume mentioning
+    "data governance" and "Basel III" ended up with "go"/"ca"/"bas"/
+    "basel" showing up as matched essential skills."""
+    from utils.technical_scoring import contains_skill_token
     sk = _normalize_skill(skill)
     if any(sk in cs or cs in sk for cs in candidate_skills):
         return True
-    if sk in resume_lower:
+    if contains_skill_token(sk, resume_lower):
         return True
     for variant in _SKILL_SYNONYMS.get(sk, []):
-        if _normalize_text(variant) in resume_lower:
+        if contains_skill_token(_normalize_text(variant), resume_lower):
             return True
     words = [w for w in sk.split() if len(w) > 2]
-    if len(words) >= 2 and all(w in resume_lower for w in words):
+    if len(words) >= 2 and all(contains_skill_token(w, resume_lower) for w in words):
         return True
     return False
 
