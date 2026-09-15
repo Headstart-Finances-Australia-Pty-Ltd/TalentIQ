@@ -363,7 +363,7 @@ def scrape_jobs_apify_linkedin(
     slower than the original guest-endpoint tool this was ported from —
     the actor's own docs cite ~5s for 100 listings in list mode vs up to
     ~60s with full details. List mode still returns title, company,
-    location, postedAt, salary and the apply URL — everything JobHunter's
+    location, postedAt, salary and the apply URL — everything JobHunt's
     results table and matching actually use — so the extra detail-page
     round trip per job isn't worth trading away the speed for.
     """
@@ -477,7 +477,7 @@ def scrape_jobs_apify_linkedin(
 # API key, the same no-credential approach Seek's Apify actor uses on
 # its side (see scrape_jobs_apify_seek above). This is a direct port of
 # the well-known "linkedin-jobs-api" Node approach (guest endpoint +
-# HTML-fragment parsing) into this backend, so JobHunter's "LinkedIn"
+# HTML-fragment parsing) into this backend, so JobHunt's "LinkedIn"
 # source is a real, independent scraper rather than routed through a
 # third-party Apify actor.
 _LINKEDIN_GUEST_SEARCH_URL = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
@@ -996,7 +996,7 @@ async def _extract_job_requirements(
     Pass db + user_id to let this draw its own key from the shared Groq
     key pool (see utils/groq_pool.py) rather than being stuck with the one
     key resolved once at the top of routers/jobhunt.py's /match — CVAnalysis
-    already does this (see routers/cvintel.py); JobHunter's matching didn't,
+    already does this (see routers/cvintel.py); JobHunt's matching didn't,
     which meant a single rate-limited/bad pool key failed EVERY job in a
     batch with no chance to rotate, even with other healthy keys sitting
     in the pool."""

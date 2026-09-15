@@ -3,7 +3,7 @@ Drops and recreates ONLY the CandidateLens Management tables (Client, JD,
 Vendor, Candidate, Candidate Status Log) — use this when those specific
 tables are in a stale/inconsistent state from earlier schema iterations
 and you want a guaranteed-clean slate, without touching any other module's
-data (JobHunter, MarketIntel, LinkExplore, CVAnalysis, JD Creator, users,
+data (JobHunt, MarketIntel, LinkExplore, CVAnalysis, JD Creator, users,
 API keys — all untouched).
 
 ⚠️  DESTRUCTIVE — this permanently deletes all Clients, JDs, Vendors,
