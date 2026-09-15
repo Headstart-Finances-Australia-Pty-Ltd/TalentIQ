@@ -968,6 +968,58 @@ def _skill_present(skill: str, candidate_skills: set, resume_lower: str) -> bool
     return False
 
 
+# Same job-function word appearing as noun/adjective/gerund shouldn't
+# defeat a title match — "Analytics" and "Analyst" describe the same
+# role family, "Engineering" and "Engineer" do too, etc.
+_JOB_TITLE_WORD_FAMILIES = {
+    "analyst": ["analytics", "analysis"], "analytics": ["analyst", "analysis"],
+    "analysis": ["analyst", "analytics"],
+    "engineer": ["engineering"], "engineering": ["engineer"],
+    "developer": ["development", "dev"], "development": ["developer", "dev"],
+    "scientist": ["science"], "science": ["scientist"],
+    "manager": ["management", "managing"], "management": ["manager", "managing"],
+    "specialist": ["specialists", "specialty", "speciality"],
+    "consultant": ["consulting"], "consulting": ["consultant"],
+    "administrator": ["administration", "admin"], "administration": ["administrator", "admin"],
+    "designer": ["design"], "design": ["designer"],
+    "architect": ["architecture"], "architecture": ["architect"],
+    "coordinator": ["coordination"], "coordination": ["coordinator"],
+}
+
+# Connector words that appear in a typed role but carry no job-function
+# meaning of their own — excluded so they can't accidentally force (or,
+# being absent from a title, block) a match.
+_TITLE_MATCH_STOPWORDS = {"and", "or", "the", "a", "an", "of", "in", "for", "to", "with", "&", "at", "on"}
+
+
+def title_matches_role(job_title: str, role: str) -> bool:
+    """Used by routers/jobhunt.py when strict_title_match is on — True
+    only if EVERY significant word of the searched role (or a
+    same-job-function variant, e.g. "analyst"/"analytics") appears
+    somewhere in the job's actual title.
+
+    Deliberately an AND, not an OR or a fuzzy score: this is what makes
+    "Data Analyst" reject "Business Analyst" (missing "data") and
+    "Master Data Specialist" (missing "analyst"/"analytics") while still
+    accepting "Senior Data Analyst" or "Data Research Analyst". Without
+    this, LinkedIn's and Seek's own keyword search — which matches
+    skills/description text too, not just the title — surfaces plenty of
+    adjacent-but-different roles for a plain title-word query.
+    """
+    title_words = set(re.findall(r"[a-z0-9]+", _normalize_text(job_title or "")))
+    role_words = [
+        w for w in re.findall(r"[a-z0-9]+", _normalize_text(role or ""))
+        if w not in _TITLE_MATCH_STOPWORDS and len(w) > 1
+    ]
+    if not role_words:
+        return True  # nothing meaningful typed to match against — don't filter blindly
+    for rw in role_words:
+        variants = {rw, *_JOB_TITLE_WORD_FAMILIES.get(rw, [])}
+        if not (variants & title_words):
+            return False
+    return True
+
+
 async def extract_candidate_profile(resume_text: str, groq_api_key: Optional[str] = None, groq_model: str = DEFAULT_GROQ_MODEL) -> Dict:
     """Extract a structured, categorized candidate profile ONCE per resume
     — reused across every job in a match batch rather than re-extracted
