@@ -350,22 +350,6 @@ export default function JobHuntPage() {
               <FileText size={16} /> Resume
             </div>
             <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-              {selectedResumeId && (
-                <button
-                  className="tiq-btn tiq-btn-outline"
-                  title="Delete this resume"
-                  onClick={() => {
-                    if (window.confirm("Delete this resume? This can't be undone.")) {
-                      deleteResumeMutation.mutate(selectedResumeId);
-                    }
-                  }}
-                  disabled={deleteResumeMutation.isPending}
-                  style={{ color: "#ef4444", borderColor: "rgba(239,68,68,.4)" }}
-                >
-                  <Trash2 size={14} />
-                  {deleteResumeMutation.isPending ? "Deleting…" : "Delete"}
-                </button>
-              )}
               {resumes.length > 0 && (
                 <select
                   className="tiq-input tiq-select"
@@ -398,6 +382,22 @@ export default function JobHuntPage() {
               </button>
               {uploadMutation.isSuccess && (
                 <span className="tiq-badge tiq-badge-teal">✓ Uploaded</span>
+              )}
+              {selectedResumeId && (
+                <button
+                  className="tiq-btn tiq-btn-outline"
+                  title="Delete this resume"
+                  onClick={() => {
+                    if (window.confirm("Delete this resume? This can't be undone.")) {
+                      deleteResumeMutation.mutate(selectedResumeId);
+                    }
+                  }}
+                  disabled={deleteResumeMutation.isPending}
+                  style={{ color: "#ef4444", borderColor: "rgba(239,68,68,.4)", marginLeft: "auto" }}
+                >
+                  <Trash2 size={14} />
+                  {deleteResumeMutation.isPending ? "Deleting…" : "Delete"}
+                </button>
               )}
             </div>
             {deleteResumeMutation.isError && (
@@ -670,7 +670,12 @@ export default function JobHuntPage() {
             </div>
           ) : (
             <div className="tiq-card">
-              <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 8 }}>
+              <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 8, gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+                {deleteAllMutation.isError && (
+                  <span style={{ fontSize: 12, color: "#ef4444" }}>
+                    Couldn't clear history: {(deleteAllMutation.error as any)?.response?.data?.detail || (deleteAllMutation.error as any)?.message || "Please try again."}
+                  </span>
+                )}
                 <button className="tiq-btn tiq-btn-ghost tiq-btn-sm"
                   onClick={() => {
                     if (window.confirm(`Clear all ${matches.length} match${matches.length === 1 ? "" : "es"} and their searches? This cannot be undone.`)) {
