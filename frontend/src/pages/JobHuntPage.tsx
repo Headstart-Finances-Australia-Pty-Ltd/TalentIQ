@@ -1,7 +1,7 @@
 import { useNavigate } from "react-router-dom";
 import { useState, useRef, useEffect, useMemo, Fragment } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Upload, Search, Target, Download, ExternalLink, ChevronDown, ChevronUp, FileText, AlertTriangle, Sparkles, X, Trash2, ArrowUp, ArrowDown, ArrowUpDown } from "lucide-react";
+import { Upload, Search, Download, ExternalLink, ChevronDown, ChevronUp, FileText, AlertTriangle, Sparkles, X, Trash2, ArrowUp, ArrowDown, ArrowUpDown } from "lucide-react";
 import { jobhuntApi, resumecraftApi, downloadBlob } from "../lib/api";
 import { useAuth } from "../hooks/useAuth";
 import { useLatestMutation } from "../hooks/useLatestMutation";
@@ -208,7 +208,6 @@ export default function JobHuntPage() {
   const navigate = useNavigate();
   const [tab, setTab] = useState<"search" | "results">("search");
   const [expandedJob, setExpandedJob] = useState<number | null>(null);
-  const [expandedMatchId, setExpandedMatchId] = useState<number | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   // Resume
@@ -308,12 +307,7 @@ export default function JobHuntPage() {
   // Persisted searches (unlike currentSearch above, this survives a page
   // reload/navigation — it's a real GET, not in-memory mutation state).
   // Needed because currentSearch resets to null on reload even though the
-  // search and its jobs are still sitting in the database: without this,
-  // the Results tab would say "No search results yet" right after a
-  // refresh while "All-time top matches" right below it still showed the
-  // very same search's matches, which is exactly the confusing state this
-  // fixes — that had nothing to do with matching being broken, it was the
-  // Results tab losing track of which search to display.
+  // search and its jobs are still sitting in the database.
   //
   // Scoped to the selected resume (?resume_id=) — and refetched whenever
   // that selection changes, via selectedResumeId in the query key — so
@@ -325,11 +319,6 @@ export default function JobHuntPage() {
     queryFn: () => jobhuntApi.listSearches(selectedResumeId),
     enabled: !!selectedResumeId,
   });
-  const latestPersistedSearch = persistedSearches[0] || null;
-  // Prefer the live in-session search (has the freshest `notice`, and is
-  // guaranteed to be the one that was JUST run); fall back to the most
-  // recent persisted one so results survive a reload.
-  const displaySearch = currentSearch || latestPersistedSearch;
 
   // Wipes this resume's search/match history only — scoped by passing
   // selectedResumeId through to the backend, so clearing history for one
@@ -401,7 +390,7 @@ export default function JobHuntPage() {
   // above — otherwise "All-time top matches" mixed every resume's matches
   // together and switching resumes in the dropdown never changed what
   // showed up here.
-  const { data: matches = [], isLoading: matchLoading } = useQuery({
+  const { data: matches = [] } = useQuery({
     queryKey: ["matches", selectedResumeId],
     queryFn: () => jobhuntApi.listMatches(selectedResumeId),
     enabled: !!selectedResumeId,
@@ -409,12 +398,12 @@ export default function JobHuntPage() {
 
   // Matches for the CURRENT search (matchMutation's own response) take
   // priority — they're the freshest and cover every job in this search
-  // regardless of score. The global `matches` list is layered underneath
-  // as a fallback ONLY so scores survive a reload (see displaySearch
-  // above): it's capped at the top 50 by score across ALL history, so a
-  // job whose match exists in the database but didn't make that top-50
-  // cut still won't show a score here after a refresh — a real, if
-  // narrower, gap than the "no results at all" bug this was added to fix.
+  // regardless of score. The resume-scoped `matches` list is layered
+  // underneath as a fallback ONLY so scores survive a reload: it's capped
+  // at the top 50 by score for this resume, so a job whose match exists
+  // in the database but didn't make that top-50 cut still won't show a
+  // score here after a refresh — a real, if narrower, gap than the
+  // "no results at all" bug this was added to fix.
   const currentMatches: any[] = matchState.status === "success" ? matchState.data ?? [] : [];
   const matchesByJobId: Record<number, any> = {
     ...Object.fromEntries(matches.map((m: any) => [m.job_id, m])),
@@ -426,10 +415,49 @@ export default function JobHuntPage() {
     onSuccess: (blob, searchId) => downloadBlob(blob, `job_matches_${searchId}.xlsx`),
   });
 
+  // ONE merged list of every job from every search run under this resume
+  // — replaces the old split of "latest search's jobs" (a table) plus a
+  // separately-fetched "top matches" list (a different card layout) that
+  // mostly just repeated the same jobs/scores in a second shape. Deduped
+  // by job id; currentSearch (the just-completed in-session one, if it
+  // matches the currently selected resume) is merged in too so a fresh
+  // search's jobs appear immediately, even before the "searches" query
+  // has re-fetched to include it.
+  const allSearchesForResume = useMemo(() => {
+    const bySearchId = new Map<number, any>();
+    for (const s of persistedSearches) bySearchId.set(s.id, s);
+    if (currentSearch) bySearchId.set(currentSearch.id, currentSearch);
+    return Array.from(bySearchId.values());
+  }, [persistedSearches, currentSearch]);
+
+  const rawJobs = useMemo(() => {
+    const seenJobIds = new Set<number>();
+    const merged: any[] = [];
+    for (const s of allSearchesForResume) {
+      for (const j of s.jobs || []) {
+        if (seenJobIds.has(j.id)) continue;
+        seenJobIds.add(j.id);
+        merged.push(j);
+      }
+    }
+    return merged;
+  }, [allSearchesForResume]);
+
+  // Distinct roles searched for this resume — used in the results
+  // header ("... found for X") now that it can span more than one search.
+  const searchedRoles = useMemo(
+    () => Array.from(new Set(allSearchesForResume.map((s) => s.role).filter(Boolean))),
+    [allSearchesForResume]
+  );
+
+  // The single most recent search — still needed for the "just finished"
+  // notice banner (stale/misleading on an older search) and for Export
+  // Excel, which is per-search on the backend.
+  const mostRecentSearch = currentSearch || persistedSearches[0] || null;
+
   const setF = (k: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
     setSearchForm((f) => ({ ...f, [k]: e.target.value }));
 
-  const rawJobs = displaySearch?.jobs || [];
   // "ats_score" sort has to happen client-side: no match exists yet at
   // search time (matching runs automatically right after, see the effect
   // above), so this re-sorts once scores start coming in. Jobs without a
@@ -747,7 +775,7 @@ export default function JobHuntPage() {
                   Couldn't clear history: {(deleteAllMutation.error as any)?.response?.data?.detail || (deleteAllMutation.error as any)?.message || "Please try again."}
                 </span>
               )}
-              {selectedResumeId && (jobs.length > 0 || matches.length > 0) && (
+              {selectedResumeId && allSearchesForResume.length > 0 && (
                 <button
                   className="tiq-btn tiq-btn-ghost tiq-btn-sm"
                   onClick={() => {
@@ -763,9 +791,9 @@ export default function JobHuntPage() {
             </div>
           </div>
 
-          {displaySearch?.notice && (
+          {currentSearch?.notice && (
             <div className="tiq-alert tiq-alert-warning" style={{ marginBottom: 12 }}>
-              {displaySearch.notice}
+              {currentSearch.notice}
             </div>
           )}
           {matchState.status === "pending" && (
@@ -779,24 +807,27 @@ export default function JobHuntPage() {
             </div>
           )}
 
-          {/* CURRENT SEARCH RESULTS — a real sortable table (not the old
-              free-form card list) so clicking a column header rearranges
-              rows by that column immediately; the whole row expands into a
-              detail row underneath for description/match breakdown,
-              exactly as the old cards did. Sourced from displaySearch
-              (currentSearch if this session ran the search, otherwise the
-              latest persisted search) so results survive a page reload
-              instead of showing "No search results yet" underneath an
-              "All-time top matches" list that's clearly non-empty — see
-              displaySearch's own comment above for why that happened. */}
+          {/* ONE results table for this resume — every job from every
+              search run under it, merged (see rawJobs above), sorted, and
+              carrying its match score if one exists. This used to be two
+              separate sections (this table showing only the latest
+              search's jobs, plus a whole separate "top matches" list
+              below reshowing much of the same data in a different
+              layout) — merged into one so there's a single place to look
+              and a single empty state instead of two that could disagree
+              with each other. */}
           {jobs.length > 0 ? (
             <div className="tiq-card tiq-mb-6">
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
                 <div className="tiq-card-title" style={{ marginBottom: 0 }}>
-                  {jobs.length} job{jobs.length === 1 ? "" : "s"} found for "{displaySearch?.role}"
+                  {jobs.length} job{jobs.length === 1 ? "" : "s"} found
+                  {searchedRoles.length > 0 && (
+                    <> for {searchedRoles.map((r) => `"${r}"`).join(", ")}</>
+                  )}
                 </div>
-                {displaySearch && (
-                  <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" onClick={() => exportMutation.mutate(displaySearch.id)} disabled={exportMutation.isPending}>
+                {mostRecentSearch && (
+                  <button className="tiq-btn tiq-btn-ghost tiq-btn-sm" onClick={() => exportMutation.mutate(mostRecentSearch.id)} disabled={exportMutation.isPending}
+                    title="Exports the most recent search's results">
                     <Download size={14} /> Export Excel
                   </button>
                 )}
@@ -890,81 +921,13 @@ export default function JobHuntPage() {
             <div className="tiq-empty tiq-mb-6">
               <Search size={40} />
               <div className="tiq-empty-title">
-                {selectedResumeId ? "No search results yet for this resume" : "No search results yet"}
+                {selectedResumeId ? "No results yet for this resume" : "No results yet"}
               </div>
               <div>
                 {selectedResumeId
-                  ? "Run a search on the Search & Match tab with this resume selected — results open here automatically once it's done"
-                  : "Select a resume, then run a search on the Search & Match tab — results open here automatically once it's done"}
+                  ? "Run a search on the Search & Match tab with this resume selected — matching runs automatically and results show up here"
+                  : "Select a resume, then run a search on the Search & Match tab — matching runs automatically and results show up here"}
               </div>
-            </div>
-          )}
-
-          {/* ALL-TIME TOP MATCHES (for the selected resume) — unchanged
-              layout from the previous "Match History" tab, just relocated
-              underneath this search's own results instead of being the
-              only thing this tab showed, and now scoped to whichever
-              resume is selected (see the `matches` query above) instead
-              of mixing every resume's matches together. */}
-          <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text-secondary)", margin: "8px 0 10px" }}>
-            Top matches for this resume
-          </div>
-          {matchLoading ? (
-            <div className="tiq-spinner-wrap"><div className="tiq-spinner" /></div>
-          ) : matches.length === 0 ? (
-            <div className="tiq-empty">
-              <Target size={40} />
-              <div className="tiq-empty-title">No matches yet</div>
-              <div>Select a resume, then search for jobs — matching runs automatically and shows up here too</div>
-            </div>
-          ) : (
-            <div className="tiq-card">
-              {matches.map((m: any, i: number) => {
-                const expanded = expandedMatchId === m.id;
-                return (
-                  <div key={m.id} style={{ borderTop: i === 0 ? "none" : "1px solid var(--border)", paddingTop: i === 0 ? 0 : 16, marginTop: i === 0 ? 0 : 16 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, cursor: "pointer" }}
-                      onClick={() => setExpandedMatchId(expanded ? null : m.id)}>
-                      <div style={{ flex: 1 }}>
-                        <div style={{ fontSize: 15, fontWeight: 700, fontFamily: "var(--font-display)" }}>
-                          {m.job_title}
-                        </div>
-                        <div style={{ fontSize: 13, color: "var(--text-secondary)", marginTop: 3 }}>
-                          {m.company} · {m.location}
-                        </div>
-                        <div style={{ marginTop: 8 }}>
-                          <span className="tiq-badge" style={{ background: `${scoreColor(m.ats_score)}20`, color: scoreColor(m.ats_score), fontWeight: 700 }}>
-                            {m.ats_score}% match
-                          </span>
-                        </div>
-                      </div>
-                      <div style={{ display: "flex", gap: 8, flexShrink: 0 }} onClick={(e) => e.stopPropagation()}>
-                        {m.apply_link && (
-                          <a href={m.apply_link} target="_blank" rel="noopener noreferrer"
-                            className="tiq-btn tiq-btn-primary tiq-btn-sm">
-                            <ExternalLink size={12} /> Apply
-                          </a>
-                        )}
-                        {m.resume_id && (
-                          <button
-                            className="tiq-btn tiq-btn-outline tiq-btn-sm"
-                            disabled={craftMut.isPending && craftingJobId === m.job_id}
-                            onClick={() => craftMut.mutate({ resumeId: m.resume_id, jobId: m.job_id })}
-                            title="Analyze your resume against this job, then generate a tailored resume & cover letter"
-                          >
-                            <Sparkles size={12} /> {craftMut.isPending && craftingJobId === m.job_id ? "Analyzing…" : "Generate Tailored Resume"}
-                          </button>
-                        )}
-                        <button className="tiq-btn tiq-btn-ghost tiq-btn-sm"
-                          onClick={() => setExpandedMatchId(expanded ? null : m.id)}>
-                          {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-                        </button>
-                      </div>
-                    </div>
-                    {expanded && <MatchDetailsPanel match={m} isAdmin={isAdmin} />}
-                  </div>
-                );
-                            })}
             </div>
           )}
         </div>
