@@ -145,6 +145,15 @@ class JobSearchRequest(BaseModel):
     # user-configurable instead of a fixed default, so a candidate can
     # trade breadth for speed themselves.
     max_results: Optional[int] = 25
+    # When True, drop results whose TITLE doesn't reasonably match the
+    # searched role after fetching — see routers/jobhunt.py's
+    # _title_matches_role. Off by default: LinkedIn/Seek's own keyword
+    # search already matches skills/description too (not just title),
+    # which is normal job-board behavior and can surface adjacent roles
+    # worth seeing (e.g. "Reporting & Insights Analyst" for a "Data
+    # Analyst" search) — this only trims that down for someone who wants
+    # literal title matches instead of broader discovery.
+    strict_title_match: Optional[bool] = False
 
 
 class JobOut(BaseModel):

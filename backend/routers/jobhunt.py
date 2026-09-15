@@ -27,6 +27,7 @@ from agents.jobhunt_agent import (
     scrape_jobs_apify_seek, scrape_jobs_apify_linkedin, scrape_jobs_linkedin,
     fetch_job_description, estimate_recency_rank, parse_resume_text,
     calculate_match, generate_cover_letter, extract_candidate_profile,
+    title_matches_role,
 )
 
 router = APIRouter()
@@ -337,6 +338,21 @@ async def search_jobs(
             deduped.append(j)
     raw_jobs = deduped
 
+    # Optional strict title filter — LinkedIn's and Seek's own keyword
+    # search matches skills/description text too, not just the title, so
+    # a plain "Data Analyst" search routinely also returns "Business
+    # Analyst", "Credit Risk Analyst", "Master Data Specialist", etc.
+    # That's normal job-board behavior, not a bug in how the query is
+    # built (both scrapers pass the typed role straight through as a
+    # keyword — see scrape_jobs_linkedin/scrape_jobs_apify_seek), but
+    # title_matches_role lets someone opt into literal title-only results
+    # instead when that's what they actually want.
+    filtered_out_count = 0
+    if payload.strict_title_match and raw_jobs:
+        before_count = len(raw_jobs)
+        raw_jobs = [j for j in raw_jobs if title_matches_role(j.get("title") or "", payload.role)]
+        filtered_out_count = before_count - len(raw_jobs)
+
     # "Most recent" merge-level sort — each source already asks for its
     # own newest-first order where supported (LinkedIn's sortBy=DD), but
     # merging two sources needs its own consistent ordering on top. Best
@@ -361,6 +377,9 @@ async def search_jobs(
         notice = "No live results — " + "; ".join(source_errors)
     elif not raw_jobs:
         notice = "No jobs found for this search. Try a broader role or location."
+    if filtered_out_count > 0:
+        strict_note = f"Strict title match filtered out {filtered_out_count} result(s) whose title didn't match \"{payload.role}\". Turn it off for broader results."
+        notice = f"{notice} {strict_note}" if notice else strict_note
 
     # Persist search
     seq_num = await next_sequence_number(db, JobSearch, current_user.id)
