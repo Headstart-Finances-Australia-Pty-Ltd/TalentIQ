@@ -571,11 +571,16 @@ export const jobhuntApi = {
   listResumes: () => api.get("/api/jobhunt/resumes").then((r) => r.data),
   deleteResume: (id: number) => api.delete(`/api/jobhunt/resume/${id}`).then((r) => r.data),
   searchJobs: (data: any) => api.post("/api/jobhunt/search", data, { timeout: 120_000 }).then((r) => r.data),
-  listSearches: () => api.get("/api/jobhunt/searches").then((r) => r.data),
+  // resumeId scopes results to searches run under that resume — omitted
+  // (undefined/null) returns everything, unscoped.
+  listSearches: (resumeId?: number | null) =>
+    api.get("/api/jobhunt/searches", { params: resumeId ? { resume_id: resumeId } : {} }).then((r) => r.data),
   deleteSearch: (id: number) => api.delete(`/api/jobhunt/searches/${id}`).then((r) => r.data),
-  deleteAllSearches: () => api.delete("/api/jobhunt/searches").then((r) => r.data),
+  deleteAllSearches: (resumeId?: number | null) =>
+    api.delete("/api/jobhunt/searches", { params: resumeId ? { resume_id: resumeId } : {} }).then((r) => r.data),
   matchResume: (data: any) => api.post("/api/jobhunt/match", data, { timeout: 240_000 }).then((r) => r.data),
-  listMatches: () => api.get("/api/jobhunt/matches").then((r) => r.data),
+  listMatches: (resumeId?: number | null) =>
+    api.get("/api/jobhunt/matches", { params: resumeId ? { resume_id: resumeId } : {} }).then((r) => r.data),
   exportExcel: (searchId: number) =>
     api.get(`/api/jobhunt/export/${searchId}`, { responseType: "blob" }).then((r) => r.data),
 };
