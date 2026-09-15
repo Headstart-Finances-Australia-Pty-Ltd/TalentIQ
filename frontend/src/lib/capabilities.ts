@@ -233,7 +233,7 @@ export const CAPABILITIES: Capability[] = [
 
 export const JOBSEEKER_MODULES: CapabilityModule[] = [
   {
-    name: "JobHunter", route: "/app/jobhunt", icon: Users, color: "#f97316", emoji: "🔎", built: true,
+    name: "JobHunt", route: "/app/jobhunt", icon: Users, color: "#f97316", emoji: "🔎", built: true,
     tagline: "AI-powered job search & resume matching",
     desc: "Upload your resume, set your criteria, and let AI scrape live jobs, score your ATS fit, and draft personalised cover letters.",
     features: ["Live Seek job scraping via Apify", "ATS resume scoring 0–100%", "AI cover letter generation", "One-click Excel export"],

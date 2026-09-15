@@ -365,11 +365,11 @@ export default function ResumeCraftPage() {
   const [freshResumeText, setFreshResumeText] = useState("");
   const [freshJdText, setFreshJdText] = useState("");
 
-  // Set when this session arrived via JobHunter's "Generate Tailored
+  // Set when this session arrived via JobHunt's "Generate Tailored
   // Resume" bridge — carried through to the saved ApplicationDocument so
   // the "Apply Now" button below can send the person straight back to
   // the job's real application page with the tailored documents already
-  // downloaded, instead of losing that link once they leave JobHunter.
+  // downloaded, instead of losing that link once they leave JobHunt.
   const [linkedJobId, setLinkedJobId] = useState<number | null>(null);
   const [linkedApplyLink, setLinkedApplyLink] = useState("");
 
@@ -377,7 +377,7 @@ export default function ResumeCraftPage() {
   const { data: documents = [] } = useQuery({ queryKey: ["resumecraft-documents"], queryFn: resumecraftApi.list });
 
   // Arrived here via CVAnalysis's "Create Resume & Cover Letter" link, or
-  // JobHunter's "Generate Tailored Resume" link
+  // JobHunt's "Generate Tailored Resume" link
   // (?cvId=&jobTitle=&company=&jobId=&applyLink=) — pre-fill the Generate
   // tab with that specific analysis pre-selected rather than making the
   // person hunt for it in the dropdown again. Consumed once and stripped

@@ -569,6 +569,7 @@ export const jobhuntApi = {
     return api.post("/api/jobhunt/resume", form).then((r) => r.data);
   },
   listResumes: () => api.get("/api/jobhunt/resumes").then((r) => r.data),
+  deleteResume: (id: number) => api.delete(`/api/jobhunt/resume/${id}`).then((r) => r.data),
   searchJobs: (data: any) => api.post("/api/jobhunt/search", data, { timeout: 120_000 }).then((r) => r.data),
   listSearches: () => api.get("/api/jobhunt/searches").then((r) => r.data),
   deleteSearch: (id: number) => api.delete(`/api/jobhunt/searches/${id}`).then((r) => r.data),
@@ -600,7 +601,7 @@ export const linklensApi = {
 
 export const dashboardApi = {
   getStats: () => api.get("/api/dashboard/stats").then((r) => r.data),
-  jobHunterSummary: () => api.get("/api/dashboard/jobhunter-summary").then((r) => r.data),
+  jobHuntSummary: () => api.get("/api/dashboard/jobhunt-summary").then((r) => r.data),
   marketIntelSummary: () => api.get("/api/dashboard/marketintel-summary").then((r) => r.data),
   linkExploreSummary: () => api.get("/api/dashboard/linkexplore-summary").then((r) => r.data),
 };
@@ -746,8 +747,8 @@ export const billingApi = {
 export const resumecraftApi = {
   generate: (data: any) => api.post("/api/resumecraft/generate", data, { timeout: 120_000 }).then(r => r.data),
   createManual: (data: any) => api.post("/api/resumecraft/manual", data).then(r => r.data),
-  // Bridges JobHunter -> CVAnalysis: given a resume + a specific job from
-  // JobHunter's search results, runs the same analysis CVAnalysis itself
+  // Bridges JobHunt -> CVAnalysis: given a resume + a specific job from
+  // JobHunt's search results, runs the same analysis CVAnalysis itself
   // does and returns a cvAnalysisRecordId ready to hand to ResumeCraft's
   // ?cvId= pre-fill (see JobHuntPage's "Generate Tailored Resume" button).
   analyzeJob: (resumeId: number, jobId: number) =>

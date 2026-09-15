@@ -1,7 +1,7 @@
 import { useNavigate } from "react-router-dom";
 import { useState, useRef, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Upload, Search, Target, Download, ExternalLink, ChevronDown, ChevronUp, FileText, AlertTriangle, Sparkles, X } from "lucide-react";
+import { Upload, Search, Target, Download, ExternalLink, ChevronDown, ChevronUp, FileText, AlertTriangle, Sparkles, X, Trash2 } from "lucide-react";
 import { jobhuntApi, resumecraftApi, downloadBlob } from "../lib/api";
 import { useAuth } from "../hooks/useAuth";
 import { useLatestMutation } from "../hooks/useLatestMutation";
@@ -150,7 +150,7 @@ function MatchDetailsPanel({ match, isAdmin }: { match: any; isAdmin: boolean })
   );
 }
 
-export default function JobHunterPage() {
+export default function JobHuntPage() {
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
   const qc = useQueryClient();
@@ -168,7 +168,7 @@ export default function JobHunterPage() {
   // touches which resume is actually selected for matching.
   const [showResumeDetails, setShowResumeDetails] = useState(false);
 
-  // "Generate Tailored Resume" (JobHunter -> CVAnalysis -> ResumeCraft
+  // "Generate Tailored Resume" (JobHunt -> CVAnalysis -> ResumeCraft
   // bridge): analyzes the chosen resume against THIS job's description
   // (the same analysis CVAnalysis itself runs), then hands the resulting
   // record straight to ResumeCraft the same way CVAnalysis's own
@@ -194,6 +194,24 @@ export default function JobHunterPage() {
     onSuccess: (data) => {
       qc.invalidateQueries({ queryKey: ["resumes"] });
       setSelectedResumeId(data.id);
+    },
+  });
+
+  // Lets a mis-uploaded or outdated resume be removed from the dropdown
+  // (previously there was no way to delete one — upload/list only).
+  const deleteResumeMutation = useMutation({
+    mutationFn: (id: number) => jobhuntApi.deleteResume(id),
+    onSuccess: (_data, deletedId) => {
+      qc.invalidateQueries({ queryKey: ["resumes"] });
+      // If the deleted resume was the selected one, clear the selection
+      // (and close its details popup, if open) so nothing stale lingers.
+      setSelectedResumeId((cur) => {
+        if (cur === deletedId) {
+          setShowResumeDetails(false);
+          return null;
+        }
+        return cur;
+      });
     },
   });
 
@@ -304,7 +322,7 @@ export default function JobHunterPage() {
   return (
     <div>
       <div className="tiq-page-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 8 }}>
-        <h1 className="tiq-page-title">JobHunter Agent</h1>
+        <h1 className="tiq-page-title">JobHunt Agent</h1>
         <p className="tiq-page-sub">Search live jobs — matched against your resume automatically</p>
       </div>
 
@@ -347,6 +365,22 @@ export default function JobHunterPage() {
                   ))}
                 </select>
               )}
+              {selectedResumeId && (
+                <button
+                  className="tiq-btn tiq-btn-outline"
+                  title="Delete this resume"
+                  onClick={() => {
+                    if (window.confirm("Delete this resume? This can't be undone.")) {
+                      deleteResumeMutation.mutate(selectedResumeId);
+                    }
+                  }}
+                  disabled={deleteResumeMutation.isPending}
+                  style={{ color: "#ef4444", borderColor: "rgba(239,68,68,.4)" }}
+                >
+                  <Trash2 size={14} />
+                  {deleteResumeMutation.isPending ? "Deleting…" : "Delete"}
+                </button>
+              )}
               <input
                 ref={fileRef}
                 type="file"
@@ -366,6 +400,11 @@ export default function JobHunterPage() {
                 <span className="tiq-badge tiq-badge-teal">✓ Uploaded</span>
               )}
             </div>
+            {deleteResumeMutation.isError && (
+              <div className="tiq-alert tiq-alert-error" style={{ marginTop: 12 }}>
+                Couldn't delete resume: {(deleteResumeMutation.error as any)?.response?.data?.detail || "Please try again."}
+              </div>
+            )}
             
             {selectedResumeId && resumes.find((r: any) => r.id === selectedResumeId) && (
               <div
@@ -695,9 +734,14 @@ export default function JobHunterPage() {
 }
 
 // Popup triggered by clicking the "Skills detected" bar — shows every
-// field parse_resume_text (agents/jobhunt_agent.py) actually extracts:
-// full skill list (untruncated, unlike the 8-item teaser in the bar
-// itself), experience, education and contact details. Deliberately a
+// field extracted from the resume: contact details, experience,
+// education, and (when AI-powered — see upload_resume's
+// extract_resume_facts call, the SAME extraction module/function
+// CVAnalysis uses) the full categorized breakdown of technical skills,
+// business skills, soft skills, significant experience and
+// certifications/degrees, not just a flat skill list. Falls back to the
+// flat `skills` array when ai_powered is false (no Groq/Ollama
+// configured, so only the old keyword heuristic ran). Deliberately a
 // separate component/overlay rather than changing the existing bar's
 // own layout — the bar itself is unchanged aside from becoming clickable.
 function ResumeDetailsModal({ resume, onClose }: { resume: any; onClose: () => void }) {
@@ -711,6 +755,38 @@ function ResumeDetailsModal({ resume, onClose }: { resume: any; onClose: () => v
         <div style={{ fontSize: 13.5, color: "#111827" }}>{value}</div>
       </div>
     ) : null;
+
+  const SkillGroup = ({ label, items, color }: { label: string; items?: string[]; color: string }) =>
+    items && items.length > 0 ? (
+      <div style={{ marginBottom: 14 }}>
+        <div style={{ fontSize: 10.5, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 6 }}>
+          {label} ({items.length})
+        </div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+          {items.map((s, i) => (
+            <span key={i} className="tiq-badge" style={{ fontSize: 11.5, background: `${color}1a`, color }}>{s}</span>
+          ))}
+        </div>
+      </div>
+    ) : null;
+
+  const ListGroup = ({ label, items }: { label: string; items?: string[] }) =>
+    items && items.length > 0 ? (
+      <div style={{ marginBottom: 14 }}>
+        <div style={{ fontSize: 10.5, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 6 }}>
+          {label}
+        </div>
+        {items.map((s, i) => (
+          <div key={i} style={{ fontSize: 12.5, color: "var(--text-secondary)", marginBottom: 4, display: "flex", gap: 6, alignItems: "flex-start" }}>
+            <span style={{ color: "var(--teal-500)", flexShrink: 0 }}>•</span> {s}
+          </div>
+        ))}
+      </div>
+    ) : null;
+
+  const hasCategorized =
+    resume.ai_powered &&
+    ((resume.technical_skills?.length || 0) + (resume.business_skills?.length || 0) + (resume.soft_skills?.length || 0) > 0);
 
   return (
     <div
@@ -731,22 +807,38 @@ function ResumeDetailsModal({ resume, onClose }: { resume: any; onClose: () => v
         <Row label="Experience" value={resume.experience_years ? `${resume.experience_years}+ years` : null} />
         <Row label="Education" value={resume.education} />
 
-        {resume.skills?.length > 0 && (
-          <div style={{ marginBottom: 4 }}>
-            <div style={{ fontSize: 10.5, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 6 }}>
-              All Skills Detected ({resume.skills.length})
+        {hasCategorized ? (
+          <>
+            <SkillGroup label="Technical Skills" items={resume.technical_skills} color="#00c7b7" />
+            <SkillGroup label="Business Skills" items={resume.business_skills} color="#6366f1" />
+            <SkillGroup label="Soft Skills" items={resume.soft_skills} color="#f59e0b" />
+            <ListGroup label="Significant Experience" items={resume.significant_experience} />
+            <ListGroup label="Certifications & Degrees" items={resume.certifications_degrees} />
+          </>
+        ) : (
+          resume.skills?.length > 0 && (
+            <div style={{ marginBottom: 4 }}>
+              <div style={{ fontSize: 10.5, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 6 }}>
+                All Skills Detected ({resume.skills.length})
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {resume.skills.map((s: string, i: number) => (
+                  <span key={i} className="tiq-badge tiq-badge-teal" style={{ fontSize: 11.5 }}>{s}</span>
+                ))}
+              </div>
             </div>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-              {resume.skills.map((s: string, i: number) => (
-                <span key={i} className="tiq-badge tiq-badge-teal" style={{ fontSize: 11.5 }}>{s}</span>
-              ))}
-            </div>
+          )
+        )}
+
+        {!resume.ai_powered && (
+          <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 4, marginBottom: 8 }}>
+            AI-powered extraction isn't configured — showing basic keyword-detected skills only. Add a Groq API key in Settings → API Keys for the full categorized breakdown (technical, business, soft skills, experience, certifications) CVAnalysis also uses.
           </div>
         )}
 
-        {!resume.email && !resume.phone && !resume.education && !resume.experience_years && (
+        {!resume.email && !resume.phone && !resume.education && !resume.experience_years && !hasCategorized && !(resume.skills?.length > 0) && (
           <div style={{ fontSize: 12.5, color: "var(--text-muted)", marginTop: 8 }}>
-            No additional details (phone/education/experience) could be extracted from this file beyond skills.
+            No additional details could be extracted from this file.
           </div>
         )}
       </div>

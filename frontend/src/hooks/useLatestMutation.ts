@@ -21,7 +21,7 @@ import { useMutationState } from "@tanstack/react-query";
  * as long as the browser tab stays open. It does NOT survive a full page
  * reload/refresh — the mutation cache is in-memory only. For results that
  * must survive a hard refresh too, they need to be persisted server-side
- * and re-fetched (which JD Creator, CandidateLens, JobHunter, MarketIntel,
+ * and re-fetched (which JD Creator, CandidateLens, JobHunt, MarketIntel,
  * and LinkExplore already do via their History/session lists).
  */
 export function useLatestMutation<TData = unknown, TError = unknown>(

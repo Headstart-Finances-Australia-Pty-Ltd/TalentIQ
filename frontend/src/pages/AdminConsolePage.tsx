@@ -43,7 +43,7 @@ function ModulesManagementTab() {
   });
 
   const dirty = Object.keys(pending).length > 0;
-  // Job Seeker Tools (JobHunter, CV Analysis) live outside CAPABILITIES
+  // Job Seeker Tools (JobHunt, CV Analysis) live outside CAPABILITIES
   // entirely — they're not one of the recruiter-facing phase groups, so
   // they were missing from this table even though they're real,
   // toggleable sidebar entries (see AppLayout.tsx's own separate
