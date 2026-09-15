@@ -46,6 +46,24 @@ from typing import List, Optional
 # good-to-have verdict prompts below.
 _PROMPT_VERSION = 2
 
+# How many DISTINCT pool keys a single extraction call will try before
+# giving up and falling back to the keyword heuristic.
+#
+# This is the actual fix for "we have 6 pooled Groq keys, why did this
+# still fall back to garbage keyword matching?" — the retry logic used to
+# do exactly ONE retry (2 total attempts), and ONLY when the failure was
+# specifically classified as a 429 rate limit. Any other failure — a
+# malformed/unparseable JSON response (common; models don't always honor
+# "return ONLY JSON"), a request timeout, a transient 5xx, an
+# expired/revoked key — skipped retry entirely and fell straight to the
+# keyword fallback after a SINGLE attempt, even with 5 other healthy keys
+# sitting untouched in the pool. Every retry site in this file now (a)
+# retries on ANY failure, not just rate limits, and (b) tries up to this
+# many distinct keys before giving up — with a pooled setup, the keyword
+# fallback should now be a genuine last resort, not a coin-flip outcome
+# of which single key happened to get picked first.
+MAX_GROQ_KEY_ATTEMPTS = 4
+
 
 def _mask_key_for_log(key_value: Optional[str]) -> str:
     """Masked identifier (last 4 chars) for log lines — lets a specific
@@ -751,7 +769,7 @@ Return ONLY valid JSON, no markdown, no commentary:
 
     # ── Race Ollama and Groq concurrently — total latency is bounded by
     # whichever is faster, not the sum of a failed attempt plus the other.
-    for _outer_attempt in range(2):
+    for _outer_attempt in range(MAX_GROQ_KEY_ATTEMPTS):
         attempts = {}
         if ollama_base_url:
             attempts["ollama"] = _try_ollama
@@ -773,19 +791,25 @@ Return ONLY valid JSON, no markdown, no commentary:
 
         print(f"  TIMING: extract_jd_requirements_categorized total {_race_elapsed:.2f}s, all providers failed")
 
-        # A rate-limit failure means the KEY is fine, just temporarily
-        # throttled — mark it cooling down and ask the pool for a
-        # genuinely different one, rather than giving up. This is the
+        # Retry with a genuinely different pool key on ANY failure, not
+        # just a rate limit — a malformed/unparseable response, timeout,
+        # or transient 5xx is just as "this attempt didn't work" as a 429
+        # is, and with a multi-key pool there's no reason to give up on
+        # the very first miss while other keys sit idle. This is the
         # actual fix for a real bug found directly in production logs:
         # the previous version waited and retried the IDENTICAL key that
         # had just been rate-limited, which obviously never helped and
-        # defeated the entire purpose of having multiple pool keys.
-        if is_rate_limit and _pool_id is not None and db is not None and user_id is not None and _outer_attempt == 0:
+        # defeated the entire purpose of having multiple pool keys — and
+        # only did this once, for rate limits only, so a JSON-parse
+        # failure or timeout on the FIRST key fell straight to the
+        # keyword fallback with 5 other keys never even tried.
+        if _pool_id is not None and db is not None and user_id is not None and _outer_attempt < MAX_GROQ_KEY_ATTEMPTS - 1:
             from utils.groq_pool import record_key_outcome, resolve_groq_key
             await record_key_outcome(db, _pool_id, success=False)
             _kr = await resolve_groq_key(db, user_id)
             if _kr["groq_key"] and _kr["key_preview"] != _mask_key_for_log(groq_key):
-                print(f"  WARNING: extract_jd_requirements_categorized — key {_mask_key_for_log(groq_key)} was rate-limited, retrying with a different pool key {_kr['key_preview']}")
+                reason = "was rate-limited" if is_rate_limit else "failed"
+                print(f"  WARNING: extract_jd_requirements_categorized — key {_mask_key_for_log(groq_key)} {reason}, retrying with a different pool key {_kr['key_preview']} (attempt {_outer_attempt + 2}/{MAX_GROQ_KEY_ATTEMPTS})")
                 groq_key = _kr["groq_key"]
                 groq_model = _kr["model"] or groq_model
                 _pool_id = _kr["pool_id"] if _kr["source"] == "pool" else None
@@ -797,8 +821,18 @@ Return ONLY valid JSON, no markdown, no commentary:
 
 def _fallback_jd_requirements(jd_text: str, domain_skills: Optional[List[str]] = None) -> dict:
     from routers.cvintel import DOMAIN_SKILLS as _bank  # reuse the one large curated bank
+    from utils.technical_scoring import contains_skill_token
     jd_lower = jd_text.lower()
-    found = [s for s in (domain_skills or _bank) if s in jd_lower]
+    # Bounded on alphanumeric adjacency (see contains_skill_token's
+    # docstring) — plain `s in jd_lower` let short/generic bank entries
+    # like "ca", "go", "bas" match purely because they're hiding inside an
+    # unrelated word ("communication"/"significant" contain "ca",
+    # "governance"/"going" contain "go", "based"/"database" contain
+    # "bas"), which is how JDs mentioning ordinary words ended up with
+    # those meaningless 2-3 letter fragments listed as essential
+    # requirements — and then "matched" against a resume for the same
+    # accidental-substring reason.
+    found = [s for s in (domain_skills or _bank) if contains_skill_token(s, jd_lower)]
 
     role_m = re.search(r"(?:job\s*title|role|position\s*title)\s*[:\-]\s*(.+)", jd_text, re.IGNORECASE)
     loc_m = re.search(r"(?:location|based\s*in|located\s*in)\s*[:\-]\s*(.+)", jd_text, re.IGNORECASE)
@@ -935,7 +969,12 @@ async def _extract_resume_facts_impl(
             raise last_error
         return None
 
-    for _outer_attempt in range(2):
+    _pool_id = None  # only set for a key WE resolve here (retry rounds) —
+    # the very first attempt's key was resolved by the CALLER (routers
+    # pass in an already-resolved groq_key), which is responsible for
+    # scoring that key's own outcome; this function only scores keys it
+    # personally draws from the pool during a retry.
+    for _outer_attempt in range(MAX_GROQ_KEY_ATTEMPTS):
         attempts = {}
         if ollama_base_url:
             attempts["ollama"] = _try_ollama
@@ -947,15 +986,26 @@ async def _extract_resume_facts_impl(
         winner, result, is_rate_limit = outcome["winner"], outcome["result"], outcome["is_rate_limit_failure"]
 
         if winner:
+            if _pool_id is not None and db is not None:
+                from utils.groq_pool import record_key_outcome
+                await record_key_outcome(db, _pool_id, success=True)
             return result
 
-        if is_rate_limit and db is not None and user_id is not None and _outer_attempt == 0:
-            from utils.groq_pool import resolve_groq_key
+        # Retry with a genuinely different pool key on ANY failure, not
+        # just a rate limit (see MAX_GROQ_KEY_ATTEMPTS's docstring above
+        # for why a rate-limit-only, single-retry policy left most of a
+        # multi-key pool's redundancy unused).
+        if db is not None and user_id is not None and _outer_attempt < MAX_GROQ_KEY_ATTEMPTS - 1:
+            from utils.groq_pool import record_key_outcome, resolve_groq_key
+            if _pool_id is not None:
+                await record_key_outcome(db, _pool_id, success=False)
             kr = await resolve_groq_key(db, user_id)
             if kr["groq_key"] and kr["key_preview"] != _mask_key_for_log(groq_key):
-                print(f"  WARNING: extract_resume_facts — key {_mask_key_for_log(groq_key)} was rate-limited, retrying with a different pool key {kr['key_preview']}")
+                reason = "was rate-limited" if is_rate_limit else "failed"
+                print(f"  WARNING: extract_resume_facts — key {_mask_key_for_log(groq_key)} {reason}, retrying with a different pool key {kr['key_preview']} (attempt {_outer_attempt + 2}/{MAX_GROQ_KEY_ATTEMPTS})")
                 groq_key = kr["groq_key"]
                 groq_model = kr["model"] or groq_model
+                _pool_id = kr["pool_id"] if kr["source"] == "pool" else None
                 continue
         break
 
@@ -1353,27 +1403,33 @@ Return ONLY valid JSON, no markdown, no commentary:
             if pool_id is not None:
                 await record_key_outcome(db, pool_id, success=(result is not None))
 
-        # Retry, with a FRESH key, any slot that failed specifically due
-        # to a rate limit — the key itself is fine, just temporarily
-        # throttled, and having just marked it cooling down above,
-        # resolve_groq_key will naturally offer a genuinely different key
-        # if the pool has one, rather than the identical key that just
-        # failed. This is the actual fix for a confirmed real bug: a
-        # production log showed the SAME key being retried three times
-        # against the same rate limit, never once trying a different pool
-        # key, even though the whole point of a multi-key pool is to
-        # route around exactly this.
-        retry_assignments = {}
-        for i, (result, is_rl) in enumerate(round1_results):
-            if result is None and is_rl:
+        # Retry ANY slot that still failed, not just ones that failed
+        # specifically due to a rate limit — a malformed/unparseable
+        # response, timeout, or transient 5xx is just as "this key/attempt
+        # didn't work" as a 429 is, and with a multi-key pool there's no
+        # reason to give up on the first miss while other keys sit idle
+        # (see MAX_GROQ_KEY_ATTEMPTS's docstring for the full story). Runs
+        # for up to MAX_GROQ_KEY_ATTEMPTS total rounds (round 1 above plus
+        # this many more), stopping early once every slot has a result or
+        # the pool has no more distinct keys left to offer.
+        for _retry_round in range(MAX_GROQ_KEY_ATTEMPTS - 1):
+            failed_slots = [i for i, (result, _is_rl) in enumerate(final_results) if result is None]
+            if not failed_slots:
+                break
+
+            retry_assignments = {}
+            for i in failed_slots:
                 kr = await resolve_groq_key(db, user_id)
                 if kr["groq_key"] and kr["key_preview"] != _mask_key_for_log(resolved_keys[i][0]):
                     retry_assignments[i] = kr
-                    print(f"  WARNING: extract_candidate_strengths slot {i} — key {_mask_key_for_log(resolved_keys[i][0])} was rate-limited, retrying with a different pool key {kr['key_preview']} instead of hammering the same one")
+                    reason = "was rate-limited" if final_results[i][1] else "failed"
+                    print(f"  WARNING: extract_candidate_strengths slot {i} — key {_mask_key_for_log(resolved_keys[i][0])} {reason}, retrying with a different pool key {kr['key_preview']} (round {_retry_round + 2}/{MAX_GROQ_KEY_ATTEMPTS})")
                 elif kr["groq_key"]:
-                    print(f"  WARNING: extract_candidate_strengths slot {i} — key {_mask_key_for_log(resolved_keys[i][0])} was rate-limited, but no other key is currently available (pool exhausted or only one key configured) — not retrying")
+                    print(f"  WARNING: extract_candidate_strengths slot {i} — key {_mask_key_for_log(resolved_keys[i][0])} failed, but no other key is currently available (pool exhausted or only one key configured) — not retrying")
 
-        if retry_assignments:
+            if not retry_assignments:
+                break
+
             async def _retry_one(i):
                 kr = retry_assignments[i]
                 key, model = kr["groq_key"], kr["model"] or groq_model
@@ -1385,13 +1441,17 @@ Return ONLY valid JSON, no markdown, no commentary:
 
             _t1 = time.time()
             retry_outcomes = await asyncio.gather(*[_retry_one(i) for i in retry_assignments])
-            print(f"  TIMING: extract_candidate_strengths retry round (chunked, concurrent) {time.time() - _t1:.2f}s")
+            print(f"  TIMING: extract_candidate_strengths retry round {_retry_round + 2} (chunked, concurrent) {time.time() - _t1:.2f}s")
 
             # Sequentially report retry outcomes too — again, safe here
             # since this retry gather has also already completed.
             for i, result, _is_rl in retry_outcomes:
                 final_results[i] = (result, _is_rl)
                 kr = retry_assignments[i]
+                # Update resolved_keys so the NEXT retry round's "is this
+                # genuinely a different key" check compares against the
+                # key this slot just tried, not the stale round-1 one.
+                resolved_keys[i] = (kr["groq_key"], kr["model"] or groq_model, kr["pool_id"])
                 final_keys_used[i] = kr["groq_key"]
                 if kr["pool_id"] is not None:
                     await record_key_outcome(db, kr["pool_id"], success=(result is not None))
@@ -1528,9 +1588,14 @@ Return ONLY valid JSON, no markdown, no commentary:
 
 def _fallback_candidate_strengths(resume_text: str, jd_requirements: dict) -> dict:
     from routers.cvintel import DOMAIN_SKILLS as _bank, _skill_present, _normalize_skill, _normalize_text
+    from utils.technical_scoring import contains_skill_token
 
     resume_lower = _normalize_text(resume_text)
-    candidate_skill_set = {_normalize_skill(s) for s in _bank if s in resume_lower}
+    # Bounded on alphanumeric adjacency — see contains_skill_token's
+    # docstring — for the same reason as _fallback_jd_requirements above:
+    # plain `s in resume_lower` let short/generic bank entries match
+    # purely because they're hiding inside an unrelated word.
+    candidate_skill_set = {_normalize_skill(s) for s in _bank if contains_skill_token(s, resume_lower)}
 
     essential = jd_requirements.get("essential", []) or []
     good_to_have = jd_requirements.get("good_to_have", []) or []
@@ -1538,7 +1603,7 @@ def _fallback_candidate_strengths(resume_text: str, jd_requirements: dict) -> di
     essential_missing = [s for s in essential if s not in essential_matched]
     good_to_have_matched = [s for s in good_to_have if _skill_present(_normalize_skill(s), candidate_skill_set, resume_lower)]
 
-    all_found = [s for s in _bank if s in resume_lower]
+    all_found = [s for s in _bank if contains_skill_token(s, resume_lower)]
     # Heuristic split — genuinely categorizing skill "type" needs an LLM;
     # without one, put everything found in technical_skills so it's at
     # least visible, rather than mis-bucketing it.

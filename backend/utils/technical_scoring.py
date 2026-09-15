@@ -133,13 +133,42 @@ def normalize_text(s: str) -> str:
     return s
 
 
+def contains_skill_token(token_lower: str, text_lower: str) -> bool:
+    """Substring containment, but bounded on alphanumeric adjacency so a
+    short/generic skill token can't match purely because it's hiding
+    inside an unrelated word.
+
+    Plain `token in text` was the actual cause of nonsense matches like a
+    "bas" (meant as the ATO's Business Activity Statement) or "basel"
+    (Basel III) skill token being "found" inside "database"/"based", or
+    "ca" (Chartered Accountant) and "go" (the Go language) being "found"
+    inside ordinary words like "communication"/"significant"/"location"
+    or "governance"/"going"/"algorithm" — which is exactly how a Data
+    Architect resume mentioning "data governance" and "Basel III" ended up
+    with "go", "ca", "bas", "basel" listed as matched essential skills:
+    every one of those was a real word in the text, just not the word the
+    skill token meant.
+
+    Bounds on alphanumeric adjacency only (not full regex \\b word-boundary
+    semantics) so skills containing symbols — "c++", "c#", "ci/cd" — still
+    match correctly at their natural edges instead of never matching
+    anything (a trailing "+" or "#" isn't a \\w character, so \\b itself
+    doesn't reliably land where these actually end)."""
+    if not token_lower:
+        return False
+    pattern = r"(?<![a-z0-9])" + re.escape(token_lower) + r"(?![a-z0-9])"
+    return re.search(pattern, text_lower) is not None
+
+
 def skill_present(skill: str, candidate_skills: set, resume_lower: str) -> bool:
     """A skill counts as present if any of the following hold — designed to
     catch real-world phrasing variance rather than only an exact match:
       1. it's in the LLM-extracted candidate skill list (allowing either
          side to be a substring of the other, e.g. "python" vs "python 3")
-      2. the exact phrase appears literally in the resume text (after
-         UK/US spelling normalization on both sides)
+      2. the exact phrase appears literally in the resume text, bounded so
+         a short/generic token can't match inside an unrelated word (see
+         contains_skill_token) — after UK/US spelling normalization on
+         both sides
       3. a known synonym, abbreviation, or specific-technique-that-implies-
          the-general-skill appears in the resume text (curated list, not
          blind fuzzy matching — see _SKILL_SYNONYMS above for why)
@@ -153,15 +182,15 @@ def skill_present(skill: str, candidate_skills: set, resume_lower: str) -> bool:
     if any(sk in cs or cs in sk for cs in candidate_skills):
         return True
 
-    if sk in resume_lower:
+    if contains_skill_token(sk, resume_lower):
         return True
 
     for variant in _SKILL_SYNONYMS.get(sk, []):
-        if normalize_skill(variant) in resume_lower:
+        if contains_skill_token(normalize_skill(variant), resume_lower):
             return True
 
     words = [w for w in sk.split() if len(w) > 2]
-    if len(words) >= 2 and all(w in resume_lower for w in words):
+    if len(words) >= 2 and all(contains_skill_token(w, resume_lower) for w in words):
         return True
 
     from utils.embeddings import embedding_requirement_match
