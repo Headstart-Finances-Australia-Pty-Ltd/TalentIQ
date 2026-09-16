@@ -1029,15 +1029,18 @@ def title_matches_role(job_title: str, role: str) -> bool:
     return True
 
 
-async def extract_candidate_profile(resume_text: str, groq_api_key: Optional[str] = None, groq_model: str = DEFAULT_GROQ_MODEL) -> Dict:
+async def extract_candidate_profile(resume_text: str, groq_api_key: Optional[str] = None, groq_model: str = DEFAULT_GROQ_MODEL, db=None, user_id: Optional[int] = None) -> Dict:
     """Extract a structured, categorized candidate profile ONCE per resume
     — reused across every job in a match batch rather than re-extracted
     per job. Delegates to the shared extraction module (also used by
     CVAnalysis and CandidateLens) so all three present strengths the same
     way: Technical Skills, Business Skills, Soft Skills, Significant
-    Experience, and Certifications & Degrees."""
+    Experience, and Certifications & Degrees.
+
+    Pass db/user_id to retry across the shared Groq key pool on failure —
+    see extract_candidate_strengths_general's docstring."""
     from utils.llm_extraction import extract_candidate_strengths_general
-    strengths = await extract_candidate_strengths_general(resume_text, groq_api_key, groq_model)
+    strengths = await extract_candidate_strengths_general(resume_text, groq_api_key, groq_model, db=db, user_id=user_id)
     # hard_skills kept for backward-compat with the deterministic matching
     # logic below — technical + business skills combined.
     strengths["hard_skills"] = strengths.get("technical_skills", []) + strengths.get("business_skills", [])
@@ -1102,7 +1105,7 @@ async def calculate_match(
     shared Groq key pool instead of all sharing one fixed key for the
     whole batch — see _extract_job_requirements's docstring."""
     if candidate_profile is None:
-        candidate_profile = await extract_candidate_profile(resume_text, groq_api_key, groq_model)
+        candidate_profile = await extract_candidate_profile(resume_text, groq_api_key, groq_model, db=db, user_id=user_id)
 
     requirements = await _extract_job_requirements(job, groq_api_key, groq_model, db=db, user_id=user_id)
     essential = [s for s in requirements.get("essential", requirements.get("required_hard_skills", [])) if s]
