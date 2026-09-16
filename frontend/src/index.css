@@ -807,7 +807,7 @@ body {
    above, so it gets its own breakpoint rules rather than reusing the
    app's .tiq-* layout classes, which don't apply here at all. */
 @media (max-width: 900px) {
-  .tiq-landing-nav-links { display: none; }
+  .tiq-landing-nav-links { display: none !important; } /* without !important this loses to the element's own inline style={{ display: "flex" }}, which is exactly why the full desktop row (mega-menu trigger included) kept rendering and overflowing on mobile instead of actually hiding */
   .tiq-landing-hamburger { display: inline-flex !important; }
   .tiq-landing-module-grid {
     grid-template-columns: 1fr !important;
