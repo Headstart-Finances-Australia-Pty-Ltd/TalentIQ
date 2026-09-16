@@ -28,6 +28,7 @@ async def get_navtalk_credentials(db: AsyncSession, user_id: int) -> dict:
 async def generate_questions_with_model_answers(
     jd_text: str, candidate_name: str, candidate_profile: dict, matched_skills: list,
     groq_key: str, groq_model: str, question_count: int = DEFAULT_QUESTION_COUNT,
+    db=None, user_id: Optional[int] = None,
 ) -> list[dict]:
     """Generates {question, model_answer} pairs — a superset of
     routers/joblens.py's existing generate_questions(), which only ever
@@ -39,10 +40,13 @@ async def generate_questions_with_model_answers(
     interview at all.
 
     Falls back to a heuristic question set (no LLM) with a generic model
-    answer placeholder if no Groq key is available — mirrors
-    _default_questions()'s role in the existing pipeline, so an avatar
-    interview can still be set up (with a manual-review-only note)
-    without a Groq key configured."""
+    answer placeholder if no Groq key is available, OR if every attempt
+    against the shared key pool fails — mirrors _default_questions()'s
+    role in the existing pipeline, so an avatar interview can still be
+    set up (with a manual-review-only note) without a working Groq call.
+    Pass db/user_id to retry across the pool (see utils.groq_pool.
+    call_groq_with_pool_retry) instead of a single key's first failure
+    dropping straight to this fallback."""
     if not groq_key:
         return [
             {"question": q, "model_answer": "(No Groq key configured — model answer not generated; evaluate this answer manually.)"}
@@ -52,11 +56,11 @@ async def generate_questions_with_model_answers(
     from langchain_groq import ChatGroq
     from langchain.schema import HumanMessage
     from utils.llm_extraction import _truncate_for_llm, _parse_json_response
+    from utils.groq_pool import call_groq_with_pool_retry
 
     profile_block = _summarize_profile(candidate_profile) if candidate_profile else ""
     skills_str = ", ".join(matched_skills[:8]) if matched_skills else "relevant skills"
 
-    llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0.4, max_tokens=4000, reasoning_format="hidden", reasoning_effort="low", max_retries=0)
     prompt = f"""You are a recruitment AI assistant preparing an AI-avatar interview
 for {candidate_name}. Generate exactly {question_count} interview questions
 PERSONALIZED to this specific candidate's background and this specific role —
@@ -82,8 +86,16 @@ Return ONLY valid JSON, no markdown:
   ]
 }}"""
 
-    resp = llm.invoke([HumanMessage(content=prompt)])
-    data = _parse_json_response(resp.content)
+    async def _make_call(key, model):
+        llm = ChatGroq(api_key=key, model=model, temperature=0.4, max_tokens=4000, reasoning_format="hidden", reasoning_effort="low", max_retries=0)
+        return llm.invoke([HumanMessage(content=prompt)]).content
+
+    try:
+        response_content = await call_groq_with_pool_retry(db, user_id, _make_call, groq_key, groq_model)
+        data = _parse_json_response(response_content)
+    except Exception:
+        data = None
+
     if data is None or not data.get("items"):
         return [
             {"question": q, "model_answer": "(LLM generation failed — evaluate this answer manually.)"}
@@ -122,6 +134,7 @@ def _default_questions(name: str, skills: list) -> list[str]:
 
 async def evaluate_answer(
     question: str, model_answer: str, candidate_answer: str, groq_key: str, groq_model: str,
+    db=None, user_id: Optional[int] = None,
 ) -> dict:
     """Scores the candidate's actual transcribed answer against the model
     answer generated alongside its question — three axes per the request:
@@ -133,15 +146,20 @@ async def evaluate_answer(
     (communication/relevance/confidence across the whole transcript) —
     that stays as-is; this is a new, more granular per-question layer
     that gets shown ALONGSIDE it, not instead of it (see router.py's
-    write-back to JobLensCandidate)."""
+    write-back to JobLensCandidate).
+
+    Pass db/user_id to retry across the shared Groq key pool on ANY
+    failure before falling back to the null-scores placeholder below —
+    previously a single bad response from whichever one key was resolved
+    meant this candidate's answer went completely unscored."""
     if not candidate_answer or not candidate_answer.strip():
         return {"context_score": 0, "semantic_score": 0, "keypoints_score": 0, "overall_score": 0, "notes": "No answer was recorded for this question."}
 
     from langchain_groq import ChatGroq
     from langchain.schema import HumanMessage
     from utils.llm_extraction import _parse_json_response
+    from utils.groq_pool import call_groq_with_pool_retry
 
-    llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0.1, max_tokens=1500, reasoning_format="hidden", reasoning_effort="low", max_retries=0)
     prompt = f"""You are an experienced technical interviewer scoring one candidate's
 spoken answer against a model answer, for a single interview question.
 Be fair and evidence-based — score what the transcript actually contains,
@@ -169,8 +187,17 @@ Return ONLY valid JSON, no markdown:
   "overall_score": <0-100, your holistic judgement, not necessarily the average>,
   "notes": "<2-3 sentences, specific and evidence-based>"
 }}"""
-    resp = llm.invoke([HumanMessage(content=prompt)])
-    data = _parse_json_response(resp.content)
+
+    async def _make_call(key, model):
+        llm = ChatGroq(api_key=key, model=model, temperature=0.1, max_tokens=1500, reasoning_format="hidden", reasoning_effort="low", max_retries=0)
+        return llm.invoke([HumanMessage(content=prompt)]).content
+
+    try:
+        response_content = await call_groq_with_pool_retry(db, user_id, _make_call, groq_key, groq_model)
+        data = _parse_json_response(response_content)
+    except Exception as e:
+        return {"context_score": None, "semantic_score": None, "keypoints_score": None, "overall_score": None, "notes": f"Evaluation failed — {type(e).__name__}: {str(e)[:200]}"}
+
     if data is None:
         return {"context_score": None, "semantic_score": None, "keypoints_score": None, "overall_score": None, "notes": "Evaluation failed — LLM returned an unparseable response."}
     return data

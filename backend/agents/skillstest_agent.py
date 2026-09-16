@@ -87,6 +87,8 @@ async def generate_ai_questions(
     jd_text: str = "",
     jd_skills: Optional[list] = None,
     aptitude_subtype: Optional[str] = None,
+    db=None,
+    user_id: Optional[int] = None,
 ) -> list:
     """Returns a list of dicts, each matching TestQuestion's fields
     (question_text, options/correct_option_index for mcq, or
@@ -206,9 +208,12 @@ Make the {count} questions meaningfully DIFFERENT from each other \u2014 differe
 Output ONLY one JSON object, no prose before or after, matching exactly this shape:
 {schema}
 """
-    llm = _llm(groq_key, groq_model, temperature=0.8)
     try:
-        response = llm.invoke(prompt).content
+        async def _make_call(key, model):
+            return _llm(key, model, temperature=0.8).invoke(prompt).content
+
+        from utils.groq_pool import call_groq_with_pool_retry
+        response = await call_groq_with_pool_retry(db, user_id, _make_call, groq_key, groq_model)
     except Exception as e:
         raise RuntimeError(f"AI question generation failed: {e}")
 
@@ -253,6 +258,8 @@ async def grade_short_answer(
     candidate_answer: str,
     groq_key: Optional[str],
     groq_model: str = DEFAULT_GROQ_MODEL,
+    db=None,
+    user_id: Optional[int] = None,
 ) -> dict:
     """Returns {"score": 0-100 float, "reasoning": str}. Falls back to a
     conservative "ungraded" marker (score=None) rather than guessing when
@@ -285,8 +292,11 @@ Output ONLY one JSON object, no prose before or after:
 {{"score": 0-100 number, "reasoning": "1-3 sentence explanation"}}
 """
     try:
-        llm = _llm(groq_key, groq_model, temperature=0.2, max_tokens=500)
-        response = llm.invoke(prompt).content
+        async def _make_call(key, model):
+            return _llm(key, model, temperature=0.2, max_tokens=500).invoke(prompt).content
+
+        from utils.groq_pool import call_groq_with_pool_retry
+        response = await call_groq_with_pool_retry(db, user_id, _make_call, groq_key, groq_model)
         data = _extract_json(response)
         if data and isinstance(data.get("score"), (int, float)):
             return {
@@ -306,6 +316,8 @@ async def generate_overall_evaluation(
     per_question_summary: list,
     groq_key: Optional[str],
     groq_model: str = DEFAULT_GROQ_MODEL,
+    db=None,
+    user_id: Optional[int] = None,
 ) -> dict:
     """Returns {"overall_score": float, "summary": str, "reasoning": str}.
     per_question_summary is a list of short dicts like
@@ -338,8 +350,11 @@ Output ONLY one JSON object, no prose before or after:
 {{"overall_score": 0-100 number, "summary": "...", "reasoning": "..."}}
 """
     try:
-        llm = _llm(groq_key, groq_model, temperature=0.3, max_tokens=800)
-        response = llm.invoke(prompt).content
+        async def _make_call(key, model):
+            return _llm(key, model, temperature=0.3, max_tokens=800).invoke(prompt).content
+
+        from utils.groq_pool import call_groq_with_pool_retry
+        response = await call_groq_with_pool_retry(db, user_id, _make_call, groq_key, groq_model)
         data = _extract_json(response)
         if data and isinstance(data.get("overall_score"), (int, float)):
             return {

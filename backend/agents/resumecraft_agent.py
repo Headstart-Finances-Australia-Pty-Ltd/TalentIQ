@@ -268,10 +268,19 @@ async def generate_tailored_resume(
     cv_result: dict,
     groq_key: Optional[str],
     groq_model: str = DEFAULT_GROQ_MODEL,
+    db=None,
+    user_id: Optional[int] = None,
 ) -> dict:
     """Returns a dict matching RESUME_SCHEMA_HINT's shape plus
     `ai_powered` (bool) and, on a failed/skipped LLM call, `ai_error` /
-    a note inside `summary` explaining why it's a blank skeleton."""
+    a note inside `summary` explaining why it's a blank skeleton.
+
+    Pass `db`/`user_id` to retry across the shared Groq key pool (see
+    utils.groq_pool.call_groq_with_pool_retry) on ANY failure — not just
+    the same-key rate-limit backoff _invoke_with_retry already does —
+    before giving up and returning the blank-skeleton fallback below.
+    Without them, behaves exactly as before: one key, one attempt (plus
+    _invoke_with_retry's short same-key backoff on a rate limit)."""
     cv_result = cv_result or {}
     matched = cv_result.get("matchedSkills") or []
     missing = cv_result.get("missingSkills") or []
@@ -280,7 +289,6 @@ async def generate_tailored_resume(
 
     if groq_key and _GROQ_AVAILABLE:
         try:
-            llm = _llm(groq_key, groq_model, temperature=0.4)
             prompt = f"""You are an expert resume writer who follows current, ATS-safe, reverse-chronological resume best practice. Rewrite/restructure the candidate's EXISTING resume below into a DESCRIPTIVE, fully-detailed version TAILORED for one specific job, using the match analysis TalentIQ's CVAnalysis already computed.
 
 TARGET ROLE: {job_title or "the target role"} at {company_name or "the target company"}
@@ -308,7 +316,11 @@ Rules:
 8. Output ONLY one JSON object, no prose before or after, matching EXACTLY this shape (omit no keys; use empty string/array if unknown):
 {RESUME_SCHEMA_HINT}
 """
-            response = await _invoke_with_retry(llm, prompt)
+            async def _make_call(key, model):
+                return await _invoke_with_retry(_llm(key, model, temperature=0.4), prompt)
+
+            from utils.groq_pool import call_groq_with_pool_retry
+            response = await call_groq_with_pool_retry(db, user_id, _make_call, groq_key, groq_model)
             data = _extract_json(response)
             if data:
                 merged = dict(EMPTY_RESUME_DATA)
@@ -348,15 +360,19 @@ async def generate_tailored_cover_letter(
     cv_result: dict,
     groq_key: Optional[str],
     groq_model: str = DEFAULT_GROQ_MODEL,
+    db=None,
+    user_id: Optional[int] = None,
 ) -> dict:
-    """Returns {"body": str, "ai_powered": bool, "groq_model"?: str, "ai_error"?: str}."""
+    """Returns {"body": str, "ai_powered": bool, "groq_model"?: str, "ai_error"?: str}.
+
+    Pass `db`/`user_id` for multi-key pool retry — see generate_tailored_
+    resume's docstring above for why."""
     cv_result = cv_result or {}
     matched = cv_result.get("matchedSkills") or []
     jd_req = cv_result.get("jdRequirements") or {}
 
     if groq_key and _GROQ_AVAILABLE:
         try:
-            llm = _llm(groq_key, groq_model, temperature=0.5, max_tokens=1200)
             prompt = f"""Write a professional, ATS-friendly cover letter in standard business-letter format for {candidate_name or "the candidate"}, applying for the {job_title or "advertised"} role at {company_name or "the company"}.
 
 Use these REAL matched strengths (from TalentIQ's CVAnalysis analysis) to justify fit \u2014 do not invent achievements the resume doesn't support:
@@ -373,7 +389,11 @@ Structure, 4 short paragraphs, under 350 words total:
 4. Closing \u2014 call to action, thanks.
 
 Return ONLY the letter body text \u2014 no JSON, no markdown, no bracket placeholders. Start with 'Dear Hiring Manager,' unless a named contact is given."""
-            body = (await _invoke_with_retry(llm, prompt)).strip()
+            async def _make_call(key, model):
+                return await _invoke_with_retry(_llm(key, model, temperature=0.5, max_tokens=1200), prompt)
+
+            from utils.groq_pool import call_groq_with_pool_retry
+            body = (await call_groq_with_pool_retry(db, user_id, _make_call, groq_key, groq_model)).strip()
             if body:
                 return {"body": body, "ai_powered": True, "groq_model": groq_model}
         except Exception as e:

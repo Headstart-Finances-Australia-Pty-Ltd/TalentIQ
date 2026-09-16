@@ -15,7 +15,7 @@ from sqlalchemy import select
 from db.database import get_db, AsyncSessionLocal
 from models.models import User, JobLensCandidate
 from utils.auth_utils import get_current_user
-from utils.credentials import get_credential, get_groq_model
+from utils.credentials import get_groq_model
 from capabilities.acquisition import service as acquisition_service
 from capabilities.acquisition.models import Candidate
 from capabilities.interview.models import Interview
@@ -118,8 +118,15 @@ async def create_avatar_session(payload: AvatarSessionCreate, current_user: User
 
     # ── Generate questions + model answers, using the CandidateLens
     # profile (resume_summary + matched_skills) + JD when available ──────
-    groq_key = await get_credential(db, current_user.id, "groq", "api_key")
-    groq_model = await get_groq_model(db, current_user.id)
+    # Uses the shared Groq key pool (resolve_groq_key) rather than a
+    # single personal/global key lookup — this endpoint previously never
+    # drew from the pool at all, so it had none of the multi-key
+    # redundancy every other AI feature in the app gets, regardless of
+    # how many keys an admin had configured in the pool.
+    from utils.groq_pool import resolve_groq_key
+    key_resolution = await resolve_groq_key(db, current_user.id)
+    groq_key = key_resolution["groq_key"]
+    groq_model = key_resolution["model"] or await get_groq_model(db, current_user.id)
 
     jd_text, matched_skills, resume_summary = "", [], {}
     if joblens_candidate:
@@ -137,6 +144,7 @@ async def create_avatar_session(payload: AvatarSessionCreate, current_user: User
 
     items = await service.generate_questions_with_model_answers(
         jd_text, candidate.full_name, resume_summary, matched_skills, groq_key, groq_model, payload.question_count,
+        db=db, user_id=current_user.id,
     )
     for i, item in enumerate(items, start=1):
         db.add(AvatarInterviewQuestion(session_id=session.id, order_index=i, question_text=item["question"], model_answer_text=item["model_answer"]))
@@ -246,11 +254,26 @@ async def navtalk_webhook(navtalk_session_id: str, payload: NavTalkWebhookPayloa
                 question.answered_at = datetime.utcnow()
 
                 interview = (await db.execute(select(Interview).where(Interview.id == session.interview_id))).scalar_one_or_none()
-                groq_key = await get_credential(db, interview.owner_user_id, "groq", "api_key") if interview and interview.owner_user_id else None
-                groq_model = await get_groq_model(db, interview.owner_user_id) if interview and interview.owner_user_id else "llama-3.3-70b-versatile"
+                owner_id = interview.owner_user_id if interview else None
+                groq_key, groq_model = None, "llama-3.3-70b-versatile"
+                if owner_id:
+                    # Pool-aware resolution (see the question-generation
+                    # call site above for why this replaced a plain
+                    # get_credential lookup) — this webhook handler is a
+                    # background callback from NavTalk, not a live user
+                    # request, so a transient single-key failure here
+                    # previously meant a candidate's recorded answer went
+                    # completely unscored with no user around to retry it.
+                    from utils.groq_pool import resolve_groq_key
+                    key_resolution = await resolve_groq_key(db, owner_id)
+                    groq_key = key_resolution["groq_key"]
+                    groq_model = key_resolution["model"] or await get_groq_model(db, owner_id)
 
                 if groq_key:
-                    evaluation = await service.evaluate_answer(question.question_text, question.model_answer_text, payload.transcript, groq_key, groq_model)
+                    evaluation = await service.evaluate_answer(
+                        question.question_text, question.model_answer_text, payload.transcript, groq_key, groq_model,
+                        db=db, user_id=owner_id,
+                    )
                     question.context_score = evaluation.get("context_score")
                     question.semantic_score = evaluation.get("semantic_score")
                     question.keypoints_score = evaluation.get("keypoints_score")

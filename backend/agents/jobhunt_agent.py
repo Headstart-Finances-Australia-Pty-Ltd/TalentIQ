@@ -1193,14 +1193,42 @@ def generate_cover_letter(
     job: Dict,
     groq_api_key: Optional[str] = None,
     groq_model: str = DEFAULT_GROQ_MODEL,
+    db=None,
+    user_id: Optional[int] = None,
 ) -> str:
-    """Generate a personalised cover letter for a job"""
+    """Generate a personalised cover letter for a job.
+
+    Kept as a plain `def` (not `async def`) at the top level so
+    routers/jobhunt.py can keep running the WHOLE thing off the event
+    loop via asyncio.to_thread exactly as before when db/user_id aren't
+    given — the fallback path below is pure CPU-bound string work with
+    no I/O of its own. When db/user_id ARE given, the actual Groq call is
+    routed through _generate_cover_letter_ai (async, does real DB reads/
+    writes to retry across the shared key pool) instead of a single
+    direct llm.invoke() — see routers/jobhunt.py's call site for how the
+    two combine."""
+    if groq_api_key and _GROQ_AVAILABLE and ChatGroq and db is not None and user_id is not None:
+        raise RuntimeError(
+            "generate_cover_letter() was called synchronously with db/user_id set — "
+            "call _generate_cover_letter_ai() directly (it's async) instead, or omit "
+            "db/user_id to use this single-attempt synchronous path."
+        )
+    return _generate_cover_letter_sync(resume_text, resume_info, job, groq_api_key, groq_model)
+
+
+def _generate_cover_letter_sync(
+    resume_text: str, resume_info: Dict, job: Dict,
+    groq_api_key: Optional[str], groq_model: str,
+) -> str:
+    """The original single-key, single-attempt implementation — kept as
+    the synchronous fallback for callers that don't have a db/user_id to
+    retry against the pool with (or that intentionally want a plain
+    to_thread call, no DB access from the worker thread)."""
     job_title = job.get("title", "the position")
     company = job.get("company", "your organization")
     job_desc = job.get("description", "")
     candidate_name = resume_info.get("applicant_name", "Your Name")
 
-    # Use LLM if available
     if groq_api_key and _GROQ_AVAILABLE and ChatGroq:
         try:
             from utils.llm_extraction import _truncate_for_llm
@@ -1216,6 +1244,58 @@ def generate_cover_letter(
             return llm.invoke(prompt).content
         except Exception:
             pass
+
+    return _template_cover_letter(resume_text, job, candidate_name)
+
+
+async def _generate_cover_letter_ai(
+    resume_text: str, resume_info: Dict, job: Dict,
+    groq_api_key: Optional[str], groq_model: str,
+    db=None, user_id: Optional[int] = None,
+) -> str:
+    """Async counterpart of generate_cover_letter, with real multi-key
+    pool retry — the actual Groq call still runs off the event loop
+    (asyncio.to_thread inside _make_call below), same reasoning as the
+    module docstring above for why that matters, but key rotation on
+    failure needs real `await`s for its DB reads/writes, which a plain
+    to_thread-wrapped sync function can't do."""
+    job_title = job.get("title", "the position")
+    company = job.get("company", "your organization")
+    job_desc = job.get("description", "")
+    candidate_name = resume_info.get("applicant_name", "Your Name")
+
+    if groq_api_key and _GROQ_AVAILABLE and ChatGroq:
+        try:
+            import asyncio
+            from utils.llm_extraction import _truncate_for_llm
+            from utils.groq_pool import call_groq_with_pool_retry
+
+            prompt = (
+                f"Write a professional, concise cover letter for {candidate_name} "
+                f"applying for the {job_title} role at {company}.\n\n"
+                f"Job description: {_truncate_for_llm(job_desc, 'JD text', 8000)}\n\n"
+                f"Resume highlights: {_truncate_for_llm(resume_text, 'resume text', 8000)}\n\n"
+                "Write 3 paragraphs: opening, strengths alignment, closing. "
+                "Return only the letter text."
+            )
+
+            async def _make_call(key, model):
+                def _sync_call():
+                    llm = ChatGroq(api_key=key, model=model, temperature=0.5, max_tokens=4000, reasoning_format="hidden", reasoning_effort="low", max_retries=0)
+                    return llm.invoke(prompt).content
+                return await asyncio.to_thread(_sync_call)
+
+            return await call_groq_with_pool_retry(db, user_id, _make_call, groq_api_key, groq_model)
+        except Exception:
+            pass
+
+    return _template_cover_letter(resume_text, job, candidate_name)
+
+
+def _template_cover_letter(resume_text: str, job: Dict, candidate_name: str) -> str:
+    job_title = job.get("title", "the position")
+    job_desc = job.get("description", "")
+    company = job.get("company", "your organization")
 
     # Fallback: template-based
     job_keywords = _extract_keywords(job_desc)
