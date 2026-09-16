@@ -477,6 +477,7 @@ export function MeetingLinkPanel() {
 
 // ── Groq Key Pool — scale capacity automatically ─────────────────────
 export function GroqKeyPoolPanel() {
+  const qc = useQueryClient();
   const { data: poolKeys = [], refetch: refetchPool } = useQuery({ queryKey: ["groq-pool"], queryFn: groqPoolApi.list });
   const [newPoolKey, setNewPoolKey] = useState({ key_value: "", model: "" });
 
@@ -551,6 +552,16 @@ export function GroqKeyPoolPanel() {
     onError: (e: any) => flashPool(`❌ ${e.response?.data?.detail || "Failed to update key"}`),
   });
 
+  const { data: aiSettings } = useQuery({ queryKey: ["ai-settings"], queryFn: groqPoolApi.getAISettings });
+  const requireAiMut = useMutation({
+    mutationFn: (require_ai_matching: boolean) => groqPoolApi.setAISettings({ require_ai_matching }),
+    onSuccess: (data) => {
+      qc.setQueryData(["ai-settings"], data);
+      flashPool(data.require_ai_matching ? "AI matching is now required — keyword fallback disabled." : "Keyword fallback re-enabled.");
+    },
+    onError: (e: any) => flashPool(`❌ ${e.response?.data?.detail || "Failed to update setting"}`),
+  });
+
   return (
     <div className="tiq-card tiq-mb-6">
       <div className="tiq-card-title">Groq Key Pool — scale capacity automatically</div>
@@ -561,6 +572,46 @@ export function GroqKeyPoolPanel() {
         any that are temporarily rate-limited, recovering them automatically once they
         cool down.
       </p>
+
+      {/* Require AI matching — every module's AI extraction (JobHunt,
+          CVAnalysis, CandidateLens, etc.) already has a keyword-heuristic
+          fallback for when no AI provider succeeds. That fallback can
+          produce confident-looking matches that weren't actually
+          AI-verified — this switches that behavior off, replacing it
+          with an explicit "AI required but unavailable" notice instead. */}
+      <div style={{
+        display: "flex", justifyContent: "space-between", alignItems: "center", gap: 16,
+        padding: "12px 14px", marginBottom: 20, borderRadius: 8,
+        border: "1px solid var(--border)", background: "var(--bg-secondary)",
+      }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 3 }}>Require AI matching</div>
+          <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
+            When every Groq/Ollama attempt fails, show "AI unavailable" instead of falling back
+            to basic keyword matching. Off by default.
+          </div>
+        </div>
+        <label style={{ position: "relative", display: "inline-block", width: 40, height: 22, flexShrink: 0, cursor: requireAiMut.isPending ? "wait" : "pointer" }}>
+          <input
+            type="checkbox"
+            checked={!!aiSettings?.require_ai_matching}
+            disabled={requireAiMut.isPending}
+            onChange={(e) => requireAiMut.mutate(e.target.checked)}
+            style={{ opacity: 0, width: 0, height: 0 }}
+          />
+          <span style={{
+            position: "absolute", inset: 0, borderRadius: 22,
+            background: aiSettings?.require_ai_matching ? "var(--teal-500)" : "var(--border)",
+            transition: "background .15s",
+          }}>
+            <span style={{
+              position: "absolute", top: 2, left: aiSettings?.require_ai_matching ? 20 : 2,
+              width: 18, height: 18, borderRadius: "50%", background: "#fff",
+              transition: "left .15s", boxShadow: "0 1px 3px rgba(0,0,0,.3)",
+            }} />
+          </span>
+        </label>
+      </div>
 
       <StatusMsg msg={poolMsg} />
 
@@ -575,14 +626,30 @@ export function GroqKeyPoolPanel() {
               const numberOf = new Map(byAddedAsc.map((k: any, i: number) => [k.id, i + 1]));
               return poolKeys.map((k: any) => (
                 <div key={k.id}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", border: "1px solid var(--border)", borderRadius: 8, opacity: k.is_active ? 1 : 0.5 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", border: "1px solid var(--border)", borderRadius: 8, opacity: k.is_active ? 1 : 0.5, flexWrap: "wrap" }}>
                     <span style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 24, height: 24, borderRadius: 6, flexShrink: 0, background: "var(--surface-2, rgba(0,0,0,.06))", fontSize: 11, fontWeight: 700, color: "var(--text-muted)" }}>
                       {numberOf.get(k.id)}
                     </span>
                     <span style={{ fontFamily: "monospace", fontSize: 13 }}>{k.key_preview}</span>
                     <span style={{ fontSize: 12, color: "var(--text-muted)" }}>{k.model || "platform default"}</span>
+                    {/* last_used_at and consecutive_errors were already returned by
+                        GET /admin/groq-pool but never rendered anywhere — an admin
+                        chasing "why isn't this key being used" had no way to see
+                        whether a key had ever actually been tried, or how many
+                        times in a row it had failed even outside an active
+                        cooldown window (recovers to 0 on any success, so a key
+                        that's fine RIGHT NOW but keeps flaking is otherwise
+                        invisible). */}
+                    <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                      {k.last_used_at ? `last used ${new Date(k.last_used_at).toLocaleString()}` : "never used yet"}
+                    </span>
+                    {k.consecutive_errors > 0 && (
+                      <span style={{ fontSize: 11, color: k.cooldown_until && new Date(k.cooldown_until) > new Date() ? "#f59e0b" : "#ef4444", fontWeight: 600 }}>
+                        {k.consecutive_errors} failure{k.consecutive_errors === 1 ? "" : "s"} in a row
+                      </span>
+                    )}
                     {k.cooldown_until && new Date(k.cooldown_until) > new Date() && (
-                      <span style={{ fontSize: 11, color: "#f59e0b" }}>⏳ cooling down</span>
+                      <span style={{ fontSize: 11, color: "#f59e0b" }}>⏳ cooling down until {new Date(k.cooldown_until).toLocaleTimeString()}</span>
                     )}
                     {!k.is_active && <span style={{ fontSize: 11, color: "var(--text-muted)" }}>disabled</span>}
                     <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>

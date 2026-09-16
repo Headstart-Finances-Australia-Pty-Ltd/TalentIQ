@@ -66,6 +66,19 @@ function SortableTh({ label, sortKey, sort, onSort, width }: { label: string; so
 // than a single generic "check your settings" line either way.
 function FallbackBanner({ match }: { match: any }) {
   if (!match?.strengths_breakdown || match.strengths_breakdown.ai_powered) return null;
+  // ai_required_notice (Admin Console > AI Settings > "Require AI
+  // matching") means this match has essentially NO data — empty
+  // strengths/gaps, not a keyword-guessed approximation of them — so
+  // every user needs to see WHY, not just admins debugging the pipeline.
+  // Shown regardless of isAdmin, unlike the generic fallback hint below.
+  if (match.strengths_breakdown.ai_required_notice) {
+    return (
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 6, fontSize: 11, color: "#ef4444", background: "rgba(239,68,68,.08)", border: "1px solid rgba(239,68,68,.3)", borderRadius: 6, padding: "6px 10px", marginTop: 8 }}>
+        <AlertTriangle size={12} style={{ flexShrink: 0, marginTop: 1 }} />
+        {match.strengths_breakdown.ai_required_notice}
+      </div>
+    );
+  }
   const hasAnyAiConfigured = match.groq_configured || match.ollama_configured;
   return (
     <div style={{ display: "flex", alignItems: "flex-start", gap: 6, fontSize: 11, color: "#ef4444", background: "rgba(239,68,68,.08)", border: "1px solid rgba(239,68,68,.3)", borderRadius: 6, padding: "6px 10px", marginTop: 8 }}>
@@ -117,7 +130,7 @@ function MatchDetailsPanel({ match, isAdmin }: { match: any; isAdmin: boolean })
         </div>
       </div>
 
-      {isAdmin && <FallbackBanner match={match} />}
+      {(isAdmin || match?.strengths_breakdown?.ai_required_notice) && <FallbackBanner match={match} />}
 
       {match.strengths_breakdown && (
         <details style={{ marginTop: 8, marginBottom: 8 }}>

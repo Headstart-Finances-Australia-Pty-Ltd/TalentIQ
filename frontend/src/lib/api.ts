@@ -560,6 +560,13 @@ export const groqPoolApi = {
   remove: (id: number) => api.delete(`/api/admin/groq-pool/${id}`).then((r) => r.data),
   listModels: (key_value: string) => api.post("/api/admin/groq-pool/models", { key_value }).then((r) => r.data),
   listModelsForExisting: (id: number) => api.post(`/api/admin/groq-pool/${id}/models`).then((r) => r.data),
+  // "Require AI matching" — Admin Console > AI Settings. Off by default
+  // (silent keyword-heuristic fallback, unchanged from before this
+  // existed). On: every AI extraction across the app returns a clearly-
+  // labeled "AI was required but unavailable" result instead of a
+  // keyword-guessed one when every Groq/Ollama attempt fails.
+  getAISettings: () => api.get("/api/admin/ai-settings").then((r) => r.data),
+  setAISettings: (data: { require_ai_matching: boolean }) => api.put("/api/admin/ai-settings", data).then((r) => r.data),
 };
 
 export const jobhuntApi = {
