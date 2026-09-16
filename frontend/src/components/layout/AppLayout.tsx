@@ -1,9 +1,9 @@
-import { useState } from "react";
-import { Outlet, NavLink, Link } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { Outlet, NavLink, Link, useLocation } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
   LayoutDashboard, Settings, LogOut, Shield, Database, Home,
-  ChevronDown, ChevronRight, Zap,
+  ChevronDown, ChevronRight, Zap, Menu, X,
 } from "lucide-react";
 import { useAuth } from "../../hooks/useAuth";
 import { api } from "../../lib/api";
@@ -78,6 +78,16 @@ function CapabilityGroup({ capability, moduleToggles }: { capability: (typeof CA
 export default function AppLayout() {
   const { user, logout } = useAuth();
   const isAdmin = user?.role === "admin";
+  const location = useLocation();
+  // Mobile-only slide-out drawer state — the sidebar is permanently
+  // position:fixed off-screen below 900px (see index.css) with no CSS-only
+  // way to bring it back, which previously meant the ENTIRE app was
+  // unreachable on a phone: there was no hamburger, no toggle, nothing.
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  // Close the drawer automatically on every navigation — without this,
+  // tapping a module link would correctly navigate but leave the drawer
+  // (and its backdrop) covering the new page until manually dismissed.
+  useEffect(() => { setMobileNavOpen(false); }, [location.pathname]);
   // Loaded once for the whole sidebar — every CapabilityGroup reads from
   // this same map rather than each fetching its own copy. Defaults to
   // {} (nothing hidden) while loading, so the sidebar renders fully
@@ -100,11 +110,30 @@ export default function AppLayout() {
 
   return (
     <div className="tiq-app-shell">
-      <aside className="tiq-sidebar">
+      {/* Rendered only while open, so it never intercepts clicks/taps on
+          desktop or when the drawer is closed on mobile. */}
+      {mobileNavOpen && (
+        <div
+          className="tiq-sidebar-backdrop tiq-sidebar-backdrop-open"
+          onClick={() => setMobileNavOpen(false)}
+          aria-hidden="true"
+        />
+      )}
+      <aside className={`tiq-sidebar${mobileNavOpen ? " tiq-sidebar-open" : ""}`}>
         <div className="tiq-logo">
-          <div className="tiq-logo-row">
-            <div className="tiq-logo-icon"><Zap size={16} color="#f97316" fill="#f97316" /></div>
-            <div className="tiq-logo-wordmark">TalentIQ Solution</div>
+          <div className="tiq-logo-row" style={{ justifyContent: "space-between" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <div className="tiq-logo-icon"><Zap size={16} color="#f97316" fill="#f97316" /></div>
+              <div className="tiq-logo-wordmark">TalentIQ Solution</div>
+            </div>
+            {/* Close button — only meaningful (and only shown) while the
+                mobile drawer is open; a no-op, invisible button on desktop. */}
+            {mobileNavOpen && (
+              <button onClick={() => setMobileNavOpen(false)} aria-label="Close menu"
+                style={{ background: "none", border: "none", color: "rgba(255,255,255,.6)", cursor: "pointer", padding: 4, display: "flex" }}>
+                <X size={18} />
+              </button>
+            )}
           </div>
           <div className="tiq-logo-sub">Platform</div>
         </div>
@@ -186,7 +215,10 @@ export default function AppLayout() {
 
       <main className="tiq-main">
         <div className="tiq-topbar">
-          <div style={{ fontSize: 14, color: "var(--text-muted)" }}>
+          <button className="tiq-hamburger" onClick={() => setMobileNavOpen(true)} aria-label="Open menu">
+            <Menu size={18} />
+          </button>
+          <div className="tiq-topbar-welcome" style={{ fontSize: 14, color: "var(--text-muted)" }}>
             Welcome back, <strong style={{ color: "var(--text-primary)" }}>{user?.name?.split(" ")[0]}</strong>
           </div>
           {isAdmin && user?.name?.split(" ")[0]?.toLowerCase() !== "admin" && (
@@ -194,15 +226,15 @@ export default function AppLayout() {
           )}
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginLeft: "auto" }}>
             <TopbarPlanWidget />
-            <Link to="/" style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12, fontWeight: 600, color: "var(--text-muted)", textDecoration: "none", padding: "5px 10px", borderRadius: 6, border: "1px solid var(--border)" }}
+            <Link to="/" className="tiq-topbar-label" style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12, fontWeight: 600, color: "var(--text-muted)", textDecoration: "none", padding: "5px 10px", borderRadius: 6, border: "1px solid var(--border)" }}
               onMouseEnter={e => { e.currentTarget.style.color = "var(--text-primary)"; e.currentTarget.style.background = "var(--bg-secondary)"; }}
               onMouseLeave={e => { e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.background = "transparent"; }}>
-              <Home size={12} /> Home
+              <Home size={12} /> <span className="tiq-topbar-label-text">Home</span>
             </Link>
-            <button onClick={logout} style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12, fontWeight: 600, color: "#ef4444", padding: "5px 10px", borderRadius: 6, border: "1px solid #fecaca", background: "transparent", cursor: "pointer" }}
+            <button onClick={logout} className="tiq-topbar-label" style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12, fontWeight: 600, color: "#ef4444", padding: "5px 10px", borderRadius: 6, border: "1px solid #fecaca", background: "transparent", cursor: "pointer" }}
               onMouseEnter={e => { e.currentTarget.style.background = "#fef2f2"; }}
               onMouseLeave={e => { e.currentTarget.style.background = "transparent"; }}>
-              <LogOut size={12} /> Sign out
+              <LogOut size={12} /> <span className="tiq-topbar-label-text">Sign out</span>
             </button>
           </div>
         </div>

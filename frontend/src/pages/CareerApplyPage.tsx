@@ -65,7 +65,7 @@ export default function CareerApplyPage() {
   };
 
   const shellStyle: React.CSSProperties = {
-    minHeight: "100vh", background: "#f8fafd", display: "flex", justifyContent: "center", padding: "48px 16px",
+    minHeight: "100vh", background: "#f8fafd", display: "flex", justifyContent: "center", padding: "clamp(16px, 6vw, 48px) 16px",
   };
   const cardStyle: React.CSSProperties = {
     background: "#fff", borderRadius: 16, padding: 32, maxWidth: 560, width: "100%",
@@ -150,7 +150,7 @@ export default function CareerApplyPage() {
 
         <div className="tiq-form-group">
           <label className="tiq-label">Resume (PDF/DOCX/DOC/TXT)</label>
-          <label className="tiq-btn tiq-btn-outline" style={{ cursor: "pointer", display: "inline-flex" }}>
+          <label className="tiq-btn tiq-btn-outline" style={{ cursor: "pointer", display: "inline-flex", maxWidth: "100%" }}>
             <Upload size={14} /> {file ? file.name : "Choose file"}
             <input type="file" hidden accept=".pdf,.docx,.doc,.txt" onChange={(e) => setFile(e.target.files?.[0] || null)} />
           </label>
@@ -158,7 +158,7 @@ export default function CareerApplyPage() {
 
         <div className="tiq-form-group">
           <label className="tiq-label">Cover Letter (optional)</label>
-          <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+          <div style={{ display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
             <button type="button" className={`tiq-btn tiq-btn-sm ${coverLetterMode === "none" ? "tiq-btn-primary" : "tiq-btn-outline"}`}
                     onClick={() => setCoverLetterMode("none")}>None</button>
             <button type="button" className={`tiq-btn tiq-btn-sm ${coverLetterMode === "file" ? "tiq-btn-primary" : "tiq-btn-outline"}`}
@@ -167,7 +167,7 @@ export default function CareerApplyPage() {
                     onClick={() => setCoverLetterMode("text")}>Write Text</button>
           </div>
           {coverLetterMode === "file" && (
-            <label className="tiq-btn tiq-btn-outline" style={{ cursor: "pointer", display: "inline-flex" }}>
+            <label className="tiq-btn tiq-btn-outline" style={{ cursor: "pointer", display: "inline-flex", maxWidth: "100%" }}>
               <Upload size={14} /> {coverLetterFile ? coverLetterFile.name : "Choose PDF or Word file"}
               <input type="file" hidden accept=".pdf,.docx,.doc" onChange={(e) => setCoverLetterFile(e.target.files?.[0] || null)} />
             </label>

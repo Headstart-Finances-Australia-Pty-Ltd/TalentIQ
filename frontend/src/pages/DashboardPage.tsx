@@ -307,7 +307,7 @@ export default function DashboardPage() {
 
             {openTile === "clients" && (
               <TileDrilldownModal title="Roles & Offers by Client" color="#64748b" icon={<Building2 size={18} />} onClose={() => setOpenTile(null)}>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
+                <div className="tiq-grid-2" style={{ gap: 20 }}>
                   {/* By client */}
                   <TableCard icon={Building2} color="#64748b" title="Roles &amp; Offers by Client">
                     <div style={{ padding: "10px 16px 0" }}>

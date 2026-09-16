@@ -66,13 +66,36 @@ body {
   flex-direction: column;
   position: fixed;
   top: 0; left: 0; bottom: 0;
-  z-index: 40;
+  z-index: 50;
+  transition: transform .25s ease;
+}
+
+.tiq-sidebar-backdrop {
+  display: none;
+}
+
+.tiq-hamburger {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--white);
+  color: var(--text-primary);
+  cursor: pointer;
+  flex-shrink: 0;
 }
 
 .tiq-main {
   margin-left: 240px;
   flex: 1;
   min-height: 100vh;
+  min-width: 0; /* a flex child otherwise refuses to shrink below its content's
+                   intrinsic width, which is exactly what let wide tables/rows
+                   in module pages force the whole page into horizontal
+                   scroll instead of wrapping/scrolling internally */
   display: flex;
   flex-direction: column;
 }
@@ -85,6 +108,7 @@ body {
   align-items: center;
   justify-content: space-between;
   padding: 0 24px;
+  gap: 12px;
   position: sticky;
   top: 0;
   z-index: 30;
@@ -95,6 +119,7 @@ body {
   padding: 32px 28px;
   max-width: 1400px;
   width: 100%;
+  min-width: 0;
 }
 
 /* ── SIDEBAR NAV ── */
@@ -492,6 +517,11 @@ body {
   padding-bottom: 12px;
   border-bottom: 1px solid var(--border);
   width: 100%;
+  overflow-x: auto; /* a page with many tabs (or long tab labels) scrolls
+    horizontally instead of wrapping into a second row or forcing the
+    whole page wider than the viewport — the single most common layout
+    break across module pages on a phone-width screen */
+  -webkit-overflow-scrolling: touch;
 }
 
 .tiq-tab {
@@ -504,6 +534,8 @@ body {
   border: none;
   background: none;
   transition: all .15s;
+  flex-shrink: 0; /* keeps each tab's label legible while the bar above scrolls, instead of every tab getting squeezed to fit */
+  white-space: nowrap;
 }
 
 .tiq-tab.active {
@@ -742,7 +774,54 @@ body {
 /* ── RESPONSIVE ── */
 @media (max-width: 900px) {
   .tiq-sidebar { transform: translateX(-100%); }
+  .tiq-sidebar.tiq-sidebar-open {
+    transform: translateX(0);
+    box-shadow: 8px 0 24px rgba(0,0,0,.25);
+  }
+  .tiq-sidebar-backdrop.tiq-sidebar-backdrop-open {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(15,23,42,.5);
+    z-index: 45; /* below .tiq-sidebar's 50, above everything else */
+  }
   .tiq-main { margin-left: 0; }
+  .tiq-hamburger { display: inline-flex; }
+  .tiq-topbar { padding: 0 14px; }
+  .tiq-topbar-welcome { display: none; } /* reclaims space for the hamburger + right-side controls, which don't fit alongside it below 900px */
+  .tiq-content { padding: 18px 14px; }
   .tiq-products-grid { grid-template-columns: 1fr; }
   .tiq-grid-2, .tiq-grid-3 { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 480px) {
+  .tiq-content { padding: 14px 10px; }
+  .tiq-card { padding: 16px; }
+  .tiq-topbar-label-text { display: none; } /* Home/Sign out shrink to icon-only buttons so they fit alongside the plan widget on a narrow phone */
+  .tiq-topbar-label { padding: 7px 8px !important; }
+}
+
+/* ── LANDING PAGE ──
+   The public marketing page has its own nav (mega-menus, module grids,
+   footer columns) entirely separate from the authenticated app shell
+   above, so it gets its own breakpoint rules rather than reusing the
+   app's .tiq-* layout classes, which don't apply here at all. */
+@media (max-width: 900px) {
+  .tiq-landing-nav-links { display: none; }
+  .tiq-landing-hamburger { display: inline-flex !important; }
+  .tiq-landing-module-grid {
+    grid-template-columns: 1fr !important;
+    gap: 32px !important;
+    direction: ltr !important; /* the alternating rtl/ltr swap that reorders
+      text-vs-image left/right on desktop has nothing to reorder once
+      this collapses to one column, but pin it anyway so text always
+      renders before its image, never the reverse, on every module */
+  }
+  .tiq-landing-why-grid { grid-template-columns: 1fr !important; }
+  .tiq-landing-footer-grid { grid-template-columns: 1fr !important; gap: 32px !important; }
+}
+
+@media (max-width: 560px) {
+  .tiq-landing-tagline { display: none; } /* the italic sub-tagline under the wordmark is the first thing to go before the logo lockup wraps or the hamburger gets crowded */
+  .tiq-landing-footer-modules-grid { grid-template-columns: 1fr !important; }
 }

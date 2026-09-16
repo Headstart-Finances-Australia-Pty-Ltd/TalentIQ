@@ -252,12 +252,12 @@ export default function PublicAssessmentPage() {
   }, [token, flashPasteNotice]);
 
   if (isLoading) {
-    return <div style={{ maxWidth: 700, margin: "80px auto", textAlign: "center", color: "#6b7280" }}>Loading your assessment…</div>;
+    return <div style={{ maxWidth: 700, margin: "80px auto", textAlign: "center", color: "#6b7280", padding: "0 20px" }}>Loading your assessment…</div>;
   }
 
   if (error || !data) {
     return (
-      <div style={{ maxWidth: 500, margin: "80px auto", textAlign: "center" }}>
+      <div style={{ maxWidth: 500, margin: "80px auto", textAlign: "center", padding: "0 20px" }}>
         <AlertTriangle size={32} color="#e11d48" style={{ marginBottom: 12 }} />
         <div style={{ fontSize: 16, fontWeight: 600 }}>This test link isn't valid.</div>
         <div style={{ fontSize: 13, color: "#6b7280", marginTop: 6 }}>Contact your recruiter for a new link.</div>
@@ -267,7 +267,7 @@ export default function PublicAssessmentPage() {
 
   if (data.status === "expired" || data.status === "completed" || submitted) {
     return (
-      <div style={{ maxWidth: 500, margin: "80px auto", textAlign: "center" }}>
+      <div style={{ maxWidth: 500, margin: "80px auto", textAlign: "center", padding: "0 20px" }}>
         <CheckCircle size={36} color={submitted ? "#10b981" : "#94a3b8"} style={{ marginBottom: 12 }} />
         <div style={{ fontSize: 17, fontWeight: 700 }}>
           {submitted ? "Thank you!" : data.status === "expired" ? "This invitation has expired." : "Already submitted"}

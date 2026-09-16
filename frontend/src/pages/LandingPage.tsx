@@ -5,7 +5,7 @@ import { useAuth } from "../hooks/useAuth";
 import { api } from "../lib/api";
 import {
   Zap, Shield, Download, ArrowRight, CheckCircle,
-  Globe, Database, Star, TrendingUp, Mail, Twitter, Linkedin,
+  Globe, Database, Star, TrendingUp, Mail, Twitter, Linkedin, Menu, X, ChevronDown,
 } from "lucide-react";
 import { CAPABILITIES, CORE_PIPELINE_CAPABILITIES, SUPPORTING_CAPABILITIES, JOBSEEKER_MODULES } from "../lib/capabilities";
 import RecruitmentWorkflow from "../components/RecruitmentWorkflow";
@@ -207,7 +207,7 @@ type ModuleDef = {
 function ModuleCard({ m, isEven, color, bg }: { m: ModuleDef; isEven: boolean; color: string; bg: string }) {
   const Icon = m.icon;
   return (
-    <div style={{
+    <div className="tiq-landing-module-grid" style={{
       display: "grid", gridTemplateColumns: "1fr 1fr", gap: 64,
       marginBottom: 80, alignItems: "center",
       direction: isEven ? "ltr" : "rtl",
@@ -278,6 +278,16 @@ export default function LandingPage() {
   const { user } = useAuth();
   const isLoggedIn = !!user;
   const { visibleCapabilities, visibleCorePipeline, visibleSupporting, visibleJobseekerModules } = useVisibleModules();
+  // Mobile menu — the desktop nav row (mega-menus, Pricing, sign-in/get
+  // started) is hidden entirely below 900px (see .tiq-landing-nav-links
+  // in index.css) since none of it — least of all the 640px-wide
+  // mega-menu dropdown — fits a phone screen. This is a separate, much
+  // simpler stacked-links panel shown instead, toggled by a hamburger.
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [mobileRecruitmentOpen, setMobileRecruitmentOpen] = useState(false);
+  const [mobileJobseekerOpen, setMobileJobseekerOpen] = useState(false);
+  const allMobileModules = [...visibleCorePipeline, ...visibleSupporting];
+
   return (
     <div style={{ background: "#ffffff", color: "#0f172a", fontFamily: "'Inter',system-ui,sans-serif", overflowX: "hidden" }}>
 
@@ -298,13 +308,13 @@ export default function LandingPage() {
             <span style={{ fontSize: 18, fontWeight: 800, letterSpacing: "-0.5px", color: "#00c7b7" }}>
               TalentIQ Solution
             </span>
-            <span style={{ fontSize: 9, fontStyle: "italic", fontWeight: 700, letterSpacing: "0.6px", textTransform: "uppercase", color: "#fb923c" }}>
+            <span className="tiq-landing-tagline" style={{ fontSize: 9, fontStyle: "italic", fontWeight: 700, letterSpacing: "0.6px", textTransform: "uppercase", color: "#fb923c" }}>
               AI-Powered Talent Intelligence
             </span>
           </div>
         </div>
 
-        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+        <div className="tiq-landing-nav-links" style={{ display: "flex", gap: 6, alignItems: "center" }}>
           <RecruitmentMegaMenu core={visibleCorePipeline} supporting={visibleSupporting} />
           {visibleJobseekerModules.length > 0 && <NavDropdown label="Job Seeker Tools" items={visibleJobseekerModules} />}
           <Link to="/pricing" style={{
@@ -336,7 +346,104 @@ export default function LandingPage() {
             </>
           )}
         </div>
+
+        <button className="tiq-landing-hamburger" onClick={() => setMobileMenuOpen(o => !o)} aria-label={mobileMenuOpen ? "Close menu" : "Open menu"}
+          style={{ display: "none", background: "none", border: "1px solid #e2e8f0", borderRadius: 8, width: 38, height: 38, alignItems: "center", justifyContent: "center", cursor: "pointer", color: "#0f172a" }}>
+          {mobileMenuOpen ? <X size={19} /> : <Menu size={19} />}
+        </button>
       </nav>
+
+      {/* ── MOBILE MENU PANEL ── shown only below 900px, only while open
+          (see .tiq-landing-hamburger's media query in index.css) — a
+          flat, stacked replacement for the desktop mega-menus above,
+          which are hidden entirely on mobile rather than squeezed down,
+          since a 640px-wide dropdown has nowhere to go on a phone. */}
+      {mobileMenuOpen && (
+        <div style={{
+          position: "sticky", top: 68, zIndex: 99, background: "white",
+          borderBottom: "1px solid #f1f5f9", boxShadow: "0 8px 24px rgba(0,0,0,.08)",
+          maxHeight: "calc(100vh - 68px)", overflowY: "auto", padding: "8px 5% 20px",
+        }}>
+          {allMobileModules.length > 0 && (
+            <div style={{ borderBottom: "1px solid #f1f5f9" }}>
+              <button onClick={() => setMobileRecruitmentOpen(o => !o)} style={{
+                display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%",
+                background: "none", border: "none", padding: "14px 4px", fontSize: 15, fontWeight: 700, color: "#0f172a", cursor: "pointer",
+              }}>
+                Recruitment Platform
+                <ChevronDown size={16} style={{ transform: mobileRecruitmentOpen ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
+              </button>
+              {mobileRecruitmentOpen && (
+                <div style={{ paddingBottom: 12 }}>
+                  {allMobileModules.map((cap) => (
+                    <div key={cap.name} style={{ marginBottom: 12 }}>
+                      <div style={{ fontSize: 11, fontWeight: 700, color: cap.color, textTransform: "uppercase", letterSpacing: ".04em", padding: "4px 4px", display: "flex", alignItems: "center", gap: 6 }}>
+                        <span>{cap.emoji}</span>{cap.name}
+                      </div>
+                      {cap.modules.map((m) => (
+                        <Link key={m.route} to={m.route} onClick={() => setMobileMenuOpen(false)}
+                          style={{ display: "block", padding: "8px 4px 8px 22px", fontSize: 14, color: "#475569", textDecoration: "none" }}>
+                          {m.name}
+                        </Link>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          {visibleJobseekerModules.length > 0 && (
+            <div style={{ borderBottom: "1px solid #f1f5f9" }}>
+              <button onClick={() => setMobileJobseekerOpen(o => !o)} style={{
+                display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%",
+                background: "none", border: "none", padding: "14px 4px", fontSize: 15, fontWeight: 700, color: "#0f172a", cursor: "pointer",
+              }}>
+                Job Seeker Tools
+                <ChevronDown size={16} style={{ transform: mobileJobseekerOpen ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
+              </button>
+              {mobileJobseekerOpen && (
+                <div style={{ paddingBottom: 12 }}>
+                  {visibleJobseekerModules.map((m) => (
+                    <Link key={m.route} to={m.route} onClick={() => setMobileMenuOpen(false)}
+                      style={{ display: "block", padding: "8px 4px", fontSize: 14, color: "#475569", textDecoration: "none" }}>
+                      {m.name}
+                    </Link>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          <Link to="/pricing" onClick={() => setMobileMenuOpen(false)}
+            style={{ display: "block", padding: "14px 4px", fontSize: 15, fontWeight: 700, color: "#0f172a", textDecoration: "none", borderBottom: "1px solid #f1f5f9" }}>
+            Pricing
+          </Link>
+          <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
+            {isLoggedIn ? (
+              <Link to="/app" onClick={() => setMobileMenuOpen(false)} style={{
+                flex: 1, textAlign: "center", fontSize: 14, fontWeight: 700, padding: "12px 18px", borderRadius: 10,
+                background: "linear-gradient(135deg,#fdba74,#fb923c)", color: "#7c2d12", textDecoration: "none",
+              }}>
+                Go to Dashboard
+              </Link>
+            ) : (
+              <>
+                <Link to="/login" onClick={() => setMobileMenuOpen(false)} style={{
+                  flex: 1, textAlign: "center", fontSize: 14, fontWeight: 600, padding: "12px 18px", borderRadius: 10,
+                  border: "1px solid #e2e8f0", color: "#374151", textDecoration: "none",
+                }}>
+                  Sign in
+                </Link>
+                <Link to="/register" onClick={() => setMobileMenuOpen(false)} style={{
+                  flex: 1, textAlign: "center", fontSize: 14, fontWeight: 700, padding: "12px 18px", borderRadius: 10,
+                  background: "linear-gradient(135deg,#fdba74,#fb923c)", color: "#7c2d12", textDecoration: "none",
+                }}>
+                  Get started
+                </Link>
+              </>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* ── HERO ── */}
       <section style={{
@@ -538,7 +645,7 @@ export default function LandingPage() {
             <h2 style={{ fontSize: "clamp(26px,4vw,40px)", fontWeight: 800, letterSpacing: "-.5px", color: "#0f172a", marginBottom: 12 }}>Why TalentIQ Solution?</h2>
             <p style={{ fontSize: 16, color: "#64748b" }}>Built for teams that want AI-powered hiring without the SaaS sprawl.</p>
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 20 }}>
+          <div className="tiq-landing-why-grid" style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 20 }}>
             {[
               { icon: Shield, color: "#0ea5e9", title: "Every click saved", body: "Every search, match, and profile is persisted to our database — your data compounds over time." },
               { icon: Download, color: "#6366f1", title: "Export anywhere", body: "Download job matches, market reports, and candidate lists as Excel spreadsheets at any point." },
@@ -598,7 +705,7 @@ export default function LandingPage() {
       {/* ── FOOTER ── */}
       <footer style={{ background: "#0f172a", color: "white", padding: "56px 5% 32px" }}>
         <div style={{ maxWidth: 1100, margin: "0 auto" }}>
-          <div style={{ display: "grid", gridTemplateColumns: "2fr 1.6fr 1fr 1fr", gap: 40, marginBottom: 48 }}>
+          <div className="tiq-landing-footer-grid" style={{ display: "grid", gridTemplateColumns: "2fr 1.6fr 1fr 1fr", gap: 40, marginBottom: 48 }}>
             <div>
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
                 <div style={{ width: 30, height: 30, borderRadius: 8, background: "#5ee8db", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 2px 8px rgba(0,199,183,.35)" }}>
@@ -619,7 +726,7 @@ export default function LandingPage() {
             </div>
             <div>
               <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "1px", color: "#475569", marginBottom: 16 }}>Modules</div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", columnGap: 20 }}>
+              <div className="tiq-landing-footer-modules-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", columnGap: 20 }}>
                 {[...visibleCapabilities.flatMap((cap) => cap.modules), ...visibleJobseekerModules].map(m => (
                   <Link key={m.name} to={m.route} style={{ display: "block", fontSize: 13, color: "#64748b", textDecoration: "none", marginBottom: 10 }}
                     onMouseEnter={e => (e.currentTarget.style.color = "white")}

@@ -149,7 +149,7 @@ export default function CandidatePortalPage() {
 
         <div className="tiq-form-group">
           <label className="tiq-label">Resume {profile.has_resume && <span style={{ color: "var(--text-muted)", fontWeight: 400 }}>(currently: {profile.resume_filename})</span>}</label>
-          <label className="tiq-btn tiq-btn-outline" style={{ cursor: "pointer", display: "inline-flex" }}>
+          <label className="tiq-btn tiq-btn-outline" style={{ cursor: "pointer", display: "inline-flex", maxWidth: "100%" }}>
             <Upload size={14} /> {file ? file.name : "Replace resume"}
             <input type="file" hidden accept=".pdf,.docx,.doc,.txt" onChange={(e) => setFile(e.target.files?.[0] || null)} />
           </label>
@@ -161,8 +161,8 @@ export default function CandidatePortalPage() {
               <span style={{ color: "var(--text-muted)", fontWeight: 400 }}>(file on record: {profile.cover_letter_filename})</span>
             )}
           </label>
-          <div style={{ display: "flex", gap: 8, marginBottom: 8, alignItems: "center" }}>
-            <label className="tiq-btn tiq-btn-outline" style={{ cursor: "pointer", display: "inline-flex" }}>
+          <div style={{ display: "flex", gap: 8, marginBottom: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <label className="tiq-btn tiq-btn-outline" style={{ cursor: "pointer", display: "inline-flex", maxWidth: "100%" }}>
               <Upload size={14} /> {coverLetterFile ? coverLetterFile.name : "Upload PDF or Word"}
               <input type="file" hidden accept=".pdf,.docx,.doc" onChange={(e) => setCoverLetterFile(e.target.files?.[0] || null)} />
             </label>

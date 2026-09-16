@@ -93,16 +93,23 @@ function Connector({ compact }: { compact?: boolean }) {
 export default function RecruitmentWorkflow({ compact = false }: { compact?: boolean }) {
   return (
     <div>
-      <div style={{ display: "flex", alignItems: "flex-start", width: "100%" }}>
-        <Endpoint label="Start" icon={Play} compact={compact} />
-        <Connector compact={compact} />
-        {CORE_PIPELINE_CAPABILITIES.map((cap) => (
-          <Fragment key={cap.name}>
-            <Bubble cap={cap} compact={compact} />
-            <Connector compact={compact} />
-          </Fragment>
-        ))}
-        <Endpoint label="Finish" icon={Flag} compact={compact} />
+      {/* Horizontally scrollable on narrow screens rather than wrapping the
+          bubbles/connectors onto multiple rows — this diagram's whole
+          point is a single continuous left-to-right pipeline, so a
+          shorter row that still scrolls reads far better on a phone than
+          a wrapped, disconnected multi-row version would. */}
+      <div className="tiq-workflow-scroll" style={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
+        <div style={{ display: "flex", alignItems: "flex-start", width: "100%", minWidth: compact ? 560 : 720 }}>
+          <Endpoint label="Start" icon={Play} compact={compact} />
+          <Connector compact={compact} />
+          {CORE_PIPELINE_CAPABILITIES.map((cap) => (
+            <Fragment key={cap.name}>
+              <Bubble cap={cap} compact={compact} />
+              <Connector compact={compact} />
+            </Fragment>
+          ))}
+          <Endpoint label="Finish" icon={Flag} compact={compact} />
+        </div>
       </div>
 
       <div style={{
