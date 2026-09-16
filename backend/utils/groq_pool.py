@@ -105,6 +105,27 @@ async def resolve_groq_key(db: AsyncSession, user_id: int, exclude_personal: boo
         return {"groq_key": personal_key, "model": None, "source": "personal", "pool_id": None, "key_preview": _mask(personal_key)}
 
     now = datetime.utcnow()
+    # FOR UPDATE SKIP LOCKED — this is the actual fix for a real race
+    # condition found directly in production logs: JobHunt processes
+    # several jobs concurrently (each with its own DB session), and each
+    # one calls this function to pick a key. A plain SELECT here reads
+    # "least recently used key" — but the UPDATE that stamps last_used_at
+    # doesn't commit until a few lines below, so if 4 of these run at
+    # nearly the same instant, all 4 see the IDENTICAL oldest-used key
+    # (none of the others' updates have landed yet) and all 4 pick it.
+    # That one key then eats 4x simultaneous traffic and blows its rate
+    # limit in a single instant, while 5 other perfectly healthy keys
+    # sit completely idle — exactly what a production log showed: one
+    # key with "5 failures in a row", every other key with just 1 (its
+    # own single genuine overflow request).
+    #
+    # SKIP LOCKED is Postgres's standard pattern for this exact "worker
+    # pool checkout" scenario: each concurrent transaction that runs this
+    # SELECT...FOR UPDATE locks the row it selects until it commits (a
+    # few lines below), and any OTHER concurrent transaction running the
+    # same query skips rows currently locked by someone else and moves on
+    # to the next-least-recently-used AVAILABLE one instead — so 4
+    # concurrent callers now correctly land on 4 different keys, not 1.
     r = await db.execute(
         select(GroqKeyPool)
         .where(
@@ -113,6 +134,7 @@ async def resolve_groq_key(db: AsyncSession, user_id: int, exclude_personal: boo
         )
         .order_by(GroqKeyPool.last_used_at.asc().nulls_first())
         .limit(1)
+        .with_for_update(skip_locked=True)
     )
     entry = r.scalar_one_or_none()
     if entry:
