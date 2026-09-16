@@ -26,7 +26,7 @@ from utils.sequencing import next_sequence_number
 from agents.jobhunt_agent import (
     scrape_jobs_apify_seek, scrape_jobs_apify_linkedin, scrape_jobs_linkedin,
     fetch_job_description, estimate_recency_rank, parse_resume_text,
-    calculate_match, generate_cover_letter, extract_candidate_profile,
+    calculate_match, _generate_cover_letter_ai, extract_candidate_profile,
     title_matches_role,
 )
 
@@ -547,12 +547,13 @@ async def match_resume(
     # plain sequential `for` loop doing 2 blocking Groq calls per job
     # (score + cover letter), which for a 25-job search meant up to 50
     # back-to-back network round trips and routinely blew past the
-    # frontend's 180s timeout. generate_cover_letter is itself a
-    # synchronous function that calls the LLM directly with no `await` —
-    # run un-wrapped inside an async endpoint, each call was blocking the
-    # ENTIRE event loop (every other request this server was handling),
-    # not just this one, so asyncio.to_thread below isn't just about
-    # speed, it's about not stalling the whole app during a match run.
+    # frontend's 180s timeout. _generate_cover_letter_ai is async and
+    # does its own real DB reads/writes internally to retry across the
+    # shared Groq key pool on failure, but the actual blocking Groq call
+    # inside it still runs via asyncio.to_thread — same reasoning as
+    # before: run un-wrapped, a blocking call here stalls the ENTIRE
+    # event loop (every other request this server is handling), not just
+    # this one.
     #
     # Concurrency is capped (not one giant asyncio.gather over all N
     # jobs) because Groq's per-minute token budget is tight enough that
@@ -588,8 +589,9 @@ async def match_resume(
                     ollama_base_url=ollama_base_url, ollama_model=ollama_model,
                     known_terms_hint=known_terms, db=task_db, user_id=current_user.id,
                 )
-            cover = await asyncio.to_thread(
-                generate_cover_letter, resume.raw_text or "", resume.parsed_data or {}, job_dict, groq_key, groq_model,
+            cover = await _generate_cover_letter_ai(
+                resume.raw_text or "", resume.parsed_data or {}, job_dict, groq_key, groq_model,
+                db=task_db, user_id=current_user.id,
             )
             return job, match_data, cover
 

@@ -24,7 +24,7 @@ from pydantic import BaseModel
 from db.database import get_db
 from models.models import User, UserAPIKey, JDDocument
 from utils.auth_utils import get_current_user
-from utils.credentials import get_credential, get_all_credentials, get_groq_model, ollama_enabled, DEFAULT_GROQ_MODEL
+from utils.credentials import get_all_credentials, get_groq_model, ollama_enabled, DEFAULT_GROQ_MODEL
 from utils.sequencing import next_sequence_number
 
 router = APIRouter()
@@ -164,16 +164,30 @@ async def _generate_jd_content(
     experience: str, education: str,
     groq_key: Optional[str], ollama_base_url: Optional[str], ollama_model: Optional[str],
     groq_model: str = DEFAULT_GROQ_MODEL,
+    db=None, user_id: Optional[int] = None,
 ) -> dict:
     """Generates JD content using an LLM only — Groq first, then Ollama.
-    Raises HTTPException if no LLM is available or both fail."""
+    Raises HTTPException if no LLM is available or both fail.
+
+    Pass db/user_id to retry the Groq attempt across the shared key pool
+    on ANY failure (see utils.groq_pool.call_groq_with_pool_retry) before
+    falling through to Ollama — previously a single bad response from
+    whichever one key was resolved skipped straight to Ollama (or to the
+    hard failure below if Ollama also isn't configured), even with other
+    healthy pool keys sitting untried."""
     prompt = _build_jd_prompt(role_title, company_name, job_type, skills, experience, education)
 
     errors = []
 
     if groq_key:
         try:
-            raw = _call_groq(prompt, groq_key, groq_model)
+            import asyncio
+            from utils.groq_pool import call_groq_with_pool_retry
+
+            async def _make_call(key, model):
+                return await asyncio.to_thread(_call_groq, prompt, key, model)
+
+            raw = await call_groq_with_pool_retry(db, user_id, _make_call, groq_key, groq_model)
             parsed = _parse_jd_json(raw)
             if parsed:
                 parsed["ai_powered"] = True
@@ -384,17 +398,23 @@ async def generate_jd(
     if not payload.role_title.strip():
         raise HTTPException(400, "Role title is required.")
 
-    groq_key = await get_credential(db, current_user.id, "groq", "api_key")
+    # Pool-aware resolution (personal key -> shared pool -> legacy global
+    # -> none) instead of a plain single-key get_credential lookup — this
+    # endpoint previously never drew from the shared Groq key pool at
+    # all, regardless of how many keys an admin had configured in it.
+    from utils.groq_pool import resolve_groq_key
+    key_resolution = await resolve_groq_key(db, current_user.id)
+    groq_key = key_resolution["groq_key"]
 
     ollama_keys = await get_all_credentials(db, current_user.id, "ollama") if ollama_enabled() else {}
     ollama_base_url = ollama_keys.get("base_url")
     ollama_model = ollama_keys.get("model")
-    groq_model = await get_groq_model(db, current_user.id)
+    groq_model = key_resolution["model"] or await get_groq_model(db, current_user.id)
 
     content = await _generate_jd_content(
         payload.role_title, current_user.company or "", payload.job_type, payload.skills_required,
         payload.experience_required, payload.education_required, groq_key, ollama_base_url, ollama_model,
-        groq_model,
+        groq_model, db=db, user_id=current_user.id,
     )
 
     seq_num = await next_sequence_number(db, JDDocument, current_user.id)

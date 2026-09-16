@@ -761,7 +761,7 @@ def calculate_score(cv_text: str, jd_skills: list) -> dict:
 
 async def generate_questions(
     jd_text: str, candidate_name: str, matched_skills: list, groq_key: str, groq_model: str = DEFAULT_GROQ_MODEL,
-    resume_context: str = "",
+    resume_context: str = "", db=None, user_id: Optional[int] = None,
 ) -> tuple[list, Optional[str]]:
     """Mirrors buildQuestionPrompt + callOllamaGenerate.
 
@@ -782,13 +782,21 @@ async def generate_questions(
     generic questions every time (it's the same deterministic template
     based only on name+skills) — exactly what made clicking "Regenerate"
     look broken instead of surfacing the actual, fixable cause (e.g. no
-    Groq key, an invalid one, or a rate limit)."""
+    Groq key, an invalid one, or a rate limit).
+
+    Pass db AND user_id together to retry across the shared Groq key pool
+    on ANY failure (utils.groq_pool.call_groq_with_pool_retry) instead of
+    one bad response from a single key falling straight to the default
+    questions. IMPORTANT: only pass both when this call is NOT one of
+    several running concurrently against the same shared `db` session
+    (see run_joblens's per-candidate gather, which deliberately omits
+    user_id here for exactly that reason — SQLAlchemy's AsyncSession
+    isn't safe to use from multiple concurrent coroutines at once)."""
     try:
         from langchain_groq import ChatGroq
         from langchain.schema import HumanMessage
         from utils.llm_extraction import _truncate_for_llm, _parse_json_response
 
-        llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0.4, max_tokens=4000, reasoning_format="hidden", reasoning_effort="low", max_retries=0)
         skills_str = ", ".join(matched_skills[:8]) if matched_skills else "relevant skills"
         resume_block = (
             f"\n\nCandidate's Resume (their own experience — reference this specifically, not just their skills list):\n\"\"\"{_truncate_for_llm(resume_context, 'resume context', 4000)}\"\"\""
@@ -812,10 +820,15 @@ Return ONLY valid JSON:
   "questions": ["Question 1","Question 2","Question 3","Question 4","Question 5"]
 }}"""
 
-        resp = llm.invoke([HumanMessage(content=prompt)])
-        data = _parse_json_response(resp.content)
+        async def _make_call(key, model):
+            llm = ChatGroq(api_key=key, model=model, temperature=0.4, max_tokens=4000, reasoning_format="hidden", reasoning_effort="low", max_retries=0)
+            return llm.invoke([HumanMessage(content=prompt)]).content
+
+        from utils.groq_pool import call_groq_with_pool_retry
+        response_content = await call_groq_with_pool_retry(db, user_id, _make_call, groq_key, groq_model)
+        data = _parse_json_response(response_content)
         if data is None:
-            raise ValueError(f"LLM returned unparseable/empty response (length {len(resp.content)})")
+            raise ValueError(f"LLM returned unparseable/empty response (length {len(response_content or '')})")
         questions = data.get("questions", [])[:5]
         if not questions:
             raise ValueError("LLM response had no questions in it")
@@ -840,21 +853,25 @@ def _default_questions(name: str, skills: list) -> list:
 
 # ── RESUME SUMMARY (10 statements) ──────────────────────────────────────────
 
-async def generate_resume_summary(cv_text: str, groq_key: Optional[str], groq_model: str = DEFAULT_GROQ_MODEL) -> dict:
+async def generate_resume_summary(cv_text: str, groq_key: Optional[str], groq_model: str = DEFAULT_GROQ_MODEL, db=None, user_id: Optional[int] = None) -> dict:
     """Produce a categorized resume summary — multiple specific bullet
     points grouped under Experience, Skills, Education, Achievements, and
     Availability & Work Rights — rather than one flat list of generic
     sentences. Each bullet should surface a genuinely relevant, specific
     detail (a role, a scale, a result, a named skill), not a filler
     restatement of the section heading. Uses Groq LLM when a key is
-    available, otherwise falls back to heuristic keyword extraction."""
+    available, otherwise falls back to heuristic keyword extraction.
+
+    Pass db AND user_id together to retry across the shared Groq key pool
+    on any failure — see generate_questions's docstring above for the
+    same important caveat about NOT doing this from inside a concurrent
+    per-candidate gather sharing one `db` session."""
     if groq_key:
         try:
             from langchain_groq import ChatGroq
             from langchain.schema import HumanMessage
             from utils.llm_extraction import _truncate_for_llm, _parse_json_response
 
-            llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0.2, max_tokens=4000, reasoning_format="hidden", reasoning_effort="low", max_retries=0)
             prompt = f"""You are a recruitment analyst producing a sharp, specific candidate
 summary for a recruiter who is short on time. Read the resume below and
 extract the MOST relevant and important points — prioritize specifics
@@ -881,10 +898,15 @@ Rules:
 - availability_work_rights: 0-2 bullets — only include if the resume actually mentions notice period, availability, citizenship, or work rights; omit entirely if not mentioned
 - Every bullet must be a full, specific sentence a recruiter could act on — not a category label restated as a sentence"""
 
-            resp = llm.invoke([HumanMessage(content=prompt)])
-            data = _parse_json_response(resp.content)
+            async def _make_call(key, model):
+                llm = ChatGroq(api_key=key, model=model, temperature=0.2, max_tokens=4000, reasoning_format="hidden", reasoning_effort="low", max_retries=0)
+                return llm.invoke([HumanMessage(content=prompt)]).content
+
+            from utils.groq_pool import call_groq_with_pool_retry
+            response_content = await call_groq_with_pool_retry(db, user_id, _make_call, groq_key, groq_model)
+            data = _parse_json_response(response_content)
             if data is None:
-                raise ValueError(f"LLM returned unparseable/empty response (length {len(resp.content)})")
+                raise ValueError(f"LLM returned unparseable/empty response (length {len(response_content or '')})")
             result = {
                 "experience": [s for s in data.get("experience", []) if s][:5],
                 "skills": [s for s in data.get("skills", []) if s][:4],
@@ -1455,6 +1477,7 @@ async def run_joblens(
         source_vendor_id=None, source_vendor_name=None, source_tracked_candidate_id=None,
         source_application_id=None,
         call_groq_key=None, call_groq_model=None,
+        task_db: Optional[AsyncSession] = None,
     ):
         # Falls back to the shared groq_key/groq_model if no per-candidate
         # key was resolved for this call — keeps this function safe to
@@ -1462,6 +1485,13 @@ async def run_joblens(
         # pool draws.
         _groq_key = call_groq_key if call_groq_key is not None else groq_key
         _groq_model = call_groq_model if call_groq_model is not None else groq_model
+        # This candidate's OWN isolated DB session (see _score_with_limit
+        # below, which opens one per candidate) — falls back to the
+        # endpoint's shared `db` only for a caller that hasn't been
+        # updated to pass one (the two other call sites further down, a
+        # single re-scored candidate at a time, not run concurrently with
+        # anything else touching the same session).
+        _db = task_db if task_db is not None else db
 
         cv_text = extract_text(content, filename)
         if not cv_text.strip():
@@ -1479,16 +1509,22 @@ async def run_joblens(
         # on top of the existing between-candidate concurrency, this is
         # where the real "3 resumes taking forever" time was going.
         #
-        # NOTE: db/user_id are deliberately NOT passed to
-        # extract_candidate_strengths here — this function is already
-        # called concurrently across MULTIPLE candidates sharing the same
-        # DB session (see _score_with_limit below), so enabling its
-        # internal per-CHUNK pool resolution here too would mean multiple
-        # candidates' internal DB calls racing on the same session, which
-        # SQLAlchemy's AsyncSession doesn't allow. Instead, each CANDIDATE
-        # gets its own pre-resolved key up front (see the dispatch loop
-        # below) — multi-key parallelism happens at the candidate level
-        # here, not the chunk level within one candidate.
+        # db=_db, user_id=current_user.id are now passed on ALL THREE
+        # calls — this used to be unsafe (multiple candidates scored
+        # concurrently, all sharing ONE outer `db` session, and
+        # SQLAlchemy's AsyncSession cannot be touched from more than one
+        # coroutine at a time). That's fixed at the root: every candidate
+        # now gets its OWN isolated session (task_db, opened fresh per
+        # candidate in _score_with_limit below) — there is no longer a
+        # shared session for concurrent candidates to race on, on this
+        # platform or across any number of DIFFERENT users' concurrent
+        # requests (each request already gets its own top-level `db` via
+        # FastAPI's Depends(get_db); this is the SAME pattern one level
+        # down, for concurrency WITHIN a single request). Multi-key pool
+        # parallelism now happens at BOTH levels: different candidates
+        # start on different pre-assigned keys (see the dispatch loop
+        # below), AND any candidate whose key fails mid-flight can now
+        # genuinely retry with another one, safely, on its own session.
         from utils.llm_extraction import extract_candidate_strengths
         jd_focus_skills = (jd_details.get("essential", []) + jd_details.get("good_to_have", []))[:8]
 
@@ -1497,24 +1533,13 @@ async def run_joblens(
             {"essential": jd_details.get("essential", []), "good_to_have": jd_details.get("good_to_have", [])},
             _groq_key, _groq_model,
             ollama_base_url=ollama_base_url, ollama_model=ollama_model, known_terms_hint=known_terms,
-            # db (not user_id) enables the extraction cache — see
-            # models.ExtractionCache's docstring. This directly fixes the
-            # "same resume+JD scores differently on repeat runs" bug: a
-            # genuine repeat now returns the cached result instead of
-            # re-racing LLM providers. user_id stays None deliberately —
-            # multiple candidates are scored concurrently here, and passing
-            # user_id too would also re-enable this function's internal
-            # API-key-pool resolution, which DOES use the shared `db`
-            # session directly and isn't safe under that concurrency (the
-            # cache itself uses its own isolated session, so it has no such
-            # restriction).
-            db=db,
+            db=_db, user_id=current_user.id,
         ))
         questions_task = (
-            _with_groq_limit(generate_questions(final_jd, info["name"], jd_focus_skills, _groq_key, _groq_model, resume_context=cv_text))
+            _with_groq_limit(generate_questions(final_jd, info["name"], jd_focus_skills, _groq_key, _groq_model, resume_context=cv_text, db=_db, user_id=current_user.id))
             if _groq_key else asyncio.sleep(0, result=None)
         )
-        summary_task = _with_groq_limit(generate_resume_summary(cv_text, _groq_key, _groq_model))
+        summary_task = _with_groq_limit(generate_resume_summary(cv_text, _groq_key, _groq_model, db=_db, user_id=current_user.id))
 
         strengths_breakdown, questions_result, resume_summary = await asyncio.gather(
             strengths_task, questions_task, summary_task,
@@ -1583,7 +1608,7 @@ async def run_joblens(
                       "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
                       "application/msword": "doc"}.get(resume_mimetype, "txt")
         resume_uploaded = await upload_file(
-            db, "resumes", current_user.id, session.id, content, resume_mimetype, resume_ext,
+            _db, "resumes", current_user.id, session.id, content, resume_mimetype, resume_ext,
         )
 
         return JobLensCandidate(
@@ -1665,20 +1690,46 @@ async def run_joblens(
     async def _score_with_limit(content: bytes, filename: str, call_groq_key=None, call_groq_model=None):
         async with _score_semaphore:
             try:
-                return await _score_and_build_candidate(content, filename, call_groq_key=call_groq_key, call_groq_model=call_groq_model)
+                # A fresh, short-lived session for THIS candidate only —
+                # not the endpoint's shared `db`. This is the actual fix
+                # for the concurrency gap this function used to work
+                # around by simply not passing db/user_id downstream at
+                # all: SQLAlchemy's AsyncSession is not safe to use from
+                # multiple concurrent coroutines at once, and several of
+                # these run genuinely in parallel (see _score_semaphore
+                # above). Same pattern routers/jobhunt.py's match_resume
+                # already uses per-job for the identical reason. The
+                # outer `db` is only touched afterwards, sequentially,
+                # once every candidate below has finished (see the
+                # record_key_outcome/db.add loops further down) — and
+                # remains untouched by any OTHER concurrent request on
+                # this server regardless of which user sent it, since
+                # FastAPI already hands every incoming request its own
+                # separate `db` via Depends(get_db); this is that same
+                # isolation applied one level down, for the concurrency
+                # WITHIN one request's own candidate batch.
+                async with AsyncSessionLocal() as task_db:
+                    return await _score_and_build_candidate(
+                        content, filename, call_groq_key=call_groq_key, call_groq_model=call_groq_model,
+                        task_db=task_db,
+                    )
             except Exception as e:
                 print(f"Error processing {filename}: {e}")
                 return None
 
     upload_payloads = [(await upload.read(), upload.filename) for upload in cv_files]
 
-    # Resolve a key for EACH candidate SEQUENTIALLY before any concurrent
-    # work starts — key resolution is a DB call, and these candidates are
-    # about to be scored CONCURRENTLY sharing this same session, so every
-    # DB touch for key selection has to happen up front, one at a time,
-    # never inside the concurrent gather itself. This is what gives a
-    # single CandidateLens batch genuine multi-key parallelism: different
-    # candidates draw different pool keys, all processed at the same time.
+    # Resolve a STARTING key for EACH candidate SEQUENTIALLY before any
+    # concurrent work starts, on the endpoint's own `db` — key resolution
+    # is a DB call, and this has to happen before the candidates' own
+    # isolated sessions even exist. This is what gives a batch immediate
+    # multi-key spread from the first attempt: different candidates start
+    # on different pool keys rather than all racing to resolve the same
+    # "least recently used" one the instant the concurrent gather begins.
+    # If a candidate's starting key then fails mid-flight, THAT candidate
+    # (now running on its own isolated task_db, not this one) can retry
+    # with a genuinely different key on its own — see
+    # _score_and_build_candidate's docstring for why that's safe now.
     candidate_key_assignments = []
     for _ in upload_payloads:
         from utils.groq_pool import resolve_groq_key
@@ -1690,16 +1741,15 @@ async def run_joblens(
         for i, (content, filename) in enumerate(upload_payloads)
     ])
 
-    # Report each candidate's key outcome sequentially, now that all
-    # concurrent scoring is done — same reasoning as above, this is a DB
-    # write and must not race with other DB access on this session.
-    for i, candidate in enumerate(scored):
-        _, _, pool_id = candidate_key_assignments[i]
-        if pool_id is None:
-            continue
-        from utils.groq_pool import record_key_outcome
-        succeeded = bool(candidate and (candidate.strengths_breakdown or {}).get("aiPowered"))
-        await record_key_outcome(db, pool_id, success=succeeded)
+    # NOTE: no aggregate record_key_outcome loop here anymore — each
+    # candidate's extract_candidate_strengths/generate_questions/
+    # generate_resume_summary calls now retry across the pool
+    # THEMSELVES (on their own isolated task_db) and report every
+    # individual attempt's real outcome as it happens. Recording success/
+    # failure here against only the STARTING key in
+    # candidate_key_assignments would describe just the first key tried
+    # for that candidate, not whichever key(s) actually ended up serving
+    # it after an internal rotation.
 
     for candidate in scored:
         if candidate:
@@ -2137,7 +2187,7 @@ async def get_questions(
         questions, gen_error = await generate_questions(
             session.jd_text or "", candidate.name,
             candidate.matched_skills or [], groq_key, groq_model,
-            resume_context=resume_context,
+            resume_context=resume_context, db=db, user_id=current_user.id,
         )
     else:
         questions = _default_questions(candidate.name, candidate.matched_skills or [])
@@ -2975,12 +3025,18 @@ def _transcribe_video(video_bytes: bytes, mimetype: str, groq_key: str) -> str:
 
 
 async def _analyze_transcript(
-    transcript: str, questions: list, candidate_name: str, groq_key: str, groq_model: str = DEFAULT_GROQ_MODEL
+    transcript: str, questions: list, candidate_name: str, groq_key: str, groq_model: str = DEFAULT_GROQ_MODEL,
+    db=None, user_id: Optional[int] = None,
 ) -> dict:
+    """Pass db AND user_id together to retry across the shared Groq key
+    pool on ANY failure (utils.groq_pool.call_groq_with_pool_retry) —
+    safe here since the only caller (_run_video_analysis) opens its OWN
+    isolated DB session per candidate, unlike run_joblens's concurrent
+    per-candidate gather (see generate_questions's docstring for why
+    THAT call site can't do this)."""
     from langchain_groq import ChatGroq
     from langchain.schema import HumanMessage
 
-    llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0.2, max_tokens=4000, reasoning_format="hidden", reasoning_effort="low", max_retries=0)
     questions_block = "\n".join(f"{i+1}. {q}" for i, q in enumerate(questions)) or "(not recorded)"
     prompt = f"""You are an experienced hiring manager reviewing a recorded video
 interview transcript for {candidate_name}. Be fair and evidence-based — only
@@ -3017,11 +3073,17 @@ Return ONLY valid JSON, no markdown, no commentary:
     {{"question": "<question text, verbatim from QUESTIONS ASKED>", "answer_transcript": "<the portion of the transcript that answers it, verbatim or lightly trimmed — empty string if not answered>"}}
   ]
 }}"""
-    resp = llm.invoke([HumanMessage(content=prompt)])
+
+    async def _make_call(key, model):
+        llm = ChatGroq(api_key=key, model=model, temperature=0.2, max_tokens=4000, reasoning_format="hidden", reasoning_effort="low", max_retries=0)
+        return llm.invoke([HumanMessage(content=prompt)]).content
+
+    from utils.groq_pool import call_groq_with_pool_retry
+    response_content = await call_groq_with_pool_retry(db, user_id, _make_call, groq_key, groq_model)
     from utils.llm_extraction import _parse_json_response
-    data = _parse_json_response(resp.content)
+    data = _parse_json_response(response_content)
     if data is None:
-        raise ValueError(f"LLM returned unparseable/empty response (length {len(resp.content)})")
+        raise ValueError(f"LLM returned unparseable/empty response (length {len(response_content or '')})")
     return data
 
 
@@ -3056,7 +3118,7 @@ async def _run_video_analysis(candidate_id: int):
             # get_credential() alone doesn't know the Groq Key Pool
             # exists — resolve_groq_key checks personal -> pool -> legacy
             # global, matching what the scoring pipeline already does.
-            from utils.groq_pool import resolve_groq_key, record_key_outcome
+            from utils.groq_pool import resolve_groq_key
             key_resolution = await resolve_groq_key(db, session.user_id)
             groq_key = key_resolution["groq_key"]
             groq_model = key_resolution["model"] or await get_groq_model(db, session.user_id)
@@ -3085,7 +3147,22 @@ async def _run_video_analysis(candidate_id: int):
                 await db.commit()
                 return
 
-            transcript = _transcribe_video(video_bytes, c.video_mimetype, groq_key)
+            # asyncio.to_thread — _transcribe_video does a blocking
+            # requests.post with up to a 180s timeout; called directly
+            # (no to_thread) it would stall the ENTIRE event loop for
+            # every other concurrent request this server is handling for
+            # up to 3 minutes, not just this background task. Also
+            # retries across the shared Groq key pool on ANY failure via
+            # call_groq_with_pool_retry, same as every other Groq call
+            # site in this pass — a transient failure on one key
+            # previously failed transcription outright with 5 other pool
+            # keys never tried.
+            from utils.groq_pool import call_groq_with_pool_retry
+
+            async def _make_transcribe_call(key, _model):
+                return await asyncio.to_thread(_transcribe_video, video_bytes, c.video_mimetype, key)
+
+            transcript = await call_groq_with_pool_retry(db, session.user_id, _make_transcribe_call, groq_key, groq_model)
             if not transcript:
                 c.video_analysis_status = "Failed"
                 c.video_analysis = {"error": "Transcription returned no speech content."}
@@ -3104,7 +3181,8 @@ async def _run_video_analysis(candidate_id: int):
             await db.commit()
 
             analysis = await _analyze_transcript(
-                transcript, c.interview_questions or [], c.name or "the candidate", groq_key, groq_model
+                transcript, c.interview_questions or [], c.name or "the candidate", groq_key, groq_model,
+                db=db, user_id=session.user_id,
             )
 
             c.video_analysis = analysis
@@ -3131,15 +3209,15 @@ async def _run_video_analysis(candidate_id: int):
                     c.video_analysis = analysis  # re-assign so JSON column picks up the added keys
 
             await db.commit()
-            if key_resolution["pool_id"] is not None:
-                await record_key_outcome(db, key_resolution["pool_id"], success=True)
+            # NOTE: no aggregate record_key_outcome here anymore —
+            # _transcribe_video's and _analyze_transcript's calls above
+            # now retry across the pool THEMSELVES and record each
+            # individual attempt's real outcome as it happens (via
+            # call_groq_with_pool_retry). Recording success/failure
+            # against key_resolution["pool_id"] here would describe only
+            # the FIRST key tried, not whichever key(s) actually ended up
+            # serving the request after an internal rotation.
         except Exception as e:
-            if key_resolution is not None and key_resolution.get("pool_id") is not None:
-                try:
-                    from utils.groq_pool import record_key_outcome
-                    await record_key_outcome(db, key_resolution["pool_id"], success=False)
-                except Exception:
-                    pass
             try:
                 if c is not None:
                     c.video_analysis_status = "Failed"

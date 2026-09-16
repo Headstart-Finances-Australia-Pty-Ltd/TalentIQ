@@ -291,12 +291,15 @@ async def generate_questions_ai(
             jd_title=jd.title or "", jd_text=jd.description or "",
             jd_skills=(jd.essential_skills or []) + (jd.good_to_have_skills or []),
             aptitude_subtype=subtype,
+            db=db, user_id=current_user.id,
         )
     except RuntimeError as e:
-        await record_key_outcome(db, key_resolution["pool_id"], success=False)
+        # NOTE: no record_key_outcome call here anymore — generate_ai_
+        # questions now retries across the pool ITSELF and records each
+        # individual attempt's real outcome as it happens; a RuntimeError
+        # reaching here means every distinct key it tried failed, which
+        # each already reported for itself.
         raise HTTPException(502, str(e))
-
-    await record_key_outcome(db, key_resolution["pool_id"], success=True)
 
     saved = []
     for item in generated:
@@ -781,6 +784,7 @@ async def _finalize_assignment(db: AsyncSession, a: TestAssignment, answers_by_q
             grading = await grade_short_answer(
                 q.question_text, q.grading_guideline or "", candidate_answer,
                 key_resolution["groq_key"], key_resolution["model"] or default_model,
+                db=db, user_id=a.user_id,
             )
             test_answer.ai_score = grading["score"]
             test_answer.ai_reasoning = grading["reasoning"]
@@ -797,14 +801,18 @@ async def _finalize_assignment(db: AsyncSession, a: TestAssignment, answers_by_q
         totals[0] += score_for_avg
         totals[1] += 1
 
-    if any_ai_grading_attempted:
-        await record_key_outcome(db, key_resolution["pool_id"], success=any_ai_grading_succeeded)
+    # NOTE: no aggregate record_key_outcome call here anymore —
+    # grade_short_answer now retries across the pool ITSELF (per
+    # question) and records each individual attempt's real outcome as it
+    # happens, rather than one aggregate score/failure attributed to
+    # whichever single key was resolved before the loop even started.
 
     category_scores = {cat: round(total / count, 1) for cat, (total, count) in category_totals.items() if count}
 
     evaluation = await generate_overall_evaluation(
         a.candidate_name, a.role_title, category_scores, per_question_summary,
         key_resolution["groq_key"], key_resolution["model"] or default_model,
+        db=db, user_id=a.user_id,
     )
 
     a.overall_score = evaluation["overall_score"]

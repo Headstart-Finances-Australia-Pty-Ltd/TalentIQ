@@ -270,19 +270,22 @@ async def generate_documents(
 
     resume_data = await generate_tailored_resume(
         resume_text, jd_text, payload.job_title, payload.company_name, cv_result, groq_key, groq_model,
+        db=db, user_id=current_user.id,
     )
     cover_letter = await generate_tailored_cover_letter(
         resume_text, jd_text, payload.job_title, payload.company_name, candidate_name, cv_result, groq_key, groq_model,
+        db=db, user_id=current_user.id,
     )
 
     ai_powered = bool(resume_data.get("ai_powered")) or bool(cover_letter.get("ai_powered"))
-    # Feeds the pool's adaptive routing (utils/groq_pool.record_key_outcome):
-    # a success clears this key's cooldown immediately; a real failure
-    # while a key WAS available starts one, so the next request
-    # automatically routes to a different pool key rather than retrying
-    # the same struggling one. No-ops when pool_id is None (personal/
-    # legacy/no key), so this is always safe to call.
-    await record_key_outcome(db, key_resolution["pool_id"], success=ai_powered or key_resolution["groq_key"] is None)
+    # NOTE: no longer calling record_key_outcome(key_resolution["pool_id"], ...)
+    # here — generate_tailored_resume/cover_letter now retry across the pool
+    # THEMSELVES (utils.groq_pool.call_groq_with_pool_retry) and report each
+    # individual attempt's real outcome as it happens. Recording success/
+    # failure against key_resolution["pool_id"] here would describe the
+    # FIRST key tried, not whichever key(s) actually ended up serving the
+    # request after an internal rotation — actively wrong bookkeeping, not
+    # just redundant.
     clean_resume_data = {k: v for k, v in resume_data.items() if k in EMPTY_RESUME_DATA}
 
     seq_num = await next_sequence_number(db, ApplicationDocument, current_user.id)
