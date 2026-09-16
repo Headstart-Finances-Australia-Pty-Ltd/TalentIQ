@@ -45,7 +45,7 @@ def _mask(key_value: str) -> str:
     return f"...{tail}"
 
 
-async def resolve_groq_key(db: AsyncSession, user_id: int) -> dict:
+async def resolve_groq_key(db: AsyncSession, user_id: int, exclude_personal: bool = False) -> dict:
     """Resolves the Groq key (and optional per-key model override) to use
     for this request.
 
@@ -74,16 +74,33 @@ async def resolve_groq_key(db: AsyncSession, user_id: int) -> dict:
     - "none": nothing configured at all, personal or shared — callers
       fall through to Ollama/keyword matching exactly as before this
       feature existed.
+
+    exclude_personal: skip the personal-key lookup and go straight to the
+    pool. Every retry-on-failure call site in this app (utils.llm_
+    extraction's three retry loops, call_groq_with_pool_retry below) passes
+    True here — a personal key was found on account for a real production
+    bug: a broken/exhausted personal key made this function return that
+    SAME key on every single retry attempt (it has absolute, unconditional
+    priority below), which made every retry loop's "is this genuinely a
+    different key?" check correctly refuse to retry — but SILENTLY, with
+    no failure or log line explaining why an admin's 6-key pool sat
+    completely unused. The personal key still always wins on a FRESH
+    request (this only ever gets passed True from inside a retry that has
+    already tried it once and failed), so a working personal key's
+    behavior is completely unchanged; only a BROKEN one now correctly
+    falls through to the shared pool instead of silently blocking it.
     """
-    r = await db.execute(
-        select(UserAPIKey.key_value).where(
-            UserAPIKey.user_id == user_id,
-            UserAPIKey.service == "groq",
-            UserAPIKey.key_name == "api_key",
-            UserAPIKey.is_global.isnot(True),
+    personal_key = None
+    if not exclude_personal:
+        r = await db.execute(
+            select(UserAPIKey.key_value).where(
+                UserAPIKey.user_id == user_id,
+                UserAPIKey.service == "groq",
+                UserAPIKey.key_name == "api_key",
+                UserAPIKey.is_global.isnot(True),
+            )
         )
-    )
-    personal_key = r.scalar_one_or_none()
+        personal_key = r.scalar_one_or_none()
     if personal_key:
         return {"groq_key": personal_key, "model": None, "source": "personal", "pool_id": None, "key_preview": _mask(personal_key)}
 
@@ -232,11 +249,20 @@ async def call_groq_with_pool_retry(
                 await record_key_outcome(db, pool_id, success=False)
             if db is None or user_id is None or attempt >= max_attempts - 1:
                 break
-            kr = await resolve_groq_key(db, user_id)
+            # exclude_personal=True — a personal key otherwise gets
+            # returned again unconditionally (it has absolute priority in
+            # resolve_groq_key) on every retry, which made the "is this a
+            # different key?" check below correctly refuse to retry but
+            # SILENTLY, hiding a broken personal key blocking the entire
+            # pool with no failure or log line explaining why. See
+            # resolve_groq_key's exclude_personal docstring for the full
+            # story — this was a real bug, not a hypothetical.
+            kr = await resolve_groq_key(db, user_id, exclude_personal=True)
             if kr["groq_key"] and kr["key_preview"] != _mask(key):
                 print(f"  WARNING: call_groq_with_pool_retry — key {_mask(key)} failed ({type(e).__name__}: {str(e)[:150]}), retrying with a different pool key {kr['key_preview']} (attempt {attempt + 2}/{max_attempts})")
                 key, model, pool_id = kr["groq_key"], kr["model"] or model, kr["pool_id"]
                 continue
+            print(f"  WARNING: call_groq_with_pool_retry — key {_mask(key)} failed ({type(e).__name__}: {str(e)[:150]}), NOT retrying: {'no other pool key is currently healthy/configured' if not kr['groq_key'] else 'resolve_groq_key returned the same key again'}")
             break
 
     if last_error is not None:

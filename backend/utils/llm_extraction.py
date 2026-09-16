@@ -803,10 +803,27 @@ Return ONLY valid JSON, no markdown, no commentary:
         # only did this once, for rate limits only, so a JSON-parse
         # failure or timeout on the FIRST key fell straight to the
         # keyword fallback with 5 other keys never even tried.
-        if _pool_id is not None and db is not None and user_id is not None and _outer_attempt < MAX_GROQ_KEY_ATTEMPTS - 1:
+        #
+        # NOTE: the gate below is db/user_id only — NOT "_pool_id is not
+        # None". Gating retry on _pool_id used to mean a PERSONAL key's
+        # failure (pool_id is always None for those) skipped this whole
+        # block and went straight to the keyword fallback, no matter how
+        # many healthy keys sat in the pool: a second, more fundamental
+        # copy of the exact bug resolve_groq_key's exclude_personal
+        # docstring describes. record_key_outcome below is still only
+        # called when _pool_id IS set — there's nothing to record for a
+        # personal key, which is deliberately exempt from pool health
+        # tracking entirely.
+        if db is not None and user_id is not None and _outer_attempt < MAX_GROQ_KEY_ATTEMPTS - 1:
             from utils.groq_pool import record_key_outcome, resolve_groq_key
-            await record_key_outcome(db, _pool_id, success=False)
-            _kr = await resolve_groq_key(db, user_id)
+            if _pool_id is not None:
+                await record_key_outcome(db, _pool_id, success=False)
+            # exclude_personal=True — see resolve_groq_key's docstring:
+            # without this, a broken personal key gets handed back
+            # unconditionally on every retry, silently defeating the
+            # entire point of this retry loop with no log line explaining
+            # why a healthy multi-key pool never got touched.
+            _kr = await resolve_groq_key(db, user_id, exclude_personal=True)
             if _kr["groq_key"] and _kr["key_preview"] != _mask_key_for_log(groq_key):
                 reason = "was rate-limited" if is_rate_limit else "failed"
                 print(f"  WARNING: extract_jd_requirements_categorized — key {_mask_key_for_log(groq_key)} {reason}, retrying with a different pool key {_kr['key_preview']} (attempt {_outer_attempt + 2}/{MAX_GROQ_KEY_ATTEMPTS})")
@@ -814,6 +831,7 @@ Return ONLY valid JSON, no markdown, no commentary:
                 groq_model = _kr["model"] or groq_model
                 _pool_id = _kr["pool_id"] if _kr["source"] == "pool" else None
                 continue
+            print(f"  WARNING: extract_jd_requirements_categorized — key {_mask_key_for_log(groq_key)} failed, NOT retrying: {'no other pool key is currently healthy/configured' if not _kr['groq_key'] else 'resolve_groq_key returned the same key again'}")
         break
 
     return _fallback_jd_requirements(jd_text)
@@ -999,7 +1017,14 @@ async def _extract_resume_facts_impl(
             from utils.groq_pool import record_key_outcome, resolve_groq_key
             if _pool_id is not None:
                 await record_key_outcome(db, _pool_id, success=False)
-            kr = await resolve_groq_key(db, user_id)
+            # exclude_personal=True — see resolve_groq_key's docstring for
+            # why: without this, a broken personal key gets handed back
+            # unconditionally on every retry attempt, and the "is this
+            # genuinely a different key?" check just below silently
+            # refuses to retry with no failure or log line explaining why
+            # — which is exactly how a platform with a healthy 6-key pool
+            # can still fall back to the keyword heuristic on every call.
+            kr = await resolve_groq_key(db, user_id, exclude_personal=True)
             if kr["groq_key"] and kr["key_preview"] != _mask_key_for_log(groq_key):
                 reason = "was rate-limited" if is_rate_limit else "failed"
                 print(f"  WARNING: extract_resume_facts — key {_mask_key_for_log(groq_key)} {reason}, retrying with a different pool key {kr['key_preview']} (attempt {_outer_attempt + 2}/{MAX_GROQ_KEY_ATTEMPTS})")
@@ -1007,6 +1032,7 @@ async def _extract_resume_facts_impl(
                 groq_model = kr["model"] or groq_model
                 _pool_id = kr["pool_id"] if kr["source"] == "pool" else None
                 continue
+            print(f"  WARNING: extract_resume_facts — key {_mask_key_for_log(groq_key)} failed, NOT retrying: {'no other pool key is currently healthy/configured' if not kr['groq_key'] else 'resolve_groq_key returned the same key again'}")
         break
 
     return None
@@ -1419,7 +1445,13 @@ Return ONLY valid JSON, no markdown, no commentary:
 
             retry_assignments = {}
             for i in failed_slots:
-                kr = await resolve_groq_key(db, user_id)
+                # exclude_personal=True — see resolve_groq_key's
+                # docstring: without this, a broken personal key comes
+                # back unconditionally on every retry, which is exactly
+                # why the "elif kr['groq_key']" branch below used to fire
+                # ("no other key available") even with a perfectly
+                # healthy 6-key pool sitting untouched.
+                kr = await resolve_groq_key(db, user_id, exclude_personal=True)
                 if kr["groq_key"] and kr["key_preview"] != _mask_key_for_log(resolved_keys[i][0]):
                     retry_assignments[i] = kr
                     reason = "was rate-limited" if final_results[i][1] else "failed"
