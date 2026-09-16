@@ -540,7 +540,7 @@ async def match_resume(
 
     # Extract the candidate's profile ONCE for this batch — reused across
     # every job below instead of re-extracting the same resume repeatedly.
-    candidate_profile = await extract_candidate_profile(resume.raw_text or "", groq_key, groq_model)
+    candidate_profile = await extract_candidate_profile(resume.raw_text or "", groq_key, groq_model, db=db, user_id=current_user.id)
 
     # Score + draft a cover letter for every job CONCURRENTLY rather than
     # one job fully finishing before the next starts — this used to be a

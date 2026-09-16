@@ -65,6 +65,33 @@ _PROMPT_VERSION = 2
 MAX_GROQ_KEY_ATTEMPTS = 4
 
 
+async def _is_ai_required(db) -> bool:
+    """Reads the admin's global "Require AI matching" toggle (Admin
+    Console > AI Settings — routers/admin.py's /ai-settings endpoints,
+    backed by a SystemSetting row). Off by default (silent keyword
+    fallback, the original behavior). When turned on, every fallback
+    function in this module below returns a clearly-flagged "AI was
+    required but unavailable" result instead of silently computing
+    keyword-substring-matched skills that can look like a real analysis
+    at a glance but aren't one — see this toggle's own docstring in
+    routers/admin.py for the incident that motivated adding it.
+
+    Fails safe (returns False, i.e. fallback allowed) on any DB error or
+    if no session is available — this is a nice-to-have guardrail, not
+    something that should ever be able to break matching entirely if the
+    setting lookup itself has a problem."""
+    if db is None:
+        return False
+    try:
+        from sqlalchemy import select
+        from models.models import SystemSetting
+        r = await db.execute(select(SystemSetting.value).where(SystemSetting.setting_key == "require_ai_matching"))
+        val = r.scalar_one_or_none()
+        return (val or "").strip().lower() == "true"
+    except Exception:
+        return False
+
+
 def _mask_key_for_log(key_value: Optional[str]) -> str:
     """Masked identifier (last 4 chars) for log lines — lets a specific
     request be traced back to which key served it, without ever printing
@@ -834,10 +861,10 @@ Return ONLY valid JSON, no markdown, no commentary:
             print(f"  WARNING: extract_jd_requirements_categorized — key {_mask_key_for_log(groq_key)} failed, NOT retrying: {'no other pool key is currently healthy/configured' if not _kr['groq_key'] else 'resolve_groq_key returned the same key again'}")
         break
 
-    return _fallback_jd_requirements(jd_text)
+    return _fallback_jd_requirements(jd_text, ai_required=await _is_ai_required(db))
 
 
-def _fallback_jd_requirements(jd_text: str, domain_skills: Optional[List[str]] = None) -> dict:
+def _fallback_jd_requirements(jd_text: str, domain_skills: Optional[List[str]] = None, ai_required: bool = False) -> dict:
     from routers.cvintel import DOMAIN_SKILLS as _bank  # reuse the one large curated bank
     from utils.technical_scoring import contains_skill_token
     jd_lower = jd_text.lower()
@@ -850,7 +877,13 @@ def _fallback_jd_requirements(jd_text: str, domain_skills: Optional[List[str]] =
     # those meaningless 2-3 letter fragments listed as essential
     # requirements — and then "matched" against a resume for the same
     # accidental-substring reason.
-    found = [s for s in (domain_skills or _bank) if contains_skill_token(s, jd_lower)]
+    #
+    # ai_required (Admin Console > AI Settings > "Require AI matching"):
+    # when on, skip this keyword-substring step entirely rather than just
+    # trusting the word-boundary fix above — an admin who's turned this
+    # on has explicitly said they'd rather see NO skill list at all than
+    # one a keyword heuristic guessed at, word-boundary bug or not.
+    found = [] if ai_required else [s for s in (domain_skills or _bank) if contains_skill_token(s, jd_lower)]
 
     role_m = re.search(r"(?:job\s*title|role|position\s*title)\s*[:\-]\s*(.+)", jd_text, re.IGNORECASE)
     loc_m = re.search(r"(?:location|based\s*in|located\s*in)\s*[:\-]\s*(.+)", jd_text, re.IGNORECASE)
@@ -897,6 +930,7 @@ def _fallback_jd_requirements(jd_text: str, domain_skills: Optional[List[str]] =
         "max_notice_days": max_notice_days,
         "remote_allowed": remote_allowed,
         "ai_powered": False,
+        **({"ai_required_notice": "AI matching is required by admin policy (Admin Console > AI Settings), but no AI provider (Groq/Ollama) was available for this analysis — skill requirements were not extracted. Contact your administrator."} if ai_required else {}),
     }
 
 
@@ -1171,7 +1205,7 @@ async def _extract_candidate_strengths_impl(
     good_to_have = [s for s in jd_requirements.get("good_to_have", []) if s][:10]
 
     if not essential and not good_to_have:
-        return _fallback_candidate_strengths(resume_text, jd_requirements)
+        return _fallback_candidate_strengths(resume_text, jd_requirements, ai_required=await _is_ai_required(db))
 
     hint_block = ""
     if known_terms_hint:
@@ -1503,7 +1537,7 @@ Return ONLY valid JSON, no markdown, no commentary:
 
     if gth_and_skills is None or any(v is None for v in essential_chunk_verdicts):
         print("  WARNING: extract_candidate_strengths — one or more concurrent chunks failed, falling back to keyword heuristic")
-        return _fallback_candidate_strengths(resume_text, jd_requirements)
+        return _fallback_candidate_strengths(resume_text, jd_requirements, ai_required=await _is_ai_required(db))
 
     ev: list = []
     for chunk_verdicts in essential_chunk_verdicts:
@@ -1570,19 +1604,28 @@ async def extract_candidate_strengths(
 
 async def extract_candidate_strengths_general(
     resume_text: str, groq_key: Optional[str], groq_model: str,
+    db=None, user_id: Optional[int] = None,
 ) -> dict:
     """Same categorized breakdown as extract_candidate_strengths, but not
     evaluated against any specific JD — used by JobHunt, which matches
     ONE resume against MANY jobs: this extraction happens once per batch
     (the categorization is resume-intrinsic and doesn't change per job),
     while essential_matched/gaps per job are computed deterministically
-    against each job's own requirements (see calculate_match)."""
+    against each job's own requirements (see calculate_match).
+
+    This was the one JobHunt-specific extraction call that got missed
+    when multi-key pool retry was added everywhere else in this module —
+    a single bad response from a single key fell straight to the keyword
+    fallback here regardless of how many other pool keys were healthy.
+    Pass db AND user_id together to fix that (safe here: JobHunt gives
+    each job its own isolated DB session — see routers/jobhunt.py's
+    _process_job — so there's no concurrent-session sharing risk)."""
     if groq_key:
         try:
             from langchain_groq import ChatGroq
             from langchain.schema import HumanMessage
+            from utils.groq_pool import call_groq_with_pool_retry
 
-            llm = ChatGroq(api_key=groq_key, model=groq_model, temperature=0, max_tokens=4000, reasoning_format="hidden", reasoning_effort="low", max_retries=0)
             prompt = f"""You are an expert recruiter. Read the resume below and produce an
 evidence-based categorized breakdown. Only credit something the resume
 actually supports — do not invent skills or experience it doesn't contain.
@@ -1600,8 +1643,12 @@ Return ONLY valid JSON, no markdown, no commentary:
   "years_experience": <integer, best estimate>,
   "education": "<highest qualification found, or empty string>"
 }}"""
-            resp = llm.invoke([HumanMessage(content=prompt)])
-            data = _parse_json_response(resp.content)
+            async def _make_call(key, model):
+                llm = ChatGroq(api_key=key, model=model, temperature=0, max_tokens=4000, reasoning_format="hidden", reasoning_effort="low", max_retries=0)
+                return llm.invoke([HumanMessage(content=prompt)]).content
+
+            response_content = await call_groq_with_pool_retry(db, user_id, _make_call, groq_key, groq_model)
+            data = _parse_json_response(response_content)
             if data and data.get("technical_skills") is not None:
                 return {
                     "technical_skills": [s for s in data.get("technical_skills", []) if s][:10],
@@ -1615,10 +1662,26 @@ Return ONLY valid JSON, no markdown, no commentary:
                 }
         except Exception as e:
             print(f"  WARNING: extract_candidate_strengths_general LLM call failed, falling back to keyword heuristic — {type(e).__name__}: {str(e)[:300]}")
-    return _fallback_candidate_strengths(resume_text, {"essential": []})
+    ai_required = await _is_ai_required(db)
+    return _fallback_candidate_strengths(resume_text, {"essential": []}, ai_required=ai_required)
 
 
-def _fallback_candidate_strengths(resume_text: str, jd_requirements: dict) -> dict:
+def _fallback_candidate_strengths(resume_text: str, jd_requirements: dict, ai_required: bool = False) -> dict:
+    if ai_required:
+        # Admin Console > AI Settings > "Require AI matching" is on and no
+        # AI provider was available — return a clearly-empty, clearly-
+        # labeled result instead of a keyword-guessed one. See
+        # _fallback_jd_requirements's matching branch for the reasoning.
+        return {
+            "essential_matched": [], "essential_missing": list(jd_requirements.get("essential", []) or []),
+            "good_to_have_matched": [], "technical_skills": [], "business_skills": [], "soft_skills": [],
+            "significant_experience": [], "certifications_degrees": [], "gaps": list(jd_requirements.get("essential", []) or []),
+            "summary": "AI matching is required by admin policy, but no AI provider (Groq/Ollama) was available — no analysis was performed.",
+            "years_experience": 0, "education": "", "expected_salary": 0, "notice_period_days": -1, "current_location": "",
+            "ai_powered": False,
+            "ai_required_notice": "AI matching is required by admin policy (Admin Console > AI Settings), but no AI provider (Groq/Ollama) was available for this candidate. Contact your administrator.",
+        }
+
     from routers.cvintel import DOMAIN_SKILLS as _bank, _skill_present, _normalize_skill, _normalize_text
     from utils.technical_scoring import contains_skill_token
 

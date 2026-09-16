@@ -1516,3 +1516,62 @@ async def force_delete_table_rows(
         await _generic_cascade_delete(db, table, deleted)
         await db.commit()
     return {"deleted_ids": deleted, "missing_ids": missing}
+
+
+# ── AI SETTINGS ──────────────────────────────────────────────────────────
+# One global toggle, backed by a SystemSetting row (same override pattern
+# as the storage-quota settings above): "require_ai_matching". Read by
+# utils/llm_extraction.py's _is_ai_required() at every fallback decision
+# point in that module.
+#
+# The incident that motivated this: every AI extraction call already had
+# a keyword-heuristic fallback for when Groq/Ollama aren't configured or
+# every attempt fails — reasonable on its face ("never show a hard error,
+# always produce SOMETHING"). In practice, that fallback's substring
+# matching against a large skills bank can surface confident-looking but
+# meaningless matches (e.g. a short/generic token like "go" or "ca"
+# matching purely because it's hiding inside "governance" or
+# "communication", not because the skill is actually present) that are
+# visually indistinguishable from a real AI-verified match at a glance —
+# an admin or recruiter has no obvious signal that what they're looking
+# at wasn't actually AI-analyzed at all. Off by default (silent fallback,
+# unchanged from before this setting existed) so nothing breaks for any
+# existing deployment; an admin who wants stronger guarantees turns it on
+# to replace "confident-looking nonsense" with an explicit "AI was
+# required but unavailable" notice instead.
+SETTING_KEY_REQUIRE_AI = "require_ai_matching"
+
+
+@router.get("/ai-settings")
+async def get_ai_settings(
+    _: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    from models.models import SystemSetting
+    row = (await db.execute(
+        select(SystemSetting).where(SystemSetting.setting_key == SETTING_KEY_REQUIRE_AI)
+    )).scalar_one_or_none()
+    return {"require_ai_matching": (row.value if row else "false").strip().lower() == "true"}
+
+
+class AISettingsIn(BaseModel):
+    require_ai_matching: bool
+
+
+@router.put("/ai-settings")
+async def set_ai_settings(
+    payload: AISettingsIn,
+    _: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    from models.models import SystemSetting
+    row = (await db.execute(
+        select(SystemSetting).where(SystemSetting.setting_key == SETTING_KEY_REQUIRE_AI)
+    )).scalar_one_or_none()
+    value = "true" if payload.require_ai_matching else "false"
+    if row:
+        row.value = value
+    else:
+        db.add(SystemSetting(setting_key=SETTING_KEY_REQUIRE_AI, value=value))
+    await db.commit()
+    return {"require_ai_matching": payload.require_ai_matching}
