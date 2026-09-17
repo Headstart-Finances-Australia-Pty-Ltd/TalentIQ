@@ -20,6 +20,7 @@ UserAPIKey row exactly as before this feature existed. An admin only
 needs to populate the pool if/when they want the adaptive multi-key
 behavior; nothing breaks if they never do.
 """
+import asyncio
 from datetime import datetime, timedelta
 from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -197,6 +198,23 @@ async def record_key_outcome(db: AsyncSession, pool_id: Optional[int], success: 
 # call site in the app).
 MAX_POOL_RETRY_ATTEMPTS = 4
 
+# Base pause before retrying a RATE-LIMITED call on the next pool key,
+# multiplied by the attempt number (so ~1s, 2s, 3s across the retries).
+# Deliberately short: this sits inside a user-facing request, so it trades
+# a couple of seconds of latency for actually getting a real AI result
+# instead of instantly burning every key and falling back to keyword
+# matching. Groq's per-account limits refill on a rolling window, so even
+# a brief pause meaningfully changes the outcome during a burst.
+RATE_LIMIT_BACKOFF_SECONDS = 1.0
+
+
+def _is_rate_limit_error(e: Exception) -> bool:
+    """True for a Groq 429 / rate-limit error, which is worth pausing for
+    (the limit refills on its own), as opposed to an auth failure or bad
+    request, which never resolves by waiting and should rotate instantly."""
+    text = f"{type(e).__name__} {e}".lower()
+    return "ratelimit" in text or "rate limit" in text or "429" in text or "too many requests" in text
+
 
 async def call_groq_with_pool_retry(
     db: Optional[AsyncSession],
@@ -283,6 +301,21 @@ async def call_groq_with_pool_retry(
             if kr["groq_key"] and kr["key_preview"] != _mask(key):
                 print(f"  WARNING: call_groq_with_pool_retry — key {_mask(key)} failed ({type(e).__name__}: {str(e)[:150]}), retrying with a different pool key {kr['key_preview']} (attempt {attempt + 2}/{max_attempts})")
                 key, model, pool_id = kr["groq_key"], kr["model"] or model, kr["pool_id"]
+                # Brief backoff before a rate-limited retry. Every key in
+                # a pool can be simultaneously rate-limited during a burst
+                # (Groq's limits are per account and refill on a rolling
+                # window), in which case retrying the next key INSTANTLY
+                # just burns the whole pool in a fraction of a second and
+                # falls through to the keyword heuristic — precisely the
+                # failure a production log showed: all 6 keys exhausted
+                # inside the same ~1 second. A short, growing pause gives
+                # that rolling window real time to refill, turning a
+                # guaranteed total failure into a very likely success.
+                # Only for rate limits: an auth error or bad request
+                # won't fix itself by waiting, so those still rotate
+                # immediately at full speed.
+                if _is_rate_limit_error(e):
+                    await asyncio.sleep(RATE_LIMIT_BACKOFF_SECONDS * (attempt + 1))
                 continue
             print(f"  WARNING: call_groq_with_pool_retry — key {_mask(key)} failed ({type(e).__name__}: {str(e)[:150]}), NOT retrying: {'no other pool key is currently healthy/configured' if not kr['groq_key'] else 'resolve_groq_key returned the same key again'}")
             break

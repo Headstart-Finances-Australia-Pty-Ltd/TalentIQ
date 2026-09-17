@@ -559,12 +559,21 @@ async def match_resume(
     # jobs) because Groq's per-minute token budget is tight enough that
     # firing 25+ requests at once would mostly just trade "slow but
     # steady" for "a wall of 429s" — see utils/groq_pool's cooldown
-    # handling. A handful of jobs is done in parallel, so this both
-    # actually finishes and stays under the token-per-minute ceiling
-    # (Groq requests naturally take a moment to send/receive, giving the
-    # rolling TPM window continuous headroom to refill in between rather
-    # than everything landing in the same instant).
-    match_semaphore = asyncio.Semaphore(4)
+    # handling.
+    #
+    # Lowered from 4 to 2: each job is NOT one Groq call, it's several
+    # (extract_candidate_strengths alone chunks essential requirements
+    # into multiple concurrent calls, plus the good-to-have/skills call,
+    # plus a cover letter). At 4 jobs in flight that compounds to roughly
+    # 12-20 simultaneous in-flight Groq requests — which is what actually
+    # produced the observed "every key rate limited within the same
+    # second" pattern, since Groq's limits are per ACCOUNT and 6 accounts
+    # can't absorb 20 concurrent requests' worth of tokens at once. Two
+    # jobs in flight still overlaps network waits (the real latency win)
+    # without stampeding the pool. Combined with the per-job key draw
+    # above and SKIP LOCKED in resolve_groq_key, concurrent requests now
+    # genuinely land on DIFFERENT accounts rather than piling onto one.
+    match_semaphore = asyncio.Semaphore(2)
 
     async def _process_job(job: Job):
         async with match_semaphore:
@@ -584,15 +593,41 @@ async def match_resume(
             # in parallel. The outer `db` is only touched afterwards,
             # sequentially, once every task below has finished.
             async with AsyncSessionLocal() as task_db:
+                # Draw a STARTING key per job, from this task's own
+                # session, instead of every job reusing the single
+                # `groq_key` resolved once before this loop. That shared
+                # key was the real cause of "6 healthy keys, all rate
+                # limited at once": with a Semaphore(4), four jobs ran
+                # concurrently and ALL FOUR sent their first request to
+                # the exact same key, so one key took 4x simultaneous
+                # load and tripped Groq's per-account limit immediately,
+                # while five other keys sat completely idle. Rotation
+                # only ever kicked in AFTER that failure — it could
+                # recover, but never prevent, the stampede. Resolving
+                # per job here spreads the FIRST attempt across the pool
+                # (and with resolve_groq_key's SKIP LOCKED row locking,
+                # concurrent draws are guaranteed to land on different
+                # keys rather than racing onto the same one).
+                from utils.groq_pool import resolve_groq_key as _resolve_key
+                _kr = await _resolve_key(task_db, current_user.id)
+                _job_key = _kr["groq_key"] or groq_key
+                _job_model = _kr["model"] or groq_model
+
                 match_data = await calculate_match(
-                    resume.raw_text or "", job_dict, groq_key, candidate_profile, groq_model,
+                    resume.raw_text or "", job_dict, _job_key, candidate_profile, _job_model,
                     ollama_base_url=ollama_base_url, ollama_model=ollama_model,
                     known_terms_hint=known_terms, db=task_db, user_id=current_user.id,
                 )
-            cover = await _generate_cover_letter_ai(
-                resume.raw_text or "", resume.parsed_data or {}, job_dict, groq_key, groq_model,
-                db=task_db, user_id=current_user.id,
-            )
+                # INSIDE the `async with`, not after it — this used to sit
+                # outside the block, meaning it ran against a task_db that
+                # had already been closed by the context manager exiting.
+                # Any pool-key rotation it attempted (its own DB reads and
+                # writes) would raise on a closed session, so a cover
+                # letter could never actually recover from a failed key.
+                cover = await _generate_cover_letter_ai(
+                    resume.raw_text or "", resume.parsed_data or {}, job_dict, _job_key, _job_model,
+                    db=task_db, user_id=current_user.id,
+                )
             return job, match_data, cover
 
     processed = await asyncio.gather(*(_process_job(job) for job in jobs))
